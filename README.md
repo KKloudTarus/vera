@@ -1,5 +1,9 @@
 # VERA
 
+[![CI](https://github.com/KKloudTarus/vera/actions/workflows/ci.yml/badge.svg)](https://github.com/KKloudTarus/vera/actions/workflows/ci.yml)
+[![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
+
 Verified Episodic Recall for Agents. A shared, verified agent-memory platform. VERA owns
 trust, tenancy, provenance, curation, and lifecycle. The knowledge graph and its temporal
 reconciliation are provided by Graphiti, reached only through the `MemoryEngine` port so
@@ -374,5 +378,16 @@ make test-int         # integration tests (needs Docker)
 
 Tests are split by marker: unit (default), `integration` (needs the compose stack), and
 `llm` (needs a real OpenAI key; excluded from the default gate). CI runs the check gate, the
-integration suite against service containers, and an advisory dependency audit on every push
-and pull request. See `SECURITY.md` for the security review.
+integration suite against service containers, and a required dependency audit on every push
+and pull request. See `SECURITY.md` for the security policy and review.
+
+## Contributing
+
+Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, the local
+gate, and pull-request expectations, and [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) for
+community standards. For a security vulnerability, follow [SECURITY.md](SECURITY.md) rather
+than opening a public issue.
+
+## License
+
+Licensed under the [Apache License 2.0](LICENSE). See [NOTICE](NOTICE) for attributions.

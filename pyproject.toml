@@ -4,7 +4,28 @@ version = "0.1.0"
 description = "VERA: Verified Episodic Recall for Agents, a shared verified agent-memory platform."
 readme = "README.md"
 requires-python = ">=3.11"
-authors = [{ name = "VERA Team" }]
+authors = [{ name = "The VERA Authors" }]
+license = { file = "LICENSE" }
+keywords = [
+    "agent-memory",
+    "knowledge-graph",
+    "mcp",
+    "graphiti",
+    "retrieval",
+    "bi-temporal",
+    "llm",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries :: Application Frameworks",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Typing :: Typed",
+]
 dependencies = [
     # --- API + MCP surface ---
     "fastapi>=0.115",
@@ -75,6 +96,12 @@ dev = [
 all = [
     "vera[memory,objectstore,observability,resilience,security,dev]",
 ]
+
+[project.urls]
+Homepage = "https://github.com/KKloudTarus/vera"
+Repository = "https://github.com/KKloudTarus/vera"
+Issues = "https://github.com/KKloudTarus/vera/issues"
+Documentation = "https://github.com/KKloudTarus/vera#readme"
 
 [build-system]
 requires = ["hatchling"]

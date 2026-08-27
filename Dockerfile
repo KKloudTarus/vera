@@ -20,8 +20,9 @@ ENV PATH="/opt/venv/bin:$PATH"
 # tool is baked into the image (e.g. PYSEC-2026-3721 in pip < 26.2).
 RUN pip install --upgrade pip setuptools wheel
 
-# Runtime extras only (no dev toolchain), so the image stays lean.
-COPY pyproject.toml README.md ./
+# Runtime extras only (no dev toolchain), so the image stays lean. LICENSE and NOTICE are
+# copied because the project metadata references the license file.
+COPY pyproject.toml README.md LICENSE NOTICE ./
 COPY src ./src
 RUN pip install ".[memory,objectstore,observability,resilience,security]"
 

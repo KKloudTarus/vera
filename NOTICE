@@ -1,0 +1,9 @@
+VERA (Verified Episodic Recall for Agents)
+Copyright 2026 The VERA Authors
+
+This product includes software developed by the VERA Authors and contributors.
+
+Licensed under the Apache License, Version 2.0. See the LICENSE file for terms.
+
+The knowledge graph and its temporal reconciliation are provided by Graphiti
+(https://github.com/getzep/graphiti), used through the MemoryEngine port.

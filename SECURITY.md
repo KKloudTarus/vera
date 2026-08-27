@@ -1,4 +1,18 @@
-# Security review
+# Security policy
+
+## Reporting a vulnerability
+
+Please do not open a public issue for a security vulnerability. Report it privately through
+GitHub's [private vulnerability reporting](https://github.com/KKloudTarus/vera/security/advisories/new)
+(the "Report a vulnerability" button under the repository's Security tab). Include a
+description, affected versions or commit, and reproduction steps. We aim to acknowledge a
+report within a few working days, agree on a disclosure timeline, and credit reporters who
+wish to be named once a fix is released.
+
+Supported for fixes: the latest commit on `main`. VERA is pre-1.0; there are no maintained
+release branches yet.
+
+## Security review
 
 Scope: the VERA platform (API, MCP server, ingestion worker) and its data plane
 (PostgreSQL, Neo4j, Valkey, S3-compatible object store). This is the review record for
@@ -89,9 +103,12 @@ source and verification so a client can weigh trust.
 
 ## Dependency scan
 
-`pip-audit` runs in CI (advisory). At review time it reported two low-impact advisories in
-transitive/tooling packages (`msgpack`, `pip`), neither a direct VERA dependency; they are
-tracked for routine upgrade. Only open-source, cloud-portable dependencies are used, each
+`pip-audit` runs in CI as a required gate (it fails the build on a known vulnerability).
+The packaging tools (pip, setuptools, wheel) are upgraded before the audit, and the runtime
+container upgrades them in its virtual environment too, so no vulnerable packaging tool
+ships in the image. An advisory with no available fix can be waived only with an explicit
+`--ignore-vuln <ID>` entry and a written justification. Dependabot proposes dependency and
+GitHub Actions updates weekly. Only open-source, cloud-portable dependencies are used, each
 reached through a port, so no single-cloud managed service is a dependency.
 
 ## Follow-ups (tracked, not blocking)
