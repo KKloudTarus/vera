@@ -1,0 +1,64 @@
+# Namespace, shared config, secret template, and the migration job.
+# Apply order: base.yaml (secret filled in first) -> api.yaml / mcp.yaml / worker.yaml.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: vera
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vera-config
+  namespace: vera
+data:
+  VERA_ENVIRONMENT: "prod"
+  VERA_LOG_JSON: "true"
+  VERA_MEMORY__PROVIDER: "graphiti"
+  VERA_MEMORY__EMBEDDER: "openai"
+  VERA_MEMORY__EMBEDDING_MODEL: "text-embedding-3-small"
+  VERA_MEMORY__EMBEDDING_DIM: "1536"
+  VERA_MEMORY__LLM_MODEL: "gpt-4.1-mini"
+  VERA_MEMORY__SMALL_LLM_MODEL: "gpt-4.1-nano"
+  VERA_NEO4J__URI: "bolt://neo4j:7687"
+  VERA_NEO4J__USER: "neo4j"
+  VERA_RESILIENCE__VALKEY_URL: "redis://valkey:6379/0"
+  VERA_OBSERVABILITY__OTLP_ENDPOINT: "http://otel-collector:4317"
+  VERA_OBSERVABILITY__WORKER_METRICS_PORT: "9100"
+  VERA_API__AUTH_REQUIRED: "true"
+---
+# Fill these in before applying (or use an external secret manager / sealed-secrets).
+apiVersion: v1
+kind: Secret
+metadata:
+  name: vera-secrets
+  namespace: vera
+type: Opaque
+stringData:
+  VERA_DB__DSN: "postgresql+asyncpg://vera:CHANGEME@postgres:5432/vera"
+  VERA_NEO4J__PASSWORD: "CHANGEME"
+  VERA_MEMORY__OPENAI_API_KEY: "CHANGEME"
+  VERA_MCP__JWT_SECRET: "CHANGEME"
+  VERA_OBJECTSTORE__ACCESS_KEY: "CHANGEME"
+  VERA_OBJECTSTORE__SECRET_KEY: "CHANGEME"
+---
+# Run migrations once per release before rolling the deployments.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: vera-migrate
+  namespace: vera
+spec:
+  backoffLimit: 3
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: migrate
+          image: ghcr.io/kkloudtarus/vera:latest
+          command: ["alembic", "upgrade", "head"]
+          envFrom:
+            - configMapRef: { name: vera-config }
+            - secretRef: { name: vera-secrets }
+          resources:
+            requests: { cpu: "100m", memory: "256Mi" }
+            limits: { cpu: "500m", memory: "512Mi" }

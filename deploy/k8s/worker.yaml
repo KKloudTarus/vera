@@ -1,0 +1,51 @@
+# Ingestion worker. Per-group serialization is enforced in-process, so replicas are
+# safe. Scale by queue depth with KEDA (below); a CPU HPA is the dependency-free
+# fallback. The worker exposes Prometheus metrics on :9100.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vera-worker
+  namespace: vera
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: vera-worker }
+  template:
+    metadata:
+      labels: { app: vera-worker }
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9100"
+    spec:
+      securityContext:
+        runAsNonRoot: true
+      containers:
+        - name: worker
+          image: ghcr.io/kkloudtarus/vera:latest
+          command: ["python", "-m", "vera.entrypoints.worker.main"]
+          ports: [{ containerPort: 9100, name: metrics }]
+          envFrom:
+            - configMapRef: { name: vera-config }
+            - secretRef: { name: vera-secrets }
+          resources:
+            requests: { cpu: "250m", memory: "512Mi" }
+            limits: { cpu: "2", memory: "1Gi" }
+---
+# Preferred: scale on ingestion queue depth via KEDA (requires the KEDA operator).
+# Falls back to a CPU HPA if KEDA is not installed (delete this and add an HPA instead).
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: vera-worker
+  namespace: vera
+spec:
+  scaleTargetRef:
+    name: vera-worker
+  minReplicaCount: 1
+  maxReplicaCount: 8
+  triggers:
+    - type: postgresql
+      metadata:
+        connectionFromEnv: VERA_DB__DSN
+        query: "SELECT count(*) FROM ingestion_jobs WHERE status = 'pending'"
+        targetQueryValue: "50"

@@ -1,0 +1,62 @@
+# API: stateless HTTP surface. Scales on CPU/load.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vera-api
+  namespace: vera
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app: vera-api }
+  template:
+    metadata:
+      labels: { app: vera-api }
+    spec:
+      securityContext:
+        runAsNonRoot: true
+      containers:
+        - name: api
+          image: ghcr.io/kkloudtarus/vera:latest
+          command: ["uvicorn", "vera.entrypoints.api.main:app", "--host", "0.0.0.0", "--port", "8000"]
+          ports: [{ containerPort: 8000 }]
+          envFrom:
+            - configMapRef: { name: vera-config }
+            - secretRef: { name: vera-secrets }
+          readinessProbe:
+            httpGet: { path: /health/ready, port: 8000 }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /health/live, port: 8000 }
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          resources:
+            requests: { cpu: "250m", memory: "512Mi" }
+            limits: { cpu: "1", memory: "1Gi" }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vera-api
+  namespace: vera
+spec:
+  selector: { app: vera-api }
+  ports: [{ port: 80, targetPort: 8000 }]
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: vera-api
+  namespace: vera
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: vera-api
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target: { type: Utilization, averageUtilization: 70 }

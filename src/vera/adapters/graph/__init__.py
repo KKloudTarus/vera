@@ -83,7 +83,16 @@ def build_graphiti_client(settings: Settings, usage_sink: UsageSink | None = Non
         model=settings.memory.embedding_model,
         sink=usage_sink,
     )
-    embedder = CachingEmbedder(metered)
+    namespace = f"{settings.memory.embedding_model}:{settings.memory.embedding_dim}"
+    l2 = None
+    if settings.resilience.valkey_url:
+        from redis.asyncio import Redis
+
+        from vera.adapters.graph.valkey_cache import ValkeyEmbeddingCache
+
+        client = Redis.from_url(settings.resilience.valkey_url)  # pyright: ignore[reportUnknownMemberType]
+        l2 = ValkeyEmbeddingCache(client)
+    embedder = CachingEmbedder(metered, namespace=namespace, l2=l2)
     return Graphiti(
         uri=settings.neo4j.uri,
         user=settings.neo4j.user,

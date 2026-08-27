@@ -14,6 +14,7 @@ from vera.adapters.connectors.filesystem import FilesystemConnector
 from vera.adapters.connectors.git import GitConnector
 from vera.adapters.connectors.jira import JiraConnector
 from vera.adapters.connectors.pdf import PdfConnector
+from vera.adapters.connectors.registry import build_connector
 from vera.adapters.connectors.slack import SlackConnector
 from vera.shared.types import JsonDict
 
@@ -207,3 +208,16 @@ async def test_pdf_reads_new_files_only(tmp_path: Path) -> None:
     # Re-running with the saved mtime watermark finds no new files.
     batch2 = await connector.fetch_changes(batch.next_cursor)
     assert batch2.records == ()
+
+
+def test_registry_builds_connectors_by_kind() -> None:
+    assert build_connector({"kind": "filesystem", "root": "/srv/x"}).kind == "filesystem"
+    assert build_connector({"kind": "git", "repo_path": "/srv/repo"}).kind == "git"
+    assert (
+        build_connector(
+            {"kind": "confluence", "base_url": "https://c", "space_key": "ENG", "token": "t"}
+        ).kind
+        == "confluence"
+    )
+    with pytest.raises(ValueError, match="unknown connector kind"):
+        build_connector({"kind": "nope"})

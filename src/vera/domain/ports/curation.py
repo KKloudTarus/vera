@@ -140,3 +140,9 @@ class PublishedEpisodeRepository(Protocol):
     ) -> bool:
         """Insert a published episode. False if this dedup_uuid was already published."""
         ...
+
+    async def invalidate(
+        self, *, group_id: str, source_id: str, invalid_at: datetime, superseded_by_source: str
+    ) -> None:
+        """Mark an episode superseded (bi-temporal): set invalid_at and who replaced it."""
+        ...

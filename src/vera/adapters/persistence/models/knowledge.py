@@ -165,6 +165,9 @@ class PublishedEpisodeRow(Base, UUIDPK):
         JSONB, nullable=False, server_default=text("'{}'::jsonb")
     )
     dedup_uuid: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    # Bi-temporal invalidation: set when a newer, contradicting fact supersedes this one.
+    invalid_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    superseded_by_source: Mapped[str | None] = mapped_column(String(512), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

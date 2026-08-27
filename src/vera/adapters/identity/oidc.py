@@ -31,26 +31,37 @@ class OidcTokenVerifier:
     def __init__(
         self,
         *,
-        signing_key: str,
         algorithms: list[str],
         issuer: str,
         audience: str,
+        signing_key: str | None = None,
+        jwks_url: str | None = None,
     ) -> None:
+        if not signing_key and not jwks_url:
+            raise ValueError("OIDC verifier needs a signing_key or a jwks_url")
         self._signing_key = signing_key
         self._algorithms = algorithms
         self._issuer = issuer
         self._audience = audience
+        # Production fetches the issuer's JWKS and caches the keys; a static signing key
+        # is the simple path for local/dev or a symmetric secret.
+        self._jwks: Any = jwt.PyJWKClient(jwks_url) if jwks_url else None
+
+    def _key(self, token: str) -> Any:
+        if self._jwks is not None:
+            return self._jwks.get_signing_key_from_jwt(token).key
+        return self._signing_key
 
     def verify(self, token: str) -> dict[str, Any] | None:
         try:
             return jwt.decode(
                 token,
-                self._signing_key,
+                self._key(token),
                 algorithms=self._algorithms,
                 audience=self._audience,
                 issuer=self._issuer,
             )
-        except jwt.PyJWTError:
+        except (jwt.PyJWTError, jwt.PyJWKClientError):
             return None
 
 

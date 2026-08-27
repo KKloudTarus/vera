@@ -312,3 +312,15 @@ class SqlAlchemyPublishedEpisodeRepository:
         )
         result = await self._session.execute(stmt)
         return result.first() is not None
+
+    async def invalidate(
+        self, *, group_id: str, source_id: str, invalid_at: datetime, superseded_by_source: str
+    ) -> None:
+        await self._session.execute(
+            update(PublishedEpisodeRow)
+            .where(
+                PublishedEpisodeRow.group_id == group_id,
+                PublishedEpisodeRow.source_id == source_id,
+            )
+            .values(invalid_at=invalid_at, superseded_by_source=superseded_by_source)
+        )

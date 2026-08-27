@@ -15,9 +15,14 @@ from uuid import UUID
 
 from vera.domain.curation.policy import may_publish_to
 from vera.domain.curation.state import can_transition
-from vera.domain.curation.trust import TrustAction, action_for_tier, authority_for_tier
+from vera.domain.curation.trust import (
+    TrustAction,
+    TrustTier,
+    action_for_tier,
+    authority_for_tier,
+)
 from vera.domain.knowledge.models import ReviewDecision, VerificationStatus
-from vera.domain.ontology import CURRENT_PIPELINE_VERSIONS
+from vera.domain.ontology import CURRENT_PIPELINE_VERSIONS, is_single_valued
 from vera.domain.ports.curation import ClaimExtractor
 from vera.domain.ports.object_store import ObjectStore
 from vera.domain.ports.unit_of_work import UnitOfWork
@@ -52,10 +57,18 @@ class PublishOutcome:
 
 
 def _payload_for(
-    subject: str | None, predicate: str | None, obj: str | None, statement: str
+    subject: str | None,
+    predicate: str | None,
+    obj: str | None,
+    statement: str,
+    *,
+    supersede: bool = False,
 ) -> JsonDict:
     if subject and predicate and obj:
-        return {"triples": [{"subject": subject, "predicate": predicate, "object": obj}]}
+        triple: JsonDict = {"subject": subject, "predicate": predicate, "object": obj}
+        if supersede:
+            triple["supersede"] = True  # the worker closes the prior edge's valid time
+        return {"triples": [triple]}
     return {"body": statement}
 
 
@@ -192,7 +205,12 @@ class CurationService:
         if claim.status != VerificationStatus.VERIFIED:
             return Err(PolicyRejected("claim must be verified before publishing"))
 
-        if claim.subject and claim.predicate and claim.object:
+        durable_source = f"{claim.group_id}:{claim.id}"
+        tier = await uow.claims.source_trust_tier(claim.id)
+        superseded = False
+        # A contradiction only exists for functional (single-valued) predicates: RUNS_ON
+        # has one current value, DEPENDS_ON may have many.
+        if claim.subject and claim.predicate and claim.object and is_single_valued(claim.predicate):
             conflicts = await uow.claims.find_verified_conflicts(
                 group_id=claim.group_id,
                 subject=claim.subject,
@@ -200,7 +218,8 @@ class CurationService:
                 obj=claim.object,
                 exclude_id=claim.id,
             )
-            if conflicts:
+            if conflicts and (tier is None or tier > TrustTier.CURATED):
+                # Not trusted enough to overwrite verified memory: hold for review.
                 await uow.reviews.add(
                     candidate_claim_id=claim.id,
                     reviewer_principal_id=None,
@@ -214,11 +233,36 @@ class CurationService:
                     to_status=VerificationStatus.DISPUTED,
                 )
                 return Ok(PublishOutcome(status="flagged"))
+            if conflicts:
+                # A trusted, newer value supersedes the old: invalidate the prior episodes
+                # (bi-temporal) so the current view updates while history stays queryable.
+                now = utc_now()
+                for old in conflicts:
+                    old_source = f"{old.group_id}:{old.id}"
+                    await uow.episodes.invalidate(
+                        group_id=old.group_id,
+                        source_id=old_source,
+                        invalid_at=now,
+                        superseded_by_source=durable_source,
+                    )
+                    await uow.claims.transition(
+                        claim_id=old.id,
+                        expected_version=old.version_id,
+                        to_status=VerificationStatus.DISPUTED,
+                    )
+                    await uow.reviews.add(
+                        candidate_claim_id=old.id,
+                        reviewer_principal_id=None,
+                        decision=ReviewDecision.NEEDS_CHANGES.value,
+                        authority="superseded",
+                        notes=f"superseded by claim {claim.id}",
+                    )
+                superseded = True
 
-        durable_source = f"{claim.group_id}:{claim.id}"
         dedup = deterministic_id(durable_source)
-        payload = _payload_for(claim.subject, claim.predicate, claim.object, claim.statement)
-        tier = await uow.claims.source_trust_tier(claim.id)
+        payload = _payload_for(
+            claim.subject, claim.predicate, claim.object, claim.statement, supersede=superseded
+        )
         authority = authority_for_tier(tier) if tier is not None else 0.5
         # Stamp the episode with the ontology and pipeline versions that produced it, so
         # it is reproducible and a reprocess knows exactly what to rebuild under.

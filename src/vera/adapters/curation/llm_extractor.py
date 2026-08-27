@@ -25,12 +25,19 @@ from vera.shared.types import JsonDict
 log = get_logger(__name__)
 
 _SYSTEM = (
-    "You extract factual knowledge about software infrastructure and engineering from "
-    "text. Return only facts stated in the text as (subject, predicate, object) triples. "
-    "Normalize entity names to canonical English (translate non-English names, e.g. "
-    "'Doi nen tang' -> 'platform team'); use lower-case service and resource names and "
-    "UPPER_SNAKE_CASE predicates such as RUNS_ON, DEPENDS_ON, OWNS, DEPLOYED_TO, "
-    "MEMBER_OF, CAUSED, DECIDED_BY. Do not invent facts."
+    "You extract durable, structural knowledge about software systems, teams, and "
+    "engineering decisions from text, as (subject, predicate, object) triples.\n"
+    "Rules:\n"
+    "- Only facts explicitly stated; never infer or invent.\n"
+    "- Prefer relationships between named entities (services, environments, datastores, "
+    "teams, people, repositories, incidents, decisions).\n"
+    "- Skip transient or trivia: env-var names, secret names, badge/CI noise, version "
+    "numbers, marketing lines, and how-to prose.\n"
+    "- Normalize entity names to canonical English (translate non-English names, e.g. "
+    "'Doi nen tang' -> 'platform team'); lower-case service/resource names.\n"
+    "- Use UPPER_SNAKE_CASE predicates, preferring: RUNS_ON, DEPENDS_ON, OWNS, "
+    "DEPLOYED_TO, MEMBER_OF, CAUSED, DECIDED_BY, HAS_STATUS.\n"
+    "- Return at most 15 of the most important triples."
 )
 
 _SCHEMA_HINT = (

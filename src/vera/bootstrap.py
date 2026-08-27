@@ -70,11 +70,17 @@ def build_container(settings: Settings) -> Container:
 
     scopes = ScopeResolutionService(SqlAlchemyScopeResolver(sessionmaker))
     oidc: OidcAuthenticator | None = None
-    if settings.api.oidc_signing_key is not None:
+    if settings.api.oidc_signing_key is not None or settings.api.oidc_jwks_url is not None:
+        signing_key = (
+            settings.api.oidc_signing_key.get_secret_value()
+            if settings.api.oidc_signing_key
+            else None
+        )
         oidc = OidcAuthenticator(
             sessionmaker,
             OidcTokenVerifier(
-                signing_key=settings.api.oidc_signing_key.get_secret_value(),
+                signing_key=signing_key,
+                jwks_url=settings.api.oidc_jwks_url,
                 algorithms=settings.api.oidc_algorithms,
                 issuer=settings.api.oidc_issuer,
                 audience=settings.api.oidc_audience,

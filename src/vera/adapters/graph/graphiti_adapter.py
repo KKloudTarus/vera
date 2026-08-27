@@ -151,8 +151,28 @@ class GraphitiMemoryEngine:
                     uuid=node.uuid, name=node.name, entity_type=_entity_type(node.labels)
                 )
             edge_uuids.extend(e.uuid for e in result.edges)
+            # add_triplet does not reconcile contradictions (that is add_episode's job),
+            # so when curation marks a functional fact as superseding, close the prior
+            # edge's valid time here. Current search then hides it; an as_of query returns it.
+            if triple.get("supersede"):
+                await self._invalidate_prior(gid, subject, predicate, obj)
         return IngestReceipt(
             episode_uuid=episode_uuid, nodes=tuple(nodes.values()), edge_uuids=tuple(edge_uuids)
+        )
+
+    async def _invalidate_prior(self, gid: str, subject: str, predicate: str, obj: str) -> None:
+        await self._client.driver.execute_query(  # pyright: ignore[reportUnknownMemberType]
+            """
+            MATCH (s:Entity {group_id: $gid, name: $subject})
+                  -[e:RELATES_TO {group_id: $gid, name: $predicate}]->(m:Entity)
+            WHERE m.name <> $obj AND e.invalid_at IS NULL
+            SET e.invalid_at = $now
+            """,
+            gid=gid,
+            subject=subject,
+            predicate=predicate,
+            obj=obj,
+            now=utc_now(),
         )
 
     async def search(self, query: GraphQuery) -> Sequence[GraphHit]:
@@ -180,12 +200,15 @@ class GraphitiMemoryEngine:
         config = EDGE_HYBRID_SEARCH_RRF.model_copy(
             update={"limit": query.limit, "reranker_min_score": 0}
         )
+        # Default to "as of now" so a superseded (invalidated) edge is hidden from the
+        # current view; an explicit as_of returns the historical state instead.
+        as_of = query.as_of or utc_now()
         with span("graph.search_group"):
             results = await self._client.search_(
                 query.text,
                 config=config,
                 group_ids=[_graphiti_group(str(group_id))],
-                search_filter=_as_of_filter(query.as_of),
+                search_filter=_as_of_filter(as_of),
             )
         scores = results.edge_reranker_scores or []
         hits: list[GraphHit] = []

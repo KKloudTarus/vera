@@ -52,6 +52,7 @@ class ApiSettings(BaseModel):
     oidc_issuer: str = "https://auth.vera.local"
     oidc_audience: str = "https://api.vera.local"
     oidc_signing_key: SecretStr | None = None
+    oidc_jwks_url: str | None = None  # production: fetch the issuer's rotating keys
     oidc_algorithms: list[str] = Field(default_factory=lambda: ["RS256"])
 
 
@@ -109,6 +110,18 @@ class ResilienceSettings(BaseModel):
     read_timeout_s: float = 10.0
 
 
+class ConnectorsSettings(BaseModel):
+    """Scheduled source connectors.
+
+    ``specs`` is a list of connector configs the worker syncs on a schedule; each is a
+    dict with ``kind``, ``source_id``, ``group_id``, ``interval_s`` and kind-specific
+    fields (e.g. ``root`` for filesystem, ``repo_path`` for git, ``base_url``/``token``
+    for HTTP connectors). Supply it as JSON via ``VERA_CONNECTORS__SPECS``.
+    """
+
+    specs: list[dict[str, object]] = Field(default_factory=lambda: [])
+
+
 class Neo4jSettings(BaseModel):
     """Graphiti's graph backend."""
 
@@ -157,6 +170,7 @@ class Settings(BaseSettings):
     memory: MemorySettings = Field(default_factory=MemorySettings)
     observability: ObservabilitySettings = Field(default_factory=ObservabilitySettings)
     resilience: ResilienceSettings = Field(default_factory=ResilienceSettings)
+    connectors: ConnectorsSettings = Field(default_factory=ConnectorsSettings)
 
     @property
     def is_prod(self) -> bool:

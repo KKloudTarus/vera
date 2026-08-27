@@ -167,9 +167,10 @@ async def test_tier3_requires_review_then_publishes(
     assert jobs == 1
 
 
-async def test_conflicting_claim_is_flagged_not_published(
+async def test_trusted_conflict_supersedes_prior_fact(
     sessionmaker: async_sessionmaker[AsyncSession], tenant: _Fixture
 ) -> None:
+    # RUNS_ON is functional: a newer value from a trusted (tier-1) source supersedes.
     async with SqlAlchemyUnitOfWork(sessionmaker) as uow:
         await uow.use_tenant(tenant.group)
         source_id = await _source(uow, tenant, kind="cmdb", tier=1)
@@ -181,7 +182,7 @@ async def test_conflicting_claim_is_flagged_not_published(
                 external_id="rec-a",
                 body="",
                 knowledge_type="fact_triple",
-                metadata=_triple_meta("paymentapi", "RUNSON", "prodeksmy"),
+                metadata=_triple_meta("paymentapi", "RUNS_ON", "prodeksmy"),
             )
         )
         second = await service.ingest_artifact(
@@ -191,15 +192,65 @@ async def test_conflicting_claim_is_flagged_not_published(
                 external_id="rec-b",
                 body="",
                 knowledge_type="fact_triple",
-                metadata=_triple_meta("paymentapi", "RUNSON", "prodekssg"),
+                metadata=_triple_meta("paymentapi", "RUNS_ON", "prodekssg"),
             )
         )
         await uow.commit()
 
     assert is_ok(first) and first.value.published == 1
-    assert is_ok(second) and second.value.published == 0  # conflict -> flagged
-    episodes, _ = await _counts(sessionmaker, tenant.group)
-    assert episodes == 1
+    assert is_ok(second) and second.value.published == 1  # supersede, not flag
+    async with sessionmaker() as s:
+        total = await s.scalar(
+            text("SELECT count(*) FROM published_episodes WHERE group_id = :g"),
+            {"g": tenant.group},
+        )
+        current = await s.scalar(
+            text(
+                "SELECT count(*) FROM published_episodes WHERE group_id = :g AND invalid_at IS NULL"
+            ),
+            {"g": tenant.group},
+        )
+        superseded = await s.scalar(
+            text(
+                "SELECT count(*) FROM published_episodes "
+                "WHERE group_id = :g AND superseded_by_source IS NOT NULL"
+            ),
+            {"g": tenant.group},
+        )
+    assert total == 2  # history is kept
+    assert current == 1  # only the newest is current
+    assert superseded == 1  # the prior one is marked superseded
+
+
+async def test_multivalued_predicate_keeps_both(
+    sessionmaker: async_sessionmaker[AsyncSession], tenant: _Fixture
+) -> None:
+    # DEPENDS_ON is multi-valued: a different object is not a contradiction.
+    async with SqlAlchemyUnitOfWork(sessionmaker) as uow:
+        await uow.use_tenant(tenant.group)
+        source_id = await _source(uow, tenant, kind="cmdb", tier=1)
+        service = CurationService(uow, StructuredClaimExtractor())
+        for ext, obj in (("dep-a", "postgres"), ("dep-b", "valkey")):
+            await service.ingest_artifact(
+                IngestArtifact(
+                    source_id=source_id,
+                    group_id=tenant.group,
+                    external_id=ext,
+                    body="",
+                    knowledge_type="fact_triple",
+                    metadata=_triple_meta("paymentapi", "DEPENDS_ON", obj),
+                )
+            )
+        await uow.commit()
+
+    async with sessionmaker() as s:
+        current = await s.scalar(
+            text(
+                "SELECT count(*) FROM published_episodes WHERE group_id = :g AND invalid_at IS NULL"
+            ),
+            {"g": tenant.group},
+        )
+    assert current == 2  # both dependencies coexist
 
 
 async def test_publish_requires_verified(

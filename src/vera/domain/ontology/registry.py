@@ -70,6 +70,17 @@ EDGE_TYPE_MAP: dict[tuple[str, str], list[str]] = {
 }
 
 
+# Functional (single-valued) predicates: a subject has at most one current object, so a
+# new, contradicting value supersedes the old one. Multi-valued predicates (DEPENDS_ON,
+# OWNS, MEMBER_OF) can hold several objects at once, so a different value is not a
+# contradiction and both are kept.
+SINGLE_VALUED_PREDICATES: frozenset[str] = frozenset({"RUNS_ON", "DEPLOYED_TO", "HAS_STATUS"})
+
+
+def is_single_valued(predicate: str) -> bool:
+    return predicate.upper() in SINGLE_VALUED_PREDICATES
+
+
 def entity_type_names() -> list[str]:
     return list(ENTITY_TYPES.keys())
 

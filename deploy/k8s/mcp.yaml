@@ -1,0 +1,54 @@
+# MCP server: stateless surface for AI clients. Scales on load.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vera-mcp
+  namespace: vera
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app: vera-mcp }
+  template:
+    metadata:
+      labels: { app: vera-mcp }
+    spec:
+      securityContext:
+        runAsNonRoot: true
+      containers:
+        - name: mcp
+          image: ghcr.io/kkloudtarus/vera:latest
+          command: ["python", "-m", "vera.entrypoints.mcp.main"]
+          ports: [{ containerPort: 8080 }]
+          envFrom:
+            - configMapRef: { name: vera-config }
+            - secretRef: { name: vera-secrets }
+          resources:
+            requests: { cpu: "250m", memory: "512Mi" }
+            limits: { cpu: "1", memory: "1Gi" }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vera-mcp
+  namespace: vera
+spec:
+  selector: { app: vera-mcp }
+  ports: [{ port: 80, targetPort: 8080 }]
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: vera-mcp
+  namespace: vera
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: vera-mcp
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target: { type: Utilization, averageUtilization: 70 }

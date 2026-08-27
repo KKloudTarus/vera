@@ -31,13 +31,25 @@ _SYNC_EVERY_CYCLES = 10
 
 
 def build_sync_registrations(container: Container) -> list[SyncRegistration]:
-    """Connector registrations for scheduled sync.
+    """Connector registrations for scheduled sync, from ``settings.connectors.specs``.
 
-    These are environment-specific (repositories, base URLs, credentials), so they are
-    wired here when configured. Empty by default, so the worker runs with no connectors.
+    Empty by default, so the worker runs with no connectors until configured.
     """
-    _ = container
-    return []
+    from uuid import UUID
+
+    from vera.adapters.connectors.registry import build_connector
+
+    registrations: list[SyncRegistration] = []
+    for spec in container.settings.connectors.specs:
+        registrations.append(
+            SyncRegistration(
+                source_id=UUID(str(spec["source_id"])),
+                group_id=str(spec["group_id"]),
+                connector=build_connector(spec),
+                interval_s=float(str(spec.get("interval_s", 3600))),
+            )
+        )
+    return registrations
 
 
 def _build_scheduler(container: Container) -> SyncScheduler | None:
