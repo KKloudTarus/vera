@@ -83,14 +83,17 @@ jobs:
   security:
     name: Dependency audit
     runs-on: ubuntu-latest
-    # Advisory: report vulnerabilities without blocking merges.
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
           cache: pip
+      # Patch pip itself first (PYSEC-2026-3721 is fixed in pip 26.2).
+      - run: python -m pip install --upgrade pip
       - run: pip install -e ".[all]"
+      # Audit the installed dependencies. --skip-editable drops the local `vera` package,
+      # which is not on PyPI and cannot be audited. Add `--ignore-vuln <ID>` with a written
+      # justification only for an advisory with no available fix.
       - name: pip-audit
-        run: pip-audit --strict
+        run: pip-audit --skip-editable

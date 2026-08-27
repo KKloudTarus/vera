@@ -69,6 +69,8 @@ dev = [
     "testcontainers[postgres,neo4j]>=4.9",
     "detect-secrets>=1.5",
     "pip-audit>=2.7",
+    # pip-audit pulls CacheControl -> msgpack; pin the patched msgpack (PYSEC-2026-3625).
+    "msgpack>=1.2.1",
 ]
 all = [
     "vera[memory,objectstore,observability,resilience,security,dev]",
