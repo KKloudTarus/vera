@@ -29,10 +29,25 @@ Used after a graph wipe, an ontology change, or corruption in a single tenant.
 python -m vera.entrypoints.reprocess <group_id>
 ```
 
-This clears the group's graph and graph maps, then replays its published episodes in
-reference-time order through the normal ingestion path. Canonical entities resolve by
-name and are kept. The result is an equivalent graph: the same facts, retrievable the
-same way. Verify with a search that a known fact returns.
+This clears the group's graph, its graph maps, and its embedding fingerprint, then
+replays its published episodes in reference-time order through the normal ingestion path.
+Canonical entities resolve by name and are kept. The result is an equivalent graph: the
+same facts, retrievable the same way.
+
+The command runs an automated check after the replay: it counts the group's published
+episodes against the rebuilt node and edge maps and fails (non-zero exit, a
+`reprocess.verify_failed` log) if a group that had facts came back with an empty graph
+projection. On success it logs `reprocess.verified` with the counts. Still spot-check a
+search for a known fact.
+
+### Changing the embedding model
+
+A group's vectors must share one embedding dimension. Ingestion records the model and
+dimension a group was first built with and refuses a later write under a different one
+(the job dead-letters with a clear message). To adopt a new embedding model, change
+`VERA_MEMORY__EMBEDDING_MODEL` / `VERA_MEMORY__EMBEDDING_DIM` and reprocess each affected
+group: the rebuild drops the old fingerprint and re-embeds every episode under the new
+model.
 
 ## Full Neo4j loss
 

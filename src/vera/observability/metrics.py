@@ -53,6 +53,10 @@ llm_cost_usd = Counter(
     "Estimated provider cost in USD, by model and operation.",
     labelnames=("model", "operation"),
 )
+queue_backpressure = Counter(
+    "vera_queue_backpressure_events_total",
+    "Times the pending backlog crossed the configured alert threshold.",
+)
 
 
 def record_ingestion(*, result: str, duration_s: float) -> None:
@@ -64,6 +68,18 @@ def record_ingestion(*, result: str, duration_s: float) -> None:
 def set_queue_depth(depths: dict[str, int]) -> None:
     for status in ("pending", "inflight", "dead"):
         queue_depth.labels(status=status).set(depths.get(status, 0))
+
+
+def note_backpressure(depths: dict[str, int], threshold: int) -> bool:
+    """Return whether the pending backlog is over the threshold, counting each crossing so
+    an alert can fire. A threshold of zero disables the check.
+    """
+    if threshold <= 0:
+        return False
+    over = depths.get("pending", 0) > threshold
+    if over:
+        queue_backpressure.inc()
+    return over
 
 
 def record_search(*, duration_s: float, hits: int) -> None:

@@ -22,7 +22,7 @@ from vera.observability import (
     get_logger,
     instrument_worker,
 )
-from vera.observability.metrics import set_queue_depth, start_metrics_server
+from vera.observability.metrics import note_backpressure, set_queue_depth, start_metrics_server
 from vera.shared.errors import VeraError
 
 log = get_logger(__name__)
@@ -138,7 +138,15 @@ async def run() -> None:
                 reclaimed = await container.queue.reclaim_stuck()
                 if reclaimed:
                     log.info("worker.reclaimed", count=reclaimed)
-                set_queue_depth(await container.queue.depth_by_status())
+                depths = await container.queue.depth_by_status()
+                set_queue_depth(depths)
+                threshold = settings.worker.queue_depth_alert_threshold
+                if note_backpressure(depths, threshold):
+                    log.warning(
+                        "worker.queue_backpressure",
+                        pending=depths.get("pending", 0),
+                        threshold=threshold,
+                    )
             if scheduler is not None and cycles % _SYNC_EVERY_CYCLES == 0:
                 outcomes = await scheduler.run_due()
                 if outcomes:

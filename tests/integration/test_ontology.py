@@ -18,7 +18,7 @@ from vera.adapters.persistence.unit_of_work import SqlAlchemyUnitOfWork
 from vera.application.curation import CurationService, IngestArtifact
 from vera.application.queries.search_memory import SearchMemory, SearchMemoryHandler
 from vera.bootstrap import Container
-from vera.entrypoints.reprocess import rebuild_group
+from vera.entrypoints.reprocess import rebuild_group, verify_group
 from vera.entrypoints.worker.lane_pool import LanePool
 from vera.entrypoints.worker.main import run_until_empty
 from vera.shared.ids import uuid7
@@ -143,3 +143,8 @@ async def test_rebuild_reconstructs_an_equivalent_graph(
     replayed = await rebuild_group(container, group)
     assert replayed >= 1
     assert await _find_fact(handler, group, "prodeksmy")
+
+    # The automated post-rebuild check confirms the graph projection was repopulated.
+    report = await verify_group(container, group)
+    assert report.ok
+    assert report.episodes >= 1 and report.edges >= 1

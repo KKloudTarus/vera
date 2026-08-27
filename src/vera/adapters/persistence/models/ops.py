@@ -164,3 +164,21 @@ class RetrievalFeedbackRow(Base):
         Index("ix_feedback_group_time", "group_id", "created_at"),
         {"postgresql_partition_by": "RANGE (created_at)"},
     )
+
+
+class GroupEmbeddingStateRow(Base):
+    """The embedding model and dimension a group's vectors were built with.
+
+    Neo4j vectors must share one dimension per group or similarity breaks, so ingestion
+    records the fingerprint on first write and refuses a later write under a different
+    model or dimension until the group is reprocessed (re-embedded) under the new config.
+    """
+
+    __tablename__ = "group_embedding_state"
+
+    group_id: Mapped[str] = mapped_column(String(256), primary_key=True)
+    embedding_model: Mapped[str] = mapped_column(String(128), nullable=False)
+    embedding_dim: Mapped[int] = mapped_column(Integer, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )

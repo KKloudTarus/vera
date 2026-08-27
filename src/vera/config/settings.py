@@ -61,6 +61,8 @@ class WorkerSettings(BaseModel):
     poll_interval_ms: int = 500
     batch_size: int = 20
     visibility_timeout_s: int = 300
+    # Warn (and count a metric) when the pending backlog exceeds this; 0 disables it.
+    queue_depth_alert_threshold: int = 1000
 
 
 class McpSettings(BaseModel):

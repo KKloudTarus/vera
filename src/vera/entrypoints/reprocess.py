@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+from dataclasses import dataclass
 from typing import cast
 
 from sqlalchemy import text
@@ -24,6 +25,33 @@ from vera.shared.types import GroupId, JsonDict, SourceId
 
 log = get_logger(__name__)
 
+_VERIFY = text(
+    "SELECT "
+    "(SELECT count(*) FROM published_episodes WHERE group_id = :g) AS episodes, "
+    "(SELECT count(*) FROM graph_node_map WHERE group_id = :g) AS nodes, "
+    "(SELECT count(*) FROM graph_edge_map WHERE group_id = :g) AS edges"
+)
+
+
+@dataclass(frozen=True, slots=True)
+class RebuildReport:
+    episodes: int
+    nodes: int
+    edges: int
+
+    @property
+    def ok(self) -> bool:
+        # A group that had facts must come back with a repopulated graph projection.
+        return self.episodes == 0 or self.edges > 0
+
+
+async def verify_group(container: Container, group_id: str) -> RebuildReport:
+    """Check a rebuilt group's graph projection was repopulated from Postgres."""
+    async with container.sessionmaker() as session:
+        row = (await session.execute(_VERIFY, {"g": group_id})).one()
+    return RebuildReport(episodes=int(row.episodes), nodes=int(row.nodes), edges=int(row.edges))
+
+
 _EPISODES = text(
     "SELECT source_id, payload, dedup_uuid FROM published_episodes "
     "WHERE group_id = :g ORDER BY reference_time ASC"
@@ -32,6 +60,9 @@ _CLEAR = (
     text("DELETE FROM graph_edge_map WHERE group_id = :g"),
     text("DELETE FROM graph_node_map WHERE group_id = :g"),
     text("DELETE FROM ingestion_jobs WHERE group_id = :g"),
+    # Drop the embedding fingerprint so the replay re-initializes it at the current model
+    # and dimension: this is how a model change is applied (re-embed the whole group).
+    text("DELETE FROM group_embedding_state WHERE group_id = :g"),
 )
 
 
@@ -69,6 +100,24 @@ async def _run(group_id: str) -> None:
     container = build_container(settings)
     try:
         await rebuild_group(container, group_id)
+        report = await verify_group(container, group_id)
+        if report.ok:
+            log.info(
+                "reprocess.verified",
+                group_id=group_id,
+                episodes=report.episodes,
+                nodes=report.nodes,
+                edges=report.edges,
+            )
+        else:
+            log.error(
+                "reprocess.verify_failed",
+                group_id=group_id,
+                episodes=report.episodes,
+                nodes=report.nodes,
+                edges=report.edges,
+            )
+            raise SystemExit(f"reprocess verification failed for {group_id}")
     finally:
         await dispose_container(container)
 

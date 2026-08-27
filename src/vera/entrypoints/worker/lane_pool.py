@@ -23,6 +23,9 @@ from vera.adapters.persistence.repositories import (
     SqlAlchemyCanonicalEntityRepository,
     SqlAlchemyGraphMapRepository,
 )
+from vera.adapters.persistence.repositories.embedding_state import (
+    SqlAlchemyEmbeddingStateRepository,
+)
 from vera.application.curation.entity_resolver import SemanticEntityResolver
 from vera.bootstrap import Container
 from vera.domain.ports.job_queue import QueuedJob
@@ -136,6 +139,14 @@ class LanePool:
                 async with asyncio.timeout(episode_budget):
                     async with self._container.sessionmaker() as session, session.begin():
                         await session.execute(_GROUP_LOCK, {"g": str(job.group_id)})
+                        # One embedding dimension per group: refuse a write under a changed
+                        # model/dim (job dead-letters with a clear message) until reprocess.
+                        memory = self._container.settings.memory
+                        await SqlAlchemyEmbeddingStateRepository(session).ensure_compatible(
+                            group_id=str(job.group_id),
+                            model=memory.embedding_model,
+                            dim=memory.embedding_dim,
+                        )
                         episode = EpisodeSpec(
                             source_id=SourceId(str(job.source_id)),
                             group_id=GroupId(str(job.group_id)),
