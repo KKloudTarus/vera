@@ -80,3 +80,11 @@ class CanonicalEntityRepository(Protocol):
     ) -> list[tuple[CanonicalEntity, list[float]]]:
         """Entities in the group/type that carry a name embedding, for semantic linking."""
         ...
+
+    async def without_embeddings(self, *, group_id: str) -> list[CanonicalEntity]:
+        """Entities in the group that have no name embedding yet, for a backfill run."""
+        ...
+
+    async def set_embedding(self, *, entity_id: UUID, embedding: list[float]) -> None:
+        """Store a canonical-name embedding on an existing entity."""
+        ...

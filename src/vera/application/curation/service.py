@@ -13,6 +13,7 @@ import hashlib
 from dataclasses import dataclass
 from uuid import UUID
 
+from vera.application.curation.supersede import SupersedePolicy
 from vera.domain.curation.models import ClaimRecord
 from vera.domain.curation.policy import may_publish_to
 from vera.domain.curation.state import can_transition
@@ -23,7 +24,7 @@ from vera.domain.curation.trust import (
     authority_for_tier,
 )
 from vera.domain.knowledge.models import ReviewDecision, VerificationStatus
-from vera.domain.ontology import CURRENT_PIPELINE_VERSIONS, is_single_valued
+from vera.domain.ontology import CURRENT_PIPELINE_VERSIONS
 from vera.domain.ports.curation import ClaimExtractor, ContradictionJudge
 from vera.domain.ports.object_store import ObjectStore
 from vera.domain.ports.unit_of_work import UnitOfWork
@@ -85,14 +86,11 @@ class CurationService:
         self._uow = uow
         self._extractor = extractor
         self._object_store = object_store
-        self._judge = judge
+        self._supersede = SupersedePolicy(judge)
 
     async def _contradicted(self, claim: ClaimRecord) -> list[ClaimRecord]:
-        """Existing verified claims the new claim contradicts.
-
-        Functional predicates: any different value is a contradiction. Otherwise a
-        contradiction judge (if configured) decides which coexisting values are really
-        replaced; without a judge, multi-valued facts coexist.
+        """Existing verified claims the new claim replaces, per the single supersede
+        policy shared by the structured and free-text ingestion paths.
         """
         subject, predicate, obj = claim.subject, claim.predicate, claim.object
         if not (subject and predicate and obj):
@@ -104,19 +102,9 @@ class CurationService:
             obj=obj,
             exclude_id=claim.id,
         )
-        if not conflicts:
-            return []
-        if is_single_valued(predicate):
-            return conflicts
-        if self._judge is None:
-            return []
-        contradicted_objects = await self._judge.contradictions(
-            subject=subject,
-            predicate=predicate,
-            new_object=obj,
-            existing_objects=[c.object for c in conflicts if c.object],
+        return await self._supersede.contradicted(
+            subject=subject, predicate=predicate, new_object=obj, conflicts=conflicts
         )
-        return [c for c in conflicts if c.object in contradicted_objects]
 
     async def ingest_artifact(self, cmd: IngestArtifact) -> Result[IngestResult, DomainError]:
         uow = self._uow

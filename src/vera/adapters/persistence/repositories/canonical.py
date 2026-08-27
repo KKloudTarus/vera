@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from vera.adapters.persistence.models.canonical import CanonicalEntityRow, EntityAliasRow
@@ -112,3 +112,22 @@ class SqlAlchemyCanonicalEntityRepository:
             )
         ).scalars()
         return [(_to_entity(row), [float(x) for x in (row.name_embedding or [])]) for row in rows]
+
+    async def without_embeddings(self, *, group_id: str) -> list[CanonicalEntity]:
+        rows = (
+            await self._session.execute(
+                select(CanonicalEntityRow).where(
+                    CanonicalEntityRow.group_id == group_id,
+                    CanonicalEntityRow.name_embedding.is_(None),
+                )
+            )
+        ).scalars()
+        return [_to_entity(row) for row in rows]
+
+    async def set_embedding(self, *, entity_id: UUID, embedding: list[float]) -> None:
+        await self._session.execute(
+            update(CanonicalEntityRow)
+            .where(CanonicalEntityRow.id == entity_id)
+            .values(name_embedding=embedding)
+        )
+        await self._session.flush()

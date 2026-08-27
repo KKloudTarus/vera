@@ -37,6 +37,14 @@ class EpisodeProvenance:
 
 
 @dataclass(frozen=True, slots=True)
+class LabeledSignals:
+    """A logged rerank signal vector paired with the label feedback later gave it."""
+
+    signals: JsonDict
+    label: int  # +1 for an up vote, -1 for a down vote
+
+
+@dataclass(frozen=True, slots=True)
 class RecentChange:
     source_id: str
     group_id: str
@@ -68,6 +76,18 @@ class RetrievalReadModel(Protocol):
         """Provenance of one published episode, if it is in an allowed scope."""
         ...
 
+    async def calibration_samples(
+        self, *, group_ids: Sequence[str], since: datetime | None = None
+    ) -> list[LabeledSignals]:
+        """Feedback rows that carry a logged signal vector, for rerank calibration."""
+        ...
+
+    async def feedback_groups(self) -> list[str]:
+        """Distinct group_ids that have signal-bearing feedback, so a global calibration
+        run can discover its own scope.
+        """
+        ...
+
 
 class RetrievalFeedbackRepository(Protocol):
     async def record(
@@ -79,4 +99,5 @@ class RetrievalFeedbackRepository(Protocol):
         result_ref: str,
         signal: str,
         weight: float = 1.0,
+        signals: JsonDict | None = None,
     ) -> None: ...

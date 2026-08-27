@@ -164,6 +164,9 @@ class MemorySettings(BaseModel):
     # synonyms/cross-lingual names above the cosine threshold.
     semantic_dedup_enabled: bool = False
     semantic_dedup_threshold: float = 0.86
+    # Below the auto-link threshold, names this similar become candidates an LLM judge
+    # confirms. Kept low, since embedding cosine over bare names is only a coarse blocker.
+    semantic_dedup_block_threshold: float = 0.55
 
 
 class Settings(BaseSettings):

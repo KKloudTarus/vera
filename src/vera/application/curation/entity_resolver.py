@@ -1,9 +1,11 @@
 """SemanticEntityResolver: resolve a surface name to a canonical entity.
 
-Order: exact-normalized, then pg_trgm fuzzy (both in the repository), then an optional
-embedding-similarity step that links synonyms and cross-lingual names ("payment service"
-to "paymentapi") to the same entity. Semantic linking is off unless enabled and an
-embedder is available, and only runs on a miss, so the hot path pays for it rarely.
+Order: exact-normalized, then pg_trgm fuzzy (both in the repository), then, on a miss, an
+optional semantic step. Embedding cosine over bare names is a weak signal (short names put
+sibling services as close as true synonyms, and translations far apart), so it is used two
+ways: a high-similarity match links straight away, and otherwise it blocks a small
+candidate set that an LLM equivalence judge confirms. The semantic step is off unless
+enabled with an embedder, and runs only on a miss, so the hot path rarely pays for it.
 """
 
 from __future__ import annotations
@@ -11,6 +13,7 @@ from __future__ import annotations
 import math
 
 from vera.domain.knowledge.models import CanonicalEntity
+from vera.domain.ports.curation import EntityResolutionJudge
 from vera.domain.ports.embedder import Embedder
 from vera.domain.ports.repositories import CanonicalEntityRepository
 
@@ -28,11 +31,21 @@ def cosine(a: list[float], b: list[float]) -> float:
 
 class SemanticEntityResolver:
     def __init__(
-        self, embedder: Embedder | None, *, threshold: float = 0.86, enabled: bool = False
+        self,
+        embedder: Embedder | None,
+        *,
+        threshold: float = 0.86,
+        block_threshold: float = 0.55,
+        max_candidates: int = 5,
+        enabled: bool = False,
+        judge: EntityResolutionJudge | None = None,
     ) -> None:
         self._embedder = embedder
         self._threshold = threshold
+        self._block_threshold = block_threshold
+        self._max_candidates = max_candidates
         self._enabled = enabled and embedder is not None
+        self._judge = judge
 
     async def resolve_or_create(
         self,
@@ -52,16 +65,15 @@ class SemanticEntityResolver:
             candidates = await repo.candidates_with_embeddings(
                 group_id=group_id, entity_type=entity_type
             )
-            best: CanonicalEntity | None = None
-            best_sim = 0.0
-            for entity, vector in candidates:
-                sim = cosine(embedding, vector)
-                if sim > best_sim:
-                    best, best_sim = entity, sim
-            if best is not None and best_sim >= self._threshold:
-                # A synonym/translation of a known entity: link, do not duplicate.
-                await repo.add_alias(entity_id=best.id, group_id=group_id, alias=name)
-                return best
+            scored = sorted(
+                ((cosine(embedding, vector), entity) for entity, vector in candidates),
+                key=lambda pair: pair[0],
+                reverse=True,
+            )
+            match = await self._match(scored, name=name, entity_type=entity_type)
+            if match is not None:
+                await repo.add_alias(entity_id=match.id, group_id=group_id, alias=name)
+                return match
 
         return await repo.create(
             group_id=group_id,
@@ -70,3 +82,29 @@ class SemanticEntityResolver:
             aliases=[],
             embedding=embedding,
         )
+
+    async def _match(
+        self,
+        scored: list[tuple[float, CanonicalEntity]],
+        *,
+        name: str,
+        entity_type: str,
+    ) -> CanonicalEntity | None:
+        if not scored:
+            return None
+        # A very close name is a synonym/spelling variant: link without spending an LLM call.
+        best_score, best = scored[0]
+        if best_score >= self._threshold:
+            return best
+        if self._judge is None:
+            return None
+        # Otherwise let the judge confirm one of the blocked (plausibly similar) candidates.
+        blocked = [entity for score, entity in scored if score >= self._block_threshold]
+        blocked = blocked[: self._max_candidates]
+        if not blocked:
+            return None
+        by_name = {entity.canonical_name: entity for entity in blocked}
+        chosen = await self._judge.same_entity(
+            name=name, entity_type=entity_type, candidates=list(by_name)
+        )
+        return by_name.get(chosen) if chosen is not None else None

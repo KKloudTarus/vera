@@ -155,6 +155,8 @@ class RetrievalFeedbackRow(Base):
     result_ref: Mapped[str] = mapped_column(String(512), nullable=False)
     signal: Mapped[str] = mapped_column(String(8), nullable=False)
     weight: Mapped[float] = mapped_column(Float, nullable=False, server_default="1.0")
+    # Rerank signal vector shown for this result, logged at feedback time for calibration.
+    signals: Mapped[dict[str, float] | None] = mapped_column(JSONB, nullable=True)
 
     __table_args__ = (
         PrimaryKeyConstraint("id", "created_at", name="pk_retrieval_feedback"),

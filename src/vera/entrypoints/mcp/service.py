@@ -57,6 +57,8 @@ class VeraMcpService:
                 "verification": h.verification,
                 "authority": h.authority,
                 "valid_at": h.valid_at.isoformat() if h.valid_at else None,
+                # Echoed back on feedback so the vote can be tied to the signals shown.
+                "signals": dict(h.signals),
             }
             for h in hits
         ]
@@ -136,7 +138,15 @@ class VeraMcpService:
         claim_ids = result.value.claim_ids if is_ok(result) else ()
         return {"status": "proposed", "claim_ids": list(claim_ids)}
 
-    async def feedback(self, principal_id: UUID, *, result_ref: str, signal: str) -> dict[str, Any]:
+    async def feedback(
+        self,
+        principal_id: UUID,
+        *,
+        result_ref: str,
+        signal: str,
+        query: str = "",
+        signals: dict[str, float] | None = None,
+    ) -> dict[str, Any]:
         if signal not in {"up", "down"}:
             return {"status": "rejected", "reason": "signal must be 'up' or 'down'"}
         scope = await self._resolve(principal_id)
@@ -145,9 +155,11 @@ class VeraMcpService:
             await uow.feedback.record(
                 group_id=scope.personal_group_id,
                 principal_id=principal_id,
-                query="",
+                query=query,
                 result_ref=result_ref,
                 signal=signal,
+                # The signal vector search returned for this result, for later calibration.
+                signals=signals,
             )
             await uow.commit()
         return {"status": "recorded"}

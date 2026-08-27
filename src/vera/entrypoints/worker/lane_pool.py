@@ -73,7 +73,9 @@ class LanePool:
         self._resolver = SemanticEntityResolver(
             container.embedder,
             threshold=container.settings.memory.semantic_dedup_threshold,
+            block_threshold=container.settings.memory.semantic_dedup_block_threshold,
             enabled=container.settings.memory.semantic_dedup_enabled,
+            judge=container.entity_judge,
         )
 
     def start(self) -> None:

@@ -44,7 +44,11 @@ class CanonicalEntityRow(Base, UUIDPK, Timestamps):
     canonical_name: Mapped[str] = mapped_column(String(512), nullable=False)
     summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Canonical-name embedding for semantic (cross-lingual/synonym) alias linking.
-    name_embedding: Mapped[list[float] | None] = mapped_column(JSONB, nullable=True)
+    # none_as_null so a missing embedding is SQL NULL, not JSON 'null': the backfill
+    # query (IS NULL) and the candidate filter (IS NOT NULL) both depend on that.
+    name_embedding: Mapped[list[float] | None] = mapped_column(
+        JSONB(none_as_null=True), nullable=True
+    )
     attributes: Mapped[dict[str, Any]] = mapped_column(
         JSONB, nullable=False, server_default=text("'{}'::jsonb")
     )

@@ -11,8 +11,9 @@ from __future__ import annotations
 import asyncio
 import math
 import time
+from collections.abc import Mapping
 from contextlib import AsyncExitStack
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 
 from vera.domain.ports.memory_engine import GraphHit, GraphQuery, MemoryEngine
@@ -22,6 +23,10 @@ from vera.observability.cost import UsageContext, reset_usage_context, set_usage
 from vera.observability.metrics import record_search
 from vera.shared.time import utc_now
 from vera.shared.types import GroupId
+
+
+def _empty_signals() -> dict[str, float]:
+    return {}
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,6 +46,9 @@ class RankedHit:
     authority: float
     valid_at: datetime | None
     invalid_at: datetime | None
+    # The normalized stage-2 signal values behind this hit's score. Logged with any
+    # feedback the caller gives so rerank weights can be calibrated from real labels.
+    signals: Mapping[str, float] = field(default_factory=_empty_signals)
 
 
 _VERIFICATION_SCORE = {"human_verified": 1.0, "auto": 0.8, "pending": 0.5}
@@ -173,6 +181,14 @@ class SearchMemoryHandler:
             confidence = prov.confidence if prov else 1.0
             up, down = feedback.get(hit.edge_uuid or "", (0, 0))
             fb_score = (up + 1) / (up + down + 2)  # Laplace-smoothed, defaults to 0.5
+            signals = {
+                "relevance": norm_rel,
+                "authority": authority,
+                "verification": ver_score,
+                "recency": recency,
+                "feedback": fb_score,
+                "confidence": confidence,
+            }
             score = (
                 w.relevance * norm_rel
                 + w.authority * authority
@@ -192,6 +208,7 @@ class SearchMemoryHandler:
                         authority=authority,
                         valid_at=hit.valid_at,
                         invalid_at=hit.invalid_at,
+                        signals=signals,
                     ),
                 )
             )

@@ -110,3 +110,63 @@ async def test_missing_embedder_falls_back_to_create() -> None:
         repo, group_id="g", name="paymentapi", entity_type="Service"
     )
     assert a.canonical_name == "paymentapi"
+
+
+class _FakeJudge:
+    def __init__(self, match: str | None) -> None:
+        self._match = match
+        self.calls: list[list[str]] = []
+
+    async def same_entity(
+        self, *, name: str, entity_type: str, candidates: list[str]
+    ) -> str | None:
+        self.calls.append(candidates)
+        return self._match if self._match in candidates else None
+
+
+# "billing" sits between the block (0.55) and auto-link (0.86) thresholds: cosine ~0.70.
+_MID = {"paymentapi": [1.0, 0.0, 0.0], "billing": [0.7, 0.71, 0.0]}
+
+
+@pytest.mark.asyncio
+async def test_judge_confirms_a_blocked_candidate() -> None:
+    repo = _FakeRepo()
+    judge = _FakeJudge("paymentapi")
+    resolver = SemanticEntityResolver(
+        _FakeEmbedder(_MID), threshold=0.86, block_threshold=0.55, enabled=True, judge=judge
+    )
+    a = await resolver.resolve_or_create(
+        repo, group_id="g", name="paymentapi", entity_type="Service"
+    )
+    # "billing"'s embedding is only ~0.70 from paymentapi: too far to auto-link, but the
+    # judge is asked and says it is the same entity, so it links.
+    b = await resolver.resolve_or_create(repo, group_id="g", name="billing", entity_type="Service")
+    assert b.id == a.id
+    assert judge.calls == [["paymentapi"]]  # the blocked candidate was offered
+
+
+@pytest.mark.asyncio
+async def test_judge_rejects_all_candidates_creates_new() -> None:
+    repo = _FakeRepo()
+    judge = _FakeJudge(None)
+    resolver = SemanticEntityResolver(
+        _FakeEmbedder(_MID), threshold=0.86, block_threshold=0.55, enabled=True, judge=judge
+    )
+    a = await resolver.resolve_or_create(
+        repo, group_id="g", name="paymentapi", entity_type="Service"
+    )
+    b = await resolver.resolve_or_create(repo, group_id="g", name="billing", entity_type="Service")
+    assert b.id != a.id  # judge said not the same -> separate entity
+
+
+@pytest.mark.asyncio
+async def test_no_judge_below_threshold_does_not_merge() -> None:
+    repo = _FakeRepo()
+    resolver = SemanticEntityResolver(
+        _FakeEmbedder(_MID), threshold=0.86, block_threshold=0.55, enabled=True, judge=None
+    )
+    a = await resolver.resolve_or_create(
+        repo, group_id="g", name="paymentapi", entity_type="Service"
+    )
+    b = await resolver.resolve_or_create(repo, group_id="g", name="billing", entity_type="Service")
+    assert b.id != a.id  # a mid-similarity name is not merged without a judge

@@ -103,6 +103,7 @@ def make_container(
             sync_state=SqlAlchemySyncStateStore(sessionmaker),
             extractor=StructuredClaimExtractor(),
             judge=None,
+            entity_judge=None,
             embedder=None,
         )
 

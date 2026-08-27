@@ -100,9 +100,18 @@ def build_server(container: Container, settings: Settings) -> MCPServer:
         )
 
     @server.tool()
-    async def memory_feedback(result_ref: str, signal: str) -> dict[str, Any]:
-        """Give feedback on a result. `signal` is 'up' or 'down'."""
-        return await service.feedback(_principal_id(), result_ref=result_ref, signal=signal)
+    async def memory_feedback(
+        result_ref: str,
+        signal: str,
+        query: str = "",
+        signals: dict[str, float] | None = None,
+    ) -> dict[str, Any]:
+        """Give feedback on a result. `signal` is 'up' or 'down'. Pass back the `query`
+        and the result's `signals` from search so the vote can calibrate ranking.
+        """
+        return await service.feedback(
+            _principal_id(), result_ref=result_ref, signal=signal, query=query, signals=signals
+        )
 
     return server
 

@@ -232,6 +232,68 @@ class _FakeJudge:
         return {o for o in existing_objects if o in self._contradicted}
 
 
+class _TextTripleExtractor:
+    """Stands in for the LLM extractor: turns a free-text body into one triple whose
+    object is the body. Lets a text-typed ingest exercise the same publish path.
+    """
+
+    async def extract(
+        self, *, body: str, knowledge_type: str, metadata: object
+    ) -> list[ExtractedClaim]:
+        obj = body.strip()
+        return [
+            ExtractedClaim(
+                statement=f"paymentapi DEPENDS_ON {obj}",
+                subject="paymentapi",
+                predicate="DEPENDS_ON",
+                object=obj,
+            )
+        ]
+
+
+async def test_free_text_path_supersedes_through_the_same_judge(
+    sessionmaker: async_sessionmaker[AsyncSession], tenant: _Fixture
+) -> None:
+    # Free text (knowledge_type="text") extracted into triples flows through the same
+    # supersede policy and judge as structured triples: one contradiction authority.
+    judge = _FakeJudge({"postgres"})
+    async with SqlAlchemyUnitOfWork(sessionmaker) as uow:
+        await uow.use_tenant(tenant.group)
+        source_id = await _source(uow, tenant, kind="confluence", tier=1)
+        svc = CurationService(uow, _TextTripleExtractor(), None, judge)
+        for ext, body in (("t1", "postgres"), ("t2", "redis")):
+            await svc.ingest_artifact(
+                IngestArtifact(
+                    source_id=source_id,
+                    group_id=tenant.group,
+                    external_id=ext,
+                    body=body,
+                    knowledge_type="text",
+                )
+            )
+        await svc.ingest_artifact(
+            IngestArtifact(
+                source_id=source_id,
+                group_id=tenant.group,
+                external_id="t3",
+                body="valkey",
+                knowledge_type="text",
+            )
+        )
+        await uow.commit()
+
+    async with sessionmaker() as s:
+        current = await s.scalar(
+            text(
+                "SELECT string_agg(payload->'triples'->0->>'object', ',') "
+                "FROM published_episodes WHERE group_id = :g AND invalid_at IS NULL"
+            ),
+            {"g": tenant.group},
+        )
+    assert current is not None
+    assert set(current.split(",")) == {"redis", "valkey"}  # postgres superseded by the judge
+
+
 async def test_judge_supersedes_only_the_contradicted_multivalued_object(
     sessionmaker: async_sessionmaker[AsyncSession], tenant: _Fixture
 ) -> None:

@@ -29,7 +29,11 @@ from vera.application.identity import ScopeResolutionService
 from vera.application.queries.search_memory import RerankWeights
 from vera.config.settings import Settings
 from vera.domain.ports.connectors import SyncStateStore
-from vera.domain.ports.curation import ClaimExtractor, ContradictionJudge
+from vera.domain.ports.curation import (
+    ClaimExtractor,
+    ContradictionJudge,
+    EntityResolutionJudge,
+)
 from vera.domain.ports.embedder import Embedder
 from vera.domain.ports.identity import Authenticator
 from vera.domain.ports.job_queue import JobQueue
@@ -56,6 +60,7 @@ class Container:
     sync_state: SyncStateStore
     extractor: ClaimExtractor
     judge: ContradictionJudge | None
+    entity_judge: EntityResolutionJudge | None
     embedder: Embedder | None
 
 
@@ -103,13 +108,16 @@ def build_container(settings: Settings) -> Container:
     # structured metadata (triples/claims) is ingested.
     extractor: ClaimExtractor
     judge: ContradictionJudge | None = None
+    entity_judge: EntityResolutionJudge | None = None
     if settings.memory.openai_api_key is not None:
+        from vera.adapters.curation.entity_judge import LlmEntityResolutionJudge
         from vera.adapters.curation.judge import LlmContradictionJudge
         from vera.adapters.curation.llm_extractor import LlmClaimExtractor
 
         key = settings.memory.openai_api_key.get_secret_value()
         extractor = LlmClaimExtractor(api_key=key, model=settings.memory.small_llm_model)
         judge = LlmContradictionJudge(api_key=key, model=settings.memory.small_llm_model)
+        entity_judge = LlmEntityResolutionJudge(api_key=key, model=settings.memory.small_llm_model)
     else:
         from vera.adapters.curation.extractor import StructuredClaimExtractor
 
@@ -129,6 +137,7 @@ def build_container(settings: Settings) -> Container:
         sync_state=SqlAlchemySyncStateStore(sessionmaker),
         extractor=extractor,
         judge=judge,
+        entity_judge=entity_judge,
         embedder=embedder,
     )
 

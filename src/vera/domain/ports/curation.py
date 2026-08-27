@@ -50,6 +50,16 @@ class ContradictionJudge(Protocol):
         ...
 
 
+class EntityResolutionJudge(Protocol):
+    async def same_entity(
+        self, *, name: str, entity_type: str, candidates: list[str]
+    ) -> str | None:
+        """Which candidate canonical name refers to the same real-world entity as ``name``,
+        or None. Resolves synonyms, abbreviations, and cross-lingual names that embedding
+        similarity over bare names cannot separate on its own."""
+        ...
+
+
 class KnowledgeSourceRepository(Protocol):
     async def create(
         self,

@@ -29,6 +29,7 @@ class RankedHitOut(BaseModel):
     source_id: str | None = None
     verification: str | None = None
     authority: float = 0.5
+    signals: dict[str, float] = Field(default_factory=dict)
 
 
 @router.post("/search", response_model=list[RankedHitOut], summary="Search memory")
@@ -55,6 +56,7 @@ async def search(
             source_id=h.source_id,
             verification=h.verification,
             authority=h.authority,
+            signals=dict(h.signals),
         )
         for h in hits
     ]

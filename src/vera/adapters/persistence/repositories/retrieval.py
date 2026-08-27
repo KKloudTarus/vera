@@ -9,6 +9,7 @@ repository writes under the request's tenant.
 from __future__ import annotations
 
 from collections.abc import Sequence
+from datetime import datetime
 from uuid import UUID
 
 from sqlalchemy import func, select
@@ -17,7 +18,13 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from vera.adapters.persistence.models.canonical import GraphEdgeMapRow
 from vera.adapters.persistence.models.knowledge import PublishedEpisodeRow
 from vera.adapters.persistence.models.ops import RetrievalFeedbackRow
-from vera.domain.ports.retrieval import EpisodeProvenance, HitProvenance, RecentChange
+from vera.domain.ports.retrieval import (
+    EpisodeProvenance,
+    HitProvenance,
+    LabeledSignals,
+    RecentChange,
+)
+from vera.shared.types import JsonDict
 
 
 def _as_uuids(values: Sequence[str]) -> list[UUID]:
@@ -140,6 +147,34 @@ class SqlAlchemyRetrievalReadModel:
             payload=row.payload,
         )
 
+    async def calibration_samples(
+        self, *, group_ids: Sequence[str], since: datetime | None = None
+    ) -> list[LabeledSignals]:
+        if not group_ids:
+            return []
+        stmt = select(RetrievalFeedbackRow.signals, RetrievalFeedbackRow.signal).where(
+            RetrievalFeedbackRow.group_id.in_(list(group_ids)),
+            RetrievalFeedbackRow.signals.is_not(None),
+        )
+        if since is not None:
+            stmt = stmt.where(RetrievalFeedbackRow.created_at >= since)
+        async with self._session_factory() as session:
+            rows = (await session.execute(stmt)).all()
+        return [
+            LabeledSignals(signals=signals, label=1 if signal == "up" else -1)
+            for signals, signal in rows
+        ]
+
+    async def feedback_groups(self) -> list[str]:
+        stmt = (
+            select(RetrievalFeedbackRow.group_id)
+            .where(RetrievalFeedbackRow.signals.is_not(None))
+            .distinct()
+        )
+        async with self._session_factory() as session:
+            rows = (await session.execute(stmt)).all()
+        return [group_id for (group_id,) in rows]
+
 
 class SqlAlchemyRetrievalFeedbackRepository:
     def __init__(self, session: AsyncSession) -> None:
@@ -154,6 +189,7 @@ class SqlAlchemyRetrievalFeedbackRepository:
         result_ref: str,
         signal: str,
         weight: float = 1.0,
+        signals: JsonDict | None = None,
     ) -> None:
         self._session.add(
             RetrievalFeedbackRow(
@@ -163,6 +199,7 @@ class SqlAlchemyRetrievalFeedbackRepository:
                 result_ref=result_ref,
                 signal=signal,
                 weight=weight,
+                signals=signals,
             )
         )
         await self._session.flush()
