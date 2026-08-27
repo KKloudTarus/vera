@@ -89,8 +89,9 @@ jobs:
         with:
           python-version: "3.11"
           cache: pip
-      # Patch pip itself first (PYSEC-2026-3721 is fixed in pip 26.2).
-      - run: python -m pip install --upgrade pip
+      # Patch the packaging tools first: advisories land in pip/setuptools/wheel that are
+      # not part of VERA's shipped surface (the runtime image upgrades these too).
+      - run: python -m pip install --upgrade pip setuptools wheel
       - run: pip install -e ".[all]"
       # Audit the installed dependencies. --skip-editable drops the local `vera` package,
       # which is not on PyPI and cannot be audited. Add `--ignore-vuln <ID>` with a written
