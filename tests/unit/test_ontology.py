@@ -43,7 +43,12 @@ def test_pipeline_versions_record_every_stage() -> None:
     assert versions["ontology"] == str(ONTOLOGY_VERSION)
 
 
+class _FakeEpisode:
+    uuid = "episode-1"
+
+
 class _FakeResults:
+    episode: ClassVar[_FakeEpisode] = _FakeEpisode()
     nodes: ClassVar[list[Any]] = []
     edges: ClassVar[list[Any]] = []
 

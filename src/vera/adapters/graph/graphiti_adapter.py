@@ -85,6 +85,10 @@ class GraphitiMemoryEngine:
 
     async def _ingest_text(self, episode: EpisodeSpec, episode_uuid: str) -> IngestReceipt:
         source = _EPISODE_TYPES.get(episode.knowledge_type, EpisodeType.text)
+        # add_episode treats a non-null ``uuid`` as an existing episode to update and
+        # fails if it is absent, so a new episode is created with uuid=None and its
+        # generated uuid is returned. Re-ingestion is guarded upstream (queue dedup,
+        # content-idempotent curation) and a rebuild wipes the group first.
         with span("graph.add_episode", knowledge_type=episode.knowledge_type):
             results = await self._client.add_episode(
                 name=str(episode.source_id),
@@ -93,7 +97,6 @@ class GraphitiMemoryEngine:
                 reference_time=episode.reference_time,
                 source=source,
                 group_id=_graphiti_group(str(episode.group_id)),
-                uuid=episode_uuid,
                 entity_types=ENTITY_TYPES,
                 edge_types=EDGE_TYPES,
                 edge_type_map=EDGE_TYPE_MAP,
@@ -103,7 +106,7 @@ class GraphitiMemoryEngine:
             for n in results.nodes
         )
         return IngestReceipt(
-            episode_uuid=episode_uuid,
+            episode_uuid=results.episode.uuid,
             nodes=nodes,
             edge_uuids=tuple(e.uuid for e in results.edges),
         )

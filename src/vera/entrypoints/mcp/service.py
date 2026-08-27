@@ -10,7 +10,6 @@ from __future__ import annotations
 from typing import Any
 from uuid import UUID
 
-from vera.adapters.curation.extractor import StructuredClaimExtractor
 from vera.adapters.persistence.unit_of_work import SqlAlchemyUnitOfWork
 from vera.application.curation import CurationService, IngestArtifact
 from vera.application.queries.search_memory import SearchMemory, SearchMemoryHandler
@@ -114,7 +113,7 @@ class VeraMcpService:
             source_id = await uow.sources.get_or_create_agent(
                 workspace_id=scope.primary_workspace_id
             )
-            service = CurationService(uow, StructuredClaimExtractor())
+            service = CurationService(uow, self._container.extractor)
             result = await service.ingest_artifact(
                 IngestArtifact(
                     source_id=source_id,

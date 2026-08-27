@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
+from vera.adapters.curation.extractor import StructuredClaimExtractor
 from vera.adapters.identity import ApiKeyAuthenticator, CompositeAuthenticator
 from vera.adapters.objectstore.s3_adapter import S3ObjectStore
 from vera.adapters.persistence.repositories import SqlAlchemyRetrievalReadModel
@@ -100,6 +101,7 @@ def make_container(
             scopes=ScopeResolutionService(SqlAlchemyScopeResolver(sessionmaker)),
             usage_sink=SqlAlchemyUsageSink(sessionmaker),
             sync_state=SqlAlchemySyncStateStore(sessionmaker),
+            extractor=StructuredClaimExtractor(),
         )
 
     return _make

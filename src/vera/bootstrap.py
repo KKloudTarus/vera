@@ -28,6 +28,7 @@ from vera.adapters.queue.postgres_queue import PostgresJobQueue
 from vera.application.identity import ScopeResolutionService
 from vera.config.settings import Settings
 from vera.domain.ports.connectors import SyncStateStore
+from vera.domain.ports.curation import ClaimExtractor
 from vera.domain.ports.identity import Authenticator
 from vera.domain.ports.job_queue import JobQueue
 from vera.domain.ports.memory_engine import MemoryEngine
@@ -51,6 +52,7 @@ class Container:
     scopes: ScopeResolutionService
     usage_sink: UsageSink | None
     sync_state: SyncStateStore
+    extractor: ClaimExtractor
 
 
 def build_container(settings: Settings) -> Container:
@@ -82,6 +84,21 @@ def build_container(settings: Settings) -> Container:
         api_key=ApiKeyAuthenticator(sessionmaker), oidc=oidc
     )
 
+    # LLM extraction turns free text into trust-tiered claims; without a key, only
+    # structured metadata (triples/claims) is ingested.
+    extractor: ClaimExtractor
+    if settings.memory.openai_api_key is not None:
+        from vera.adapters.curation.llm_extractor import LlmClaimExtractor
+
+        extractor = LlmClaimExtractor(
+            api_key=settings.memory.openai_api_key.get_secret_value(),
+            model=settings.memory.small_llm_model,
+        )
+    else:
+        from vera.adapters.curation.extractor import StructuredClaimExtractor
+
+        extractor = StructuredClaimExtractor()
+
     return Container(
         settings=settings,
         engine=engine,
@@ -94,6 +111,7 @@ def build_container(settings: Settings) -> Container:
         scopes=scopes,
         usage_sink=usage_sink,
         sync_state=SqlAlchemySyncStateStore(sessionmaker),
+        extractor=extractor,
     )
 
 

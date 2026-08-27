@@ -11,7 +11,6 @@ import asyncio
 import contextlib
 import signal
 
-from vera.adapters.curation.extractor import StructuredClaimExtractor
 from vera.adapters.persistence.unit_of_work import SqlAlchemyUnitOfWork
 from vera.application.connectors import SyncRegistration, SyncRunner, SyncScheduler
 from vera.bootstrap import Container, build_container, dispose_container
@@ -47,7 +46,7 @@ def _build_scheduler(container: Container) -> SyncScheduler | None:
         return None
     runner = SyncRunner(
         uow_factory=lambda: SqlAlchemyUnitOfWork(container.sessionmaker),
-        extractor=StructuredClaimExtractor(),
+        extractor=container.extractor,
         state=container.sync_state,
     )
     return SyncScheduler(runner=runner, state=container.sync_state, registrations=registrations)
