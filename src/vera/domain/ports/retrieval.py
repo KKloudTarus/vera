@@ -22,6 +22,7 @@ class HitProvenance:
     verification: str
     authority: float
     source_id: str
+    confidence: float = 1.0
 
 
 @dataclass(frozen=True, slots=True)

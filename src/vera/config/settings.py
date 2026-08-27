@@ -110,6 +110,22 @@ class ResilienceSettings(BaseModel):
     read_timeout_s: float = 10.0
 
 
+class RerankSettings(BaseModel):
+    """Stage-2 rerank blend weights and recency half-life.
+
+    Tunable (not hard-coded) so weights can be calibrated from real feedback. The handler
+    normalizes the weights, so they need not sum to exactly 1.
+    """
+
+    w_relevance: float = 0.40
+    w_authority: float = 0.18
+    w_verification: float = 0.12
+    w_recency: float = 0.12
+    w_feedback: float = 0.08
+    w_confidence: float = 0.10
+    recency_half_life_days: float = 30.0
+
+
 class ConnectorsSettings(BaseModel):
     """Scheduled source connectors.
 
@@ -144,6 +160,10 @@ class MemorySettings(BaseModel):
     openai_api_key: SecretStr | None = None
     llm_model: str = "gpt-4.1-mini"
     small_llm_model: str = "gpt-4.1-nano"
+    # Semantic (embedding) canonical-entity linking: off by default; enable to merge
+    # synonyms/cross-lingual names above the cosine threshold.
+    semantic_dedup_enabled: bool = False
+    semantic_dedup_threshold: float = 0.86
 
 
 class Settings(BaseSettings):
@@ -171,6 +191,7 @@ class Settings(BaseSettings):
     observability: ObservabilitySettings = Field(default_factory=ObservabilitySettings)
     resilience: ResilienceSettings = Field(default_factory=ResilienceSettings)
     connectors: ConnectorsSettings = Field(default_factory=ConnectorsSettings)
+    rerank: RerankSettings = Field(default_factory=RerankSettings)
 
     @property
     def is_prod(self) -> bool:

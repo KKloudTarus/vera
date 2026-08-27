@@ -222,6 +222,63 @@ async def test_trusted_conflict_supersedes_prior_fact(
     assert superseded == 1  # the prior one is marked superseded
 
 
+class _FakeJudge:
+    def __init__(self, contradicted: set[str]) -> None:
+        self._contradicted = contradicted
+
+    async def contradictions(
+        self, *, subject: str, predicate: str, new_object: str, existing_objects: list[str]
+    ) -> set[str]:
+        return {o for o in existing_objects if o in self._contradicted}
+
+
+async def test_judge_supersedes_only_the_contradicted_multivalued_object(
+    sessionmaker: async_sessionmaker[AsyncSession], tenant: _Fixture
+) -> None:
+    # DEPENDS_ON is multi-valued; a judge decides which existing value is truly replaced.
+    judge = _FakeJudge({"postgres"})
+    async with SqlAlchemyUnitOfWork(sessionmaker) as uow:
+        await uow.use_tenant(tenant.group)
+        source_id = await _source(uow, tenant, kind="cmdb", tier=1)
+        svc = CurationService(uow, StructuredClaimExtractor(), None, judge)
+        for ext, obj in (("d1", "postgres"), ("d2", "redis")):
+            await svc.ingest_artifact(
+                IngestArtifact(
+                    source_id=source_id,
+                    group_id=tenant.group,
+                    external_id=ext,
+                    body="",
+                    knowledge_type="fact_triple",
+                    metadata=_triple_meta("paymentapi", "DEPENDS_ON", obj),
+                )
+            )
+        # New value that the judge says contradicts "postgres" (but not "redis").
+        await svc.ingest_artifact(
+            IngestArtifact(
+                source_id=source_id,
+                group_id=tenant.group,
+                external_id="d3",
+                body="",
+                knowledge_type="fact_triple",
+                metadata=_triple_meta("paymentapi", "DEPENDS_ON", "valkey"),
+            )
+        )
+        await uow.commit()
+
+    async with sessionmaker() as s:
+        current = await s.scalar(
+            text(
+                "SELECT string_agg(payload->'triples'->0->>'object', ',' ORDER BY created_at) "
+                "FROM published_episodes WHERE group_id = :g AND invalid_at IS NULL"
+            ),
+            {"g": tenant.group},
+        )
+    # redis and valkey remain; postgres was superseded.
+    assert current is not None
+    objs = set(current.split(","))
+    assert objs == {"redis", "valkey"}
+
+
 async def test_multivalued_predicate_keeps_both(
     sessionmaker: async_sessionmaker[AsyncSession], tenant: _Fixture
 ) -> None:

@@ -102,6 +102,8 @@ def make_container(
             usage_sink=SqlAlchemyUsageSink(sessionmaker),
             sync_state=SqlAlchemySyncStateStore(sessionmaker),
             extractor=StructuredClaimExtractor(),
+            judge=None,
+            embedder=None,
         )
 
     return _make

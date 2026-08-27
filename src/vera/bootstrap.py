@@ -26,9 +26,11 @@ from vera.adapters.persistence.repositories.sync import SqlAlchemySyncStateStore
 from vera.adapters.persistence.repositories.usage import SqlAlchemyUsageSink
 from vera.adapters.queue.postgres_queue import PostgresJobQueue
 from vera.application.identity import ScopeResolutionService
+from vera.application.queries.search_memory import RerankWeights
 from vera.config.settings import Settings
 from vera.domain.ports.connectors import SyncStateStore
-from vera.domain.ports.curation import ClaimExtractor
+from vera.domain.ports.curation import ClaimExtractor, ContradictionJudge
+from vera.domain.ports.embedder import Embedder
 from vera.domain.ports.identity import Authenticator
 from vera.domain.ports.job_queue import JobQueue
 from vera.domain.ports.memory_engine import MemoryEngine
@@ -53,6 +55,8 @@ class Container:
     usage_sink: UsageSink | None
     sync_state: SyncStateStore
     extractor: ClaimExtractor
+    judge: ContradictionJudge | None
+    embedder: Embedder | None
 
 
 def build_container(settings: Settings) -> Container:
@@ -65,6 +69,11 @@ def build_container(settings: Settings) -> Container:
         SqlAlchemyUsageSink(sessionmaker) if settings.observability.cost_tracking_enabled else None
     )
     memory: MemoryEngine = build_memory_engine(settings, usage_sink)
+    embedder: Embedder | None = None
+    if settings.memory.semantic_dedup_enabled and settings.memory.provider == "graphiti":
+        from vera.adapters.graph import build_embedder
+
+        embedder = build_embedder(settings)  # type: ignore[assignment]
     object_store: ObjectStore = S3ObjectStore(settings.objectstore)
     retrieval_read: RetrievalReadModel = SqlAlchemyRetrievalReadModel(sessionmaker)
 
@@ -93,13 +102,14 @@ def build_container(settings: Settings) -> Container:
     # LLM extraction turns free text into trust-tiered claims; without a key, only
     # structured metadata (triples/claims) is ingested.
     extractor: ClaimExtractor
+    judge: ContradictionJudge | None = None
     if settings.memory.openai_api_key is not None:
+        from vera.adapters.curation.judge import LlmContradictionJudge
         from vera.adapters.curation.llm_extractor import LlmClaimExtractor
 
-        extractor = LlmClaimExtractor(
-            api_key=settings.memory.openai_api_key.get_secret_value(),
-            model=settings.memory.small_llm_model,
-        )
+        key = settings.memory.openai_api_key.get_secret_value()
+        extractor = LlmClaimExtractor(api_key=key, model=settings.memory.small_llm_model)
+        judge = LlmContradictionJudge(api_key=key, model=settings.memory.small_llm_model)
     else:
         from vera.adapters.curation.extractor import StructuredClaimExtractor
 
@@ -118,6 +128,21 @@ def build_container(settings: Settings) -> Container:
         usage_sink=usage_sink,
         sync_state=SqlAlchemySyncStateStore(sessionmaker),
         extractor=extractor,
+        judge=judge,
+        embedder=embedder,
+    )
+
+
+def build_rerank_weights(settings: Settings) -> RerankWeights:
+    r = settings.rerank
+    return RerankWeights(
+        relevance=r.w_relevance,
+        authority=r.w_authority,
+        verification=r.w_verification,
+        recency=r.w_recency,
+        feedback=r.w_feedback,
+        confidence=r.w_confidence,
+        half_life_s=r.recency_half_life_days * 86400.0,
     )
 
 

@@ -43,10 +43,40 @@ class RankedHit:
     invalid_at: datetime | None
 
 
-# Stage-2 blend weights (Σ = 1). Tune offline against retrieval feedback.
-_W_REL, _W_AUTH, _W_VER, _W_TMP, _W_FB = 0.45, 0.20, 0.15, 0.12, 0.08
-_RECENCY_HALF_LIFE_S = 30 * 24 * 3600.0
 _VERIFICATION_SCORE = {"human_verified": 1.0, "auto": 0.8, "pending": 0.5}
+_DAY_S = 24 * 3600.0
+
+
+@dataclass(frozen=True, slots=True)
+class RerankWeights:
+    """Stage-2 blend weights and recency half-life. Tunable, not hard-coded."""
+
+    relevance: float = 0.40
+    authority: float = 0.18
+    verification: float = 0.12
+    recency: float = 0.12
+    feedback: float = 0.08
+    confidence: float = 0.10
+    half_life_s: float = 30 * _DAY_S
+
+    def normalized(self) -> RerankWeights:
+        total = (
+            self.relevance
+            + self.authority
+            + self.verification
+            + self.recency
+            + self.feedback
+            + self.confidence
+        ) or 1.0
+        return RerankWeights(
+            relevance=self.relevance / total,
+            authority=self.authority / total,
+            verification=self.verification / total,
+            recency=self.recency / total,
+            feedback=self.feedback / total,
+            confidence=self.confidence / total,
+            half_life_s=self.half_life_s,
+        )
 
 
 def _normalize(values: list[float]) -> list[float]:
@@ -57,13 +87,15 @@ def _normalize(values: list[float]) -> list[float]:
     return [(v - lo) / span for v in values]
 
 
-def _recency(valid_at: datetime | None, invalid_at: datetime | None, now: datetime) -> float:
+def _recency(
+    valid_at: datetime | None, invalid_at: datetime | None, now: datetime, half_life_s: float
+) -> float:
     if invalid_at is not None:
         return 0.0
     if valid_at is None:
         return 0.5
     delta = max((now - valid_at).total_seconds(), 0.0)
-    return math.exp(-math.log(2) * delta / _RECENCY_HALF_LIFE_S)
+    return math.exp(-math.log(2) * delta / half_life_s)
 
 
 class SearchMemoryHandler:
@@ -73,10 +105,12 @@ class SearchMemoryHandler:
         read_model: RetrievalReadModel,
         *,
         read_timeout_s: float | None = None,
+        weights: RerankWeights | None = None,
     ) -> None:
         self._engine = engine
         self._read_model = read_model
         self._read_timeout_s = read_timeout_s
+        self._weights = (weights or RerankWeights()).normalized()
 
     async def handle(self, query: SearchMemory) -> list[RankedHit]:
         started = time.perf_counter()
@@ -126,6 +160,7 @@ class SearchMemoryHandler:
         *,
         limit: int,
     ) -> list[RankedHit]:
+        w = self._weights
         now = utc_now()
         rel = _normalize([c.score for c in candidates])
         ranked: list[tuple[float, RankedHit]] = []
@@ -134,15 +169,17 @@ class SearchMemoryHandler:
             authority = prov.authority if prov else 0.5
             verification = prov.verification if prov else None
             ver_score = _VERIFICATION_SCORE.get(verification or "", 0.5)
-            recency = _recency(hit.valid_at, hit.invalid_at, now)
+            recency = _recency(hit.valid_at, hit.invalid_at, now, w.half_life_s)
+            confidence = prov.confidence if prov else 1.0
             up, down = feedback.get(hit.edge_uuid or "", (0, 0))
             fb_score = (up + 1) / (up + down + 2)  # Laplace-smoothed, defaults to 0.5
             score = (
-                _W_REL * norm_rel
-                + _W_AUTH * authority
-                + _W_VER * ver_score
-                + _W_TMP * recency
-                + _W_FB * fb_score
+                w.relevance * norm_rel
+                + w.authority * authority
+                + w.verification * ver_score
+                + w.recency * recency
+                + w.feedback * fb_score
+                + w.confidence * confidence
             )
             ranked.append(
                 (

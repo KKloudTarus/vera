@@ -5,6 +5,8 @@ via ``UnitOfWork.use_tenant`` first.
 
 from __future__ import annotations
 
+from uuid import UUID
+
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -27,10 +29,19 @@ class SqlAlchemyCanonicalEntityRepository:
         self._session = session
 
     async def create(
-        self, *, group_id: str, entity_type: str, canonical_name: str, aliases: list[str]
+        self,
+        *,
+        group_id: str,
+        entity_type: str,
+        canonical_name: str,
+        aliases: list[str],
+        embedding: list[float] | None = None,
     ) -> CanonicalEntity:
         entity = CanonicalEntityRow(
-            group_id=group_id, entity_type=entity_type, canonical_name=canonical_name
+            group_id=group_id,
+            entity_type=entity_type,
+            canonical_name=canonical_name,
+            name_embedding=embedding,
         )
         self._session.add(entity)
         await self._session.flush()
@@ -73,3 +84,31 @@ class SqlAlchemyCanonicalEntityRepository:
         )
         row = (await self._session.execute(fuzzy)).scalars().first()
         return _to_entity(row) if row is not None else None
+
+    async def add_alias(self, *, entity_id: UUID, group_id: str, alias: str) -> None:
+        norm = normalize_name(alias)
+        exists = await self._session.scalar(
+            select(EntityAliasRow.id).where(
+                EntityAliasRow.group_id == group_id, EntityAliasRow.alias_norm == norm
+            )
+        )
+        if exists is not None:
+            return
+        self._session.add(
+            EntityAliasRow(canonical_entity_id=entity_id, group_id=group_id, alias=alias)
+        )
+        await self._session.flush()
+
+    async def candidates_with_embeddings(
+        self, *, group_id: str, entity_type: str
+    ) -> list[tuple[CanonicalEntity, list[float]]]:
+        rows = (
+            await self._session.execute(
+                select(CanonicalEntityRow).where(
+                    CanonicalEntityRow.group_id == group_id,
+                    CanonicalEntityRow.entity_type == entity_type,
+                    CanonicalEntityRow.name_embedding.is_not(None),
+                )
+            )
+        ).scalars()
+        return [(_to_entity(row), [float(x) for x in (row.name_embedding or [])]) for row in rows]

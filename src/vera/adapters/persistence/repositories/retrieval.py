@@ -46,6 +46,7 @@ class SqlAlchemyRetrievalReadModel:
                 PublishedEpisodeRow.verification,
                 PublishedEpisodeRow.authority,
                 PublishedEpisodeRow.source_id,
+                PublishedEpisodeRow.confidence,
             )
             .join(
                 PublishedEpisodeRow,
@@ -64,8 +65,9 @@ class SqlAlchemyRetrievalReadModel:
                 verification=verification,
                 authority=authority,
                 source_id=source_id,
+                confidence=confidence,
             )
-            for edge_uuid, verification, authority, source_id in rows
+            for edge_uuid, verification, authority, source_id, confidence in rows
         }
 
     async def feedback_counts(

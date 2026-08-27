@@ -37,3 +37,4 @@ class ClaimRecord:
     subject: str | None
     predicate: str | None
     object: str | None
+    confidence: float | None = None

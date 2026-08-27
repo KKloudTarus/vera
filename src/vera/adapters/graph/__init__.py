@@ -103,6 +103,16 @@ def build_graphiti_client(settings: Settings, usage_sink: UsageSink | None = Non
     )
 
 
+def build_embedder(settings: Settings) -> object:
+    """A standalone cached embedder (same model as ingestion) for entity linking."""
+    from vera.adapters.graph.caching import CachingEmbedder
+    from vera.adapters.graph.embedder_port import GraphitiEmbedderAdapter
+
+    namespace = f"{settings.memory.embedding_model}:{settings.memory.embedding_dim}"
+    cached = CachingEmbedder(_embedder(settings.memory), namespace=namespace)  # type: ignore[arg-type]
+    return GraphitiEmbedderAdapter(cached)
+
+
 def build_memory_engine(settings: Settings, usage_sink: UsageSink | None = None) -> MemoryEngine:
     if settings.memory.provider != "graphiti" or not settings.neo4j.uri:
         return NullMemoryEngine()

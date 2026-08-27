@@ -58,9 +58,25 @@ class OutboxRepository(Protocol):
 
 class CanonicalEntityRepository(Protocol):
     async def create(
-        self, *, group_id: str, entity_type: str, canonical_name: str, aliases: list[str]
+        self,
+        *,
+        group_id: str,
+        entity_type: str,
+        canonical_name: str,
+        aliases: list[str],
+        embedding: list[float] | None = None,
     ) -> CanonicalEntity: ...
 
     async def resolve(self, *, group_id: str, name: str) -> CanonicalEntity | None:
         """Resolve a surface form to a canonical entity: exact-normalized, then fuzzy."""
+        ...
+
+    async def add_alias(self, *, entity_id: UUID, group_id: str, alias: str) -> None:
+        """Attach a surface form to an existing canonical entity (idempotent)."""
+        ...
+
+    async def candidates_with_embeddings(
+        self, *, group_id: str, entity_type: str
+    ) -> list[tuple[CanonicalEntity, list[float]]]:
+        """Entities in the group/type that carry a name embedding, for semantic linking."""
         ...

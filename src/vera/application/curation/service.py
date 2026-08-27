@@ -13,6 +13,7 @@ import hashlib
 from dataclasses import dataclass
 from uuid import UUID
 
+from vera.domain.curation.models import ClaimRecord
 from vera.domain.curation.policy import may_publish_to
 from vera.domain.curation.state import can_transition
 from vera.domain.curation.trust import (
@@ -23,7 +24,7 @@ from vera.domain.curation.trust import (
 )
 from vera.domain.knowledge.models import ReviewDecision, VerificationStatus
 from vera.domain.ontology import CURRENT_PIPELINE_VERSIONS, is_single_valued
-from vera.domain.ports.curation import ClaimExtractor
+from vera.domain.ports.curation import ClaimExtractor, ContradictionJudge
 from vera.domain.ports.object_store import ObjectStore
 from vera.domain.ports.unit_of_work import UnitOfWork
 from vera.shared.errors import Conflict, DomainError, Err, NotFound, Ok, PolicyRejected, Result
@@ -62,23 +63,60 @@ def _payload_for(
     obj: str | None,
     statement: str,
     *,
-    supersede: bool = False,
+    supersede_objects: list[str] | None = None,
 ) -> JsonDict:
     if subject and predicate and obj:
         triple: JsonDict = {"subject": subject, "predicate": predicate, "object": obj}
-        if supersede:
-            triple["supersede"] = True  # the worker closes the prior edge's valid time
+        if supersede_objects:
+            # The worker closes the prior edges' valid time for these specific objects.
+            triple["supersede_objects"] = supersede_objects
         return {"triples": [triple]}
     return {"body": statement}
 
 
 class CurationService:
     def __init__(
-        self, uow: UnitOfWork, extractor: ClaimExtractor, object_store: ObjectStore | None = None
+        self,
+        uow: UnitOfWork,
+        extractor: ClaimExtractor,
+        object_store: ObjectStore | None = None,
+        judge: ContradictionJudge | None = None,
     ) -> None:
         self._uow = uow
         self._extractor = extractor
         self._object_store = object_store
+        self._judge = judge
+
+    async def _contradicted(self, claim: ClaimRecord) -> list[ClaimRecord]:
+        """Existing verified claims the new claim contradicts.
+
+        Functional predicates: any different value is a contradiction. Otherwise a
+        contradiction judge (if configured) decides which coexisting values are really
+        replaced; without a judge, multi-valued facts coexist.
+        """
+        subject, predicate, obj = claim.subject, claim.predicate, claim.object
+        if not (subject and predicate and obj):
+            return []
+        conflicts = await self._uow.claims.find_verified_conflicts(
+            group_id=claim.group_id,
+            subject=subject,
+            predicate=predicate,
+            obj=obj,
+            exclude_id=claim.id,
+        )
+        if not conflicts:
+            return []
+        if is_single_valued(predicate):
+            return conflicts
+        if self._judge is None:
+            return []
+        contradicted_objects = await self._judge.contradictions(
+            subject=subject,
+            predicate=predicate,
+            new_object=obj,
+            existing_objects=[c.object for c in conflicts if c.object],
+        )
+        return [c for c in conflicts if c.object in contradicted_objects]
 
     async def ingest_artifact(self, cmd: IngestArtifact) -> Result[IngestResult, DomainError]:
         uow = self._uow
@@ -207,18 +245,10 @@ class CurationService:
 
         durable_source = f"{claim.group_id}:{claim.id}"
         tier = await uow.claims.source_trust_tier(claim.id)
-        superseded = False
-        # A contradiction only exists for functional (single-valued) predicates: RUNS_ON
-        # has one current value, DEPENDS_ON may have many.
-        if claim.subject and claim.predicate and claim.object and is_single_valued(claim.predicate):
-            conflicts = await uow.claims.find_verified_conflicts(
-                group_id=claim.group_id,
-                subject=claim.subject,
-                predicate=claim.predicate,
-                obj=claim.object,
-                exclude_id=claim.id,
-            )
-            if conflicts and (tier is None or tier > TrustTier.CURATED):
+        supersede_objects: list[str] = []
+        if claim.subject and claim.predicate and claim.object:
+            contradicted = await self._contradicted(claim)
+            if contradicted and (tier is None or tier > TrustTier.CURATED):
                 # Not trusted enough to overwrite verified memory: hold for review.
                 await uow.reviews.add(
                     candidate_claim_id=claim.id,
@@ -233,15 +263,14 @@ class CurationService:
                     to_status=VerificationStatus.DISPUTED,
                 )
                 return Ok(PublishOutcome(status="flagged"))
-            if conflicts:
-                # A trusted, newer value supersedes the old: invalidate the prior episodes
-                # (bi-temporal) so the current view updates while history stays queryable.
+            if contradicted:
+                # A trusted, newer value supersedes the old ones: invalidate the prior
+                # episodes (bi-temporal) so the current view updates, history stays queryable.
                 now = utc_now()
-                for old in conflicts:
-                    old_source = f"{old.group_id}:{old.id}"
+                for old in contradicted:
                     await uow.episodes.invalidate(
                         group_id=old.group_id,
-                        source_id=old_source,
+                        source_id=f"{old.group_id}:{old.id}",
                         invalid_at=now,
                         superseded_by_source=durable_source,
                     )
@@ -257,11 +286,15 @@ class CurationService:
                         authority="superseded",
                         notes=f"superseded by claim {claim.id}",
                     )
-                superseded = True
+                supersede_objects = [old.object for old in contradicted if old.object]
 
         dedup = deterministic_id(durable_source)
         payload = _payload_for(
-            claim.subject, claim.predicate, claim.object, claim.statement, supersede=superseded
+            claim.subject,
+            claim.predicate,
+            claim.object,
+            claim.statement,
+            supersede_objects=supersede_objects,
         )
         authority = authority_for_tier(tier) if tier is not None else 0.5
         # Stamp the episode with the ontology and pipeline versions that produced it, so
@@ -278,6 +311,7 @@ class CurationService:
             dedup_uuid=dedup,
             ontology_version_id=ontology_id,
             pipeline=CURRENT_PIPELINE_VERSIONS.as_dict(),
+            confidence=claim.confidence if claim.confidence is not None else 1.0,
         )
         if inserted:
             await uow.outbox.add(

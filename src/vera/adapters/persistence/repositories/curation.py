@@ -38,6 +38,7 @@ def _to_claim(row: CandidateClaimRow) -> ClaimRecord:
         subject=row.subject,
         predicate=row.predicate,
         object=row.object,
+        confidence=row.confidence,
     )
 
 
@@ -292,6 +293,7 @@ class SqlAlchemyPublishedEpisodeRepository:
         dedup_uuid: UUID,
         ontology_version_id: UUID | None = None,
         pipeline: JsonDict | None = None,
+        confidence: float = 1.0,
     ) -> bool:
         stmt = (
             pg_insert(PublishedEpisodeRow)
@@ -301,6 +303,7 @@ class SqlAlchemyPublishedEpisodeRepository:
                 knowledge_type=knowledge_type,
                 verification=verification,
                 authority=authority,
+                confidence=confidence,
                 reference_time=reference_time,
                 payload=payload,
                 dedup_uuid=dedup_uuid,

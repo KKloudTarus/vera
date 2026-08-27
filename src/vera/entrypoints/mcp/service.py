@@ -13,7 +13,7 @@ from uuid import UUID
 from vera.adapters.persistence.unit_of_work import SqlAlchemyUnitOfWork
 from vera.application.curation import CurationService, IngestArtifact
 from vera.application.queries.search_memory import SearchMemory, SearchMemoryHandler
-from vera.bootstrap import Container
+from vera.bootstrap import Container, build_rerank_weights
 from vera.domain.ports.identity import ResolvedScope, ScopeResolver
 from vera.shared.errors import is_ok
 from vera.shared.ids import uuid7
@@ -28,7 +28,11 @@ class VeraMcpService:
     def __init__(self, container: Container, scope_resolver: ScopeResolver) -> None:
         self._container = container
         self._scopes = scope_resolver
-        self._search = SearchMemoryHandler(container.memory, container.retrieval_read)
+        self._search = SearchMemoryHandler(
+            container.memory,
+            container.retrieval_read,
+            weights=build_rerank_weights(container.settings),
+        )
 
     async def _resolve(self, principal_id: UUID) -> ResolvedScope:
         scope = await self._scopes.resolve(principal_id)
@@ -113,7 +117,9 @@ class VeraMcpService:
             source_id = await uow.sources.get_or_create_agent(
                 workspace_id=scope.primary_workspace_id
             )
-            service = CurationService(uow, self._container.extractor, self._container.object_store)
+            service = CurationService(
+                uow, self._container.extractor, self._container.object_store, self._container.judge
+            )
             result = await service.ingest_artifact(
                 IngestArtifact(
                     source_id=source_id,

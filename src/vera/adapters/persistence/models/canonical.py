@@ -43,6 +43,8 @@ class CanonicalEntityRow(Base, UUIDPK, Timestamps):
     entity_type: Mapped[str] = mapped_column(String(128), nullable=False)
     canonical_name: Mapped[str] = mapped_column(String(512), nullable=False)
     summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Canonical-name embedding for semantic (cross-lingual/synonym) alias linking.
+    name_embedding: Mapped[list[float] | None] = mapped_column(JSONB, nullable=True)
     attributes: Mapped[dict[str, Any]] = mapped_column(
         JSONB, nullable=False, server_default=text("'{}'::jsonb")
     )

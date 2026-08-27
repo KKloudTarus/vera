@@ -23,6 +23,7 @@ from vera.adapters.persistence.repositories import (
     SqlAlchemyCanonicalEntityRepository,
     SqlAlchemyGraphMapRepository,
 )
+from vera.application.curation.entity_resolver import SemanticEntityResolver
 from vera.bootstrap import Container
 from vera.domain.ports.job_queue import QueuedJob
 from vera.domain.ports.memory_engine import EpisodeSpec, IngestReceipt
@@ -69,6 +70,11 @@ class LanePool:
         self._workers: list[asyncio.Task[None]] = []
         self._backoff_base_s = backoff_base_s
         self._backoff_cap_s = backoff_cap_s
+        self._resolver = SemanticEntityResolver(
+            container.embedder,
+            threshold=container.settings.memory.semantic_dedup_threshold,
+            enabled=container.settings.memory.semantic_dedup_enabled,
+        )
 
     def start(self) -> None:
         self._workers = [
@@ -159,14 +165,9 @@ class LanePool:
         canonical = SqlAlchemyCanonicalEntityRepository(session)
         graph_map = SqlAlchemyGraphMapRepository(session)
         for node in receipt.nodes:
-            entity = await canonical.resolve(group_id=group_id, name=node.name)
-            if entity is None:
-                entity = await canonical.create(
-                    group_id=group_id,
-                    entity_type=node.entity_type,
-                    canonical_name=node.name,
-                    aliases=[],
-                )
+            entity = await self._resolver.resolve_or_create(
+                canonical, group_id=group_id, name=node.name, entity_type=node.entity_type
+            )
             await graph_map.record_node(
                 group_id=group_id,
                 node_uuid=UUID(node.uuid),

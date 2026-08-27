@@ -152,26 +152,29 @@ class GraphitiMemoryEngine:
                 )
             edge_uuids.extend(e.uuid for e in result.edges)
             # add_triplet does not reconcile contradictions (that is add_episode's job),
-            # so when curation marks a functional fact as superseding, close the prior
-            # edge's valid time here. Current search then hides it; an as_of query returns it.
-            if triple.get("supersede"):
-                await self._invalidate_prior(gid, subject, predicate, obj)
+            # so when curation marks specific prior objects as superseded, close their
+            # edges' valid time here. Current search hides them; an as_of query returns them.
+            superseded_objects = triple.get("supersede_objects")
+            if superseded_objects:
+                await self._invalidate_objects(gid, subject, predicate, list(superseded_objects))
         return IngestReceipt(
             episode_uuid=episode_uuid, nodes=tuple(nodes.values()), edge_uuids=tuple(edge_uuids)
         )
 
-    async def _invalidate_prior(self, gid: str, subject: str, predicate: str, obj: str) -> None:
+    async def _invalidate_objects(
+        self, gid: str, subject: str, predicate: str, objects: list[str]
+    ) -> None:
         await self._client.driver.execute_query(  # pyright: ignore[reportUnknownMemberType]
             """
             MATCH (s:Entity {group_id: $gid, name: $subject})
                   -[e:RELATES_TO {group_id: $gid, name: $predicate}]->(m:Entity)
-            WHERE m.name <> $obj AND e.invalid_at IS NULL
+            WHERE m.name IN $objects AND e.invalid_at IS NULL
             SET e.invalid_at = $now
             """,
             gid=gid,
             subject=subject,
             predicate=predicate,
-            obj=obj,
+            objects=objects,
             now=utc_now(),
         )
 

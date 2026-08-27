@@ -156,6 +156,7 @@ class PublishedEpisodeRow(Base, UUIDPK):
     knowledge_type: Mapped[str] = mapped_column(String(64), nullable=False)
     verification: Mapped[str] = mapped_column(String(64), nullable=False)
     authority: Mapped[float] = mapped_column(Float, nullable=False, server_default="0.5")
+    confidence: Mapped[float] = mapped_column(Float, nullable=False, server_default="1.0")
     reference_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     ontology_version_id: Mapped[UUID | None] = mapped_column(

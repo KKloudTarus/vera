@@ -61,6 +61,7 @@ def _build_scheduler(container: Container) -> SyncScheduler | None:
         extractor=container.extractor,
         state=container.sync_state,
         object_store=container.object_store,
+        judge=container.judge,
     )
     return SyncScheduler(runner=runner, state=container.sync_state, registrations=registrations)
 

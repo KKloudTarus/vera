@@ -41,6 +41,15 @@ class ClaimExtractor(Protocol):
         ...
 
 
+class ContradictionJudge(Protocol):
+    async def contradictions(
+        self, *, subject: str, predicate: str, new_object: str, existing_objects: list[str]
+    ) -> set[str]:
+        """Return the existing objects that the new (subject, predicate, object) truly
+        contradicts (semantic judgement, for non-functional predicates)."""
+        ...
+
+
 class KnowledgeSourceRepository(Protocol):
     async def create(
         self,
@@ -137,6 +146,7 @@ class PublishedEpisodeRepository(Protocol):
         dedup_uuid: UUID,
         ontology_version_id: UUID | None = None,
         pipeline: JsonDict | None = None,
+        confidence: float = 1.0,
     ) -> bool:
         """Insert a published episode. False if this dedup_uuid was already published."""
         ...
