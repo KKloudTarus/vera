@@ -23,7 +23,7 @@ from pydantic import AnyHttpUrl
 from vera import __version__
 from vera.adapters.mcp.auth import JwtTokenVerifier
 from vera.adapters.persistence.repositories.scope import SqlAlchemyScopeResolver
-from vera.bootstrap import Container, build_container
+from vera.bootstrap import Container, build_container, refresh_rerank_weights
 from vera.config.settings import Settings, get_settings
 from vera.entrypoints.mcp.service import VeraMcpService
 from vera.observability import configure_logging, get_logger
@@ -117,9 +117,15 @@ def build_server(container: Container, settings: Settings) -> MCPServer:
 
 
 def create_app() -> Any:
+    import asyncio
+    import contextlib
+
     settings = get_settings()
     configure_logging(json=settings.log_json, level=settings.log_level)
     container = build_container(settings)
+    # Adopt feedback-calibrated rerank weights before the service builds its handler.
+    with contextlib.suppress(Exception):
+        asyncio.run(refresh_rerank_weights(container))
     log.info("mcp.startup", auth="jwt" if settings.mcp.jwt_secret else "disabled")
     return build_server(container, settings).streamable_http_app()
 

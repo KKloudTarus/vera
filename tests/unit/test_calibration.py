@@ -7,7 +7,7 @@ from datetime import datetime
 
 import pytest
 
-from vera.application.queries.calibration import CalibrationService, _to_sample
+from vera.application.queries.calibration import CalibrationService, _to_sample, should_apply
 from vera.domain.ports.retrieval import LabeledSignals
 
 _HL = 30 * 24 * 3600.0
@@ -53,3 +53,20 @@ async def test_falls_back_when_no_labeled_feedback() -> None:
     # No samples -> default weights preserved unchanged.
     assert weights.relevance == 0.40
     assert weights.half_life_s == _HL
+
+
+@pytest.mark.asyncio
+async def test_calibrate_with_count_reports_sample_count() -> None:
+    labeled = [
+        LabeledSignals({"authority": 1.0}, label=1),
+        LabeledSignals({"authority": 0.0}, label=-1),
+    ]
+    _, count = await CalibrationService(_FakeReadModel(labeled)).calibrate_with_count(
+        group_ids=["p:demo"], half_life_s=_HL
+    )
+    assert count == 2
+
+
+def test_should_apply_needs_enough_samples() -> None:
+    assert should_apply(20, 20) is True
+    assert should_apply(19, 20) is False

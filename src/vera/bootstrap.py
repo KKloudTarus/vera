@@ -7,7 +7,7 @@ injects the pieces it needs. Construction is explicit, with no DI container.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
@@ -62,6 +62,9 @@ class Container:
     judge: ContradictionJudge | None
     entity_judge: EntityResolutionJudge | None
     embedder: Embedder | None
+    # Active rerank weights: the configured defaults until refresh_rerank_weights loads a
+    # calibrated set from the database at startup.
+    rerank_weights: RerankWeights = field(default_factory=RerankWeights)
 
 
 def build_container(settings: Settings) -> Container:
@@ -141,6 +144,7 @@ def build_container(settings: Settings) -> Container:
         judge=judge,
         entity_judge=entity_judge,
         embedder=embedder,
+        rerank_weights=build_rerank_weights(settings),
     )
 
 
@@ -155,6 +159,19 @@ def build_rerank_weights(settings: Settings) -> RerankWeights:
         confidence=r.w_confidence,
         half_life_s=r.recency_half_life_days * 86400.0,
     )
+
+
+async def refresh_rerank_weights(container: Container) -> None:
+    """Load the latest calibrated weights from the database into the container, if any, so
+    the ranker uses feedback-calibrated weights in place of the configured defaults.
+    """
+    from vera.adapters.persistence.repositories.rerank_weights import (
+        SqlAlchemyRerankWeightsRepository,
+    )
+
+    active = await SqlAlchemyRerankWeightsRepository(container.sessionmaker).get_active()
+    if active is not None:
+        container.rerank_weights = active
 
 
 async def dispose_container(container: Container) -> None:

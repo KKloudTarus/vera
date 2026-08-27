@@ -1,0 +1,31 @@
+# Nightly rerank calibration. Reads logged feedback, computes weights, and persists them
+# as the active set (with --apply, gated by VERA_RERANK__MIN_CALIBRATION_SAMPLES). The API
+# and MCP ranker load the active weights at startup, so a rolling restart adopts them.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: vera-calibrate
+  namespace: vera
+spec:
+  schedule: "17 3 * * *" # 03:17 daily
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      template:
+        spec:
+          restartPolicy: Never
+          securityContext:
+            runAsNonRoot: true
+          containers:
+            - name: calibrate
+              image: ghcr.io/kkloudtarus/vera:latest
+              command: ["python", "-m", "vera.entrypoints.calibrate", "--apply"]
+              envFrom:
+                - configMapRef: { name: vera-config }
+                - secretRef: { name: vera-secrets }
+              resources:
+                requests: { cpu: "100m", memory: "256Mi" }
+                limits: { cpu: "1", memory: "512Mi" }

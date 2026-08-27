@@ -16,6 +16,7 @@ from vera.domain.knowledge.models import CanonicalEntity
 from vera.domain.ports.curation import EntityResolutionJudge
 from vera.domain.ports.embedder import Embedder
 from vera.domain.ports.repositories import CanonicalEntityRepository
+from vera.observability.metrics import record_entity_resolution
 
 
 def cosine(a: list[float], b: list[float]) -> float:
@@ -74,6 +75,7 @@ class SemanticEntityResolver:
             if match is not None:
                 await repo.add_alias(entity_id=match.id, group_id=group_id, alias=name)
                 return match
+            record_entity_resolution("created")
 
         return await repo.create(
             group_id=group_id,
@@ -95,6 +97,7 @@ class SemanticEntityResolver:
         # A very close name is a synonym/spelling variant: link without spending an LLM call.
         best_score, best = scored[0]
         if best_score >= self._threshold:
+            record_entity_resolution("linked_cosine")
             return best
         if self._judge is None:
             return None
@@ -107,4 +110,7 @@ class SemanticEntityResolver:
         chosen = await self._judge.same_entity(
             name=name, entity_type=entity_type, candidates=list(by_name)
         )
-        return by_name.get(chosen) if chosen is not None else None
+        if chosen is not None and chosen in by_name:
+            record_entity_resolution("linked_judge")
+            return by_name[chosen]
+        return None

@@ -126,6 +126,9 @@ class RerankSettings(BaseModel):
     w_feedback: float = 0.08
     w_confidence: float = 0.10
     recency_half_life_days: float = 30.0
+    # Calibration applies (persists) new weights only with at least this many labeled
+    # feedback samples, so a handful of votes cannot swing ranking.
+    min_calibration_samples: int = 20
 
 
 class ConnectorsSettings(BaseModel):
@@ -164,7 +167,11 @@ class MemorySettings(BaseModel):
     small_llm_model: str = "gpt-4.1-nano"
     # Semantic (embedding) canonical-entity linking: off by default; enable to merge
     # synonyms/cross-lingual names above the cosine threshold.
-    semantic_dedup_enabled: bool = False
+    # On by default: an embedding-blocked, LLM-confirmed merge of synonyms and
+    # cross-lingual names. It is a no-op unless an embedder is available (graphiti +
+    # a key), so it stays inert in offline and unit runs. Run the embedding backfill for
+    # pre-existing entities before relying on it, and watch vera_entity_resolution_total.
+    semantic_dedup_enabled: bool = True
     semantic_dedup_threshold: float = 0.86
     # Below the auto-link threshold, names this similar become candidates an LLM judge
     # confirms. Kept low, since embedding cosine over bare names is only a coarse blocker.

@@ -17,7 +17,7 @@ from vera.adapters.persistence.unit_of_work import SqlAlchemyUnitOfWork
 from vera.application.commands import IngestSourceHandler
 from vera.application.identity import IdentityService, ScopeResolutionService
 from vera.application.queries import SearchMemoryHandler
-from vera.bootstrap import Container, build_rerank_weights
+from vera.bootstrap import Container
 from vera.domain.identity.models import AuthenticatedPrincipal
 
 
@@ -33,7 +33,7 @@ def get_search_handler(container: ContainerDep) -> SearchMemoryHandler:
         container.memory,
         container.retrieval_read,
         read_timeout_s=container.settings.resilience.read_timeout_s,
-        weights=build_rerank_weights(container.settings),
+        weights=container.rerank_weights,
     )
 
 

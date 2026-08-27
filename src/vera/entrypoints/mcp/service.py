@@ -13,7 +13,7 @@ from uuid import UUID
 from vera.adapters.persistence.unit_of_work import SqlAlchemyUnitOfWork
 from vera.application.curation import CurationService, IngestArtifact
 from vera.application.queries.search_memory import SearchMemory, SearchMemoryHandler
-from vera.bootstrap import Container, build_rerank_weights
+from vera.bootstrap import Container
 from vera.domain.ports.identity import ResolvedScope, ScopeResolver
 from vera.shared.errors import is_ok
 from vera.shared.ids import uuid7
@@ -31,7 +31,7 @@ class VeraMcpService:
         self._search = SearchMemoryHandler(
             container.memory,
             container.retrieval_read,
-            weights=build_rerank_weights(container.settings),
+            weights=container.rerank_weights,
         )
 
     async def _resolve(self, principal_id: UUID) -> ResolvedScope:

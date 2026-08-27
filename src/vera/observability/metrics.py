@@ -57,6 +57,11 @@ queue_backpressure = Counter(
     "vera_queue_backpressure_events_total",
     "Times the pending backlog crossed the configured alert threshold.",
 )
+entity_resolution = Counter(
+    "vera_entity_resolution_total",
+    "Canonical entity resolutions by outcome (new entity vs linked to an existing one).",
+    labelnames=("outcome",),
+)
 
 
 def record_ingestion(*, result: str, duration_s: float) -> None:
@@ -68,6 +73,11 @@ def record_ingestion(*, result: str, duration_s: float) -> None:
 def set_queue_depth(depths: dict[str, int]) -> None:
     for status in ("pending", "inflight", "dead"):
         queue_depth.labels(status=status).set(depths.get(status, 0))
+
+
+def record_entity_resolution(outcome: str) -> None:
+    """Count an entity resolution outcome: created, linked_cosine, or linked_judge."""
+    entity_resolution.labels(outcome=outcome).inc()
 
 
 def note_backpressure(depths: dict[str, int], threshold: int) -> bool:

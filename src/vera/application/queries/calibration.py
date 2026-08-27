@@ -25,6 +25,11 @@ def _to_sample(labeled: LabeledSignals) -> RerankSample:
     return RerankSample(label=labeled.label, **values)
 
 
+def should_apply(sample_count: int, min_samples: int) -> bool:
+    """Whether there is enough labeled feedback to persist calibrated weights."""
+    return sample_count >= min_samples
+
+
 class CalibrationService:
     def __init__(self, read_model: RetrievalReadModel) -> None:
         self._read_model = read_model
@@ -37,6 +42,21 @@ class CalibrationService:
         fallback: RerankWeights | None = None,
         since: datetime | None = None,
     ) -> RerankWeights:
+        weights, _ = await self.calibrate_with_count(
+            group_ids=group_ids, half_life_s=half_life_s, fallback=fallback, since=since
+        )
+        return weights
+
+    async def calibrate_with_count(
+        self,
+        *,
+        group_ids: Sequence[str],
+        half_life_s: float,
+        fallback: RerankWeights | None = None,
+        since: datetime | None = None,
+    ) -> tuple[RerankWeights, int]:
+        """Calibrated weights and the number of labeled samples they came from."""
         labeled = await self._read_model.calibration_samples(group_ids=group_ids, since=since)
         samples = [_to_sample(item) for item in labeled]
-        return calibrate_weights(samples, half_life_s=half_life_s, fallback=fallback)
+        weights = calibrate_weights(samples, half_life_s=half_life_s, fallback=fallback)
+        return weights, len(samples)

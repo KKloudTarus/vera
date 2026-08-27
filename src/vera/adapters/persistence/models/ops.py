@@ -166,6 +166,29 @@ class RetrievalFeedbackRow(Base):
     )
 
 
+class RerankWeightsRow(Base, UUIDPK):
+    """A calibrated rerank weight set. The latest active row is loaded at startup and used
+    in place of the configured defaults, so feedback-driven calibration takes effect.
+    """
+
+    __tablename__ = "rerank_weights"
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    w_relevance: Mapped[float] = mapped_column(Float, nullable=False)
+    w_authority: Mapped[float] = mapped_column(Float, nullable=False)
+    w_verification: Mapped[float] = mapped_column(Float, nullable=False)
+    w_recency: Mapped[float] = mapped_column(Float, nullable=False)
+    w_feedback: Mapped[float] = mapped_column(Float, nullable=False)
+    w_confidence: Mapped[float] = mapped_column(Float, nullable=False)
+    half_life_s: Mapped[float] = mapped_column(Float, nullable=False)
+    sample_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    active: Mapped[bool] = mapped_column(nullable=False, server_default=text("true"))
+
+    __table_args__ = (Index("ix_rerank_weights_active", "active", "created_at"),)
+
+
 class GroupEmbeddingStateRow(Base):
     """The embedding model and dimension a group's vectors were built with.
 
