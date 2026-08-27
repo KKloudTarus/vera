@@ -117,7 +117,9 @@ def build_container(settings: Settings) -> Container:
         key = settings.memory.openai_api_key.get_secret_value()
         extractor = LlmClaimExtractor(api_key=key, model=settings.memory.small_llm_model)
         judge = LlmContradictionJudge(api_key=key, model=settings.memory.small_llm_model)
-        entity_judge = LlmEntityResolutionJudge(api_key=key, model=settings.memory.small_llm_model)
+        # Entity equivalence is a subtle call where a false merge corrupts the graph; the
+        # small model is measurably unstable on sibling-vs-same, so use the larger model.
+        entity_judge = LlmEntityResolutionJudge(api_key=key, model=settings.memory.llm_model)
     else:
         from vera.adapters.curation.extractor import StructuredClaimExtractor
 

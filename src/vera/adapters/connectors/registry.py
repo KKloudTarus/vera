@@ -7,6 +7,7 @@ base URL and an optional bearer token.
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 from vera.adapters.connectors.confluence import ConfluenceConnector
@@ -16,13 +17,28 @@ from vera.adapters.connectors.jira import JiraConnector
 from vera.adapters.connectors.pdf import PdfConnector
 from vera.adapters.connectors.slack import SlackConnector
 from vera.domain.ports.connectors import ConnectorBatch, SourceConnector
+from vera.shared.errors import VeraError
 from vera.shared.types import JsonDict
+
+
+def _resolve_token(spec: dict[str, Any]) -> str | None:
+    """The connector's bearer token, from an environment variable named by ``token_env``
+    (preferred, so secrets stay out of the specs blob and logs) or an inline ``token``.
+    """
+    env_name = spec.get("token_env")
+    if env_name:
+        token = os.environ.get(str(env_name))
+        if not token:
+            raise VeraError(f"connector token env {env_name!r} is not set")
+        return token
+    inline = spec.get("token")
+    return str(inline) if inline else None
 
 
 def _http_client(spec: dict[str, Any]) -> Any:
     import httpx
 
-    token = spec.get("token")
+    token = _resolve_token(spec)
     headers = {"Authorization": f"Bearer {token}"} if token else {}
     return httpx.AsyncClient(headers=headers, timeout=30.0)
 

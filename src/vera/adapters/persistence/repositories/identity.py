@@ -193,6 +193,14 @@ class SqlAlchemyIdentityRepository:
         ).scalar_one_or_none()
         return _to_credential(row) if row is not None else None
 
+    async def get_credential(self, credential_id: UUID) -> Credential | None:
+        row = (
+            await self._session.execute(
+                select(CredentialRow).where(CredentialRow.id == credential_id)
+            )
+        ).scalar_one_or_none()
+        return _to_credential(row) if row is not None else None
+
     async def touch_credential(self, credential_id: UUID) -> None:
         await self._session.execute(
             update(CredentialRow)

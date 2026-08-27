@@ -263,3 +263,47 @@ async def issue_api_key(principal: PrincipalDep, identity: IdentityServiceDep) -
         principal_id=str(issued.principal_id),
         api_key=issued.api_key,
     )
+
+
+@router.post(
+    "/principals/{principal_id}/api-keys",
+    response_model=ApiKeyOut,
+    status_code=status.HTTP_201_CREATED,
+    summary="Issue an API key for another principal (workspace admin)",
+)
+async def issue_api_key_for(
+    principal_id: UUID, principal: PrincipalDep, identity: IdentityServiceDep
+) -> ApiKeyOut:
+    issued = _unwrap(await identity.issue_api_key(actor=principal, principal_id=principal_id))
+    return ApiKeyOut(
+        credential_id=str(issued.credential_id),
+        principal_id=str(issued.principal_id),
+        api_key=issued.api_key,
+    )
+
+
+@router.post(
+    "/api-keys/{credential_id}/rotate",
+    response_model=ApiKeyOut,
+    summary="Revoke a credential and issue a fresh one for the same principal",
+)
+async def rotate_api_key(
+    credential_id: UUID, principal: PrincipalDep, identity: IdentityServiceDep
+) -> ApiKeyOut:
+    issued = _unwrap(await identity.rotate_api_key(actor=principal, credential_id=credential_id))
+    return ApiKeyOut(
+        credential_id=str(issued.credential_id),
+        principal_id=str(issued.principal_id),
+        api_key=issued.api_key,
+    )
+
+
+@router.delete(
+    "/api-keys/{credential_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Revoke a credential (self or workspace admin)",
+)
+async def revoke_api_key(
+    credential_id: UUID, principal: PrincipalDep, identity: IdentityServiceDep
+) -> None:
+    _unwrap(await identity.revoke_credential(actor=principal, credential_id=credential_id))

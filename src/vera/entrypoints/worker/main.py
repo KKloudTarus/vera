@@ -23,6 +23,7 @@ from vera.observability import (
     instrument_worker,
 )
 from vera.observability.metrics import set_queue_depth, start_metrics_server
+from vera.shared.errors import VeraError
 
 log = get_logger(__name__)
 
@@ -33,21 +34,35 @@ _SYNC_EVERY_CYCLES = 10
 def build_sync_registrations(container: Container) -> list[SyncRegistration]:
     """Connector registrations for scheduled sync, from ``settings.connectors.specs``.
 
-    Empty by default, so the worker runs with no connectors until configured.
+    Empty by default, so the worker runs with no connectors until configured. A spec that
+    is malformed or whose secret is missing is skipped and logged (never with the secret),
+    so one bad connector does not stop the worker from serving the rest.
     """
     from uuid import UUID
 
     from vera.adapters.connectors.registry import build_connector
 
     registrations: list[SyncRegistration] = []
-    for spec in container.settings.connectors.specs:
-        registrations.append(
-            SyncRegistration(
+    for index, spec in enumerate(container.settings.connectors.specs):
+        kind = str(spec.get("kind", "?"))
+        try:
+            registration = SyncRegistration(
                 source_id=UUID(str(spec["source_id"])),
                 group_id=str(spec["group_id"]),
                 connector=build_connector(spec),
                 interval_s=float(str(spec.get("interval_s", 3600))),
             )
+        except (KeyError, ValueError, VeraError) as exc:
+            # Redacted: log the position and kind, never the spec (it may carry a token).
+            log.warning("connector.spec_skipped", index=index, kind=kind, reason=str(exc))
+            continue
+        registrations.append(registration)
+        log.info(
+            "connector.registered",
+            kind=kind,
+            source_id=str(registration.source_id),
+            group_id=registration.group_id,
+            interval_s=registration.interval_s,
         )
     return registrations
 

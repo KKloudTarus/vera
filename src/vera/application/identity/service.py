@@ -13,6 +13,7 @@ uniform across humans and machines.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from uuid import UUID
 
 from vera.domain.identity.models import (
@@ -29,7 +30,7 @@ from vera.domain.identity.models import (
     role_at_least,
 )
 from vera.domain.ports.unit_of_work import UnitOfWork
-from vera.shared.errors import DomainError, Err, Forbidden, NotFound, Ok, Result
+from vera.shared.errors import Conflict, DomainError, Err, Forbidden, NotFound, Ok, Result
 from vera.shared.ids import uuid7
 from vera.shared.security import generate_api_key
 
@@ -177,24 +178,61 @@ class IdentityService:
         return Ok((account, issued))
 
     async def issue_api_key(
-        self, *, actor: AuthenticatedPrincipal, principal_id: UUID
+        self,
+        *,
+        actor: AuthenticatedPrincipal,
+        principal_id: UUID,
+        expires_at: datetime | None = None,
     ) -> Result[IssuedApiKey, DomainError]:
-        # A principal issues its own key. Sharing management of another principal's keys
-        # is an admin flow deferred to a later phase.
-        if actor.id != principal_id:
-            return Err(Forbidden("a principal can only issue an API key for itself"))
+        """Issue a key for the actor itself, or, for a workspace admin, for another
+        principal that is a member of a workspace the actor administers.
+        """
+        guard = await self._may_manage(actor, principal_id)
+        if isinstance(guard, Err):
+            return guard
         target = await self._uow.identity.get_principal(principal_id)
         if target is None:
             return Err(NotFound(f"principal {principal_id} does not exist"))
-        return Ok(await self._issue_api_key(principal_id))
+        return Ok(await self._issue_api_key(principal_id, expires_at=expires_at))
 
-    async def revoke_credential(self, *, credential_id: UUID) -> Result[None, DomainError]:
+    async def rotate_api_key(
+        self,
+        *,
+        actor: AuthenticatedPrincipal,
+        credential_id: UUID,
+        expires_at: datetime | None = None,
+    ) -> Result[IssuedApiKey, DomainError]:
+        """Revoke a credential and issue a fresh one for the same principal, so a key can
+        be replaced without a window where the principal has none.
+        """
+        credential = await self._uow.identity.get_credential(credential_id)
+        if credential is None or credential.principal_id is None:
+            return Err(NotFound(f"credential {credential_id} not found"))
+        guard = await self._may_manage(actor, credential.principal_id)
+        if isinstance(guard, Err):
+            return guard
         revoked = await self._uow.identity.revoke_credential(credential_id)
         if not revoked:
-            return Err(NotFound(f"credential {credential_id} not found or already revoked"))
+            return Err(Conflict(f"credential {credential_id} was already revoked"))
+        return Ok(await self._issue_api_key(credential.principal_id, expires_at=expires_at))
+
+    async def revoke_credential(
+        self, *, actor: AuthenticatedPrincipal, credential_id: UUID
+    ) -> Result[None, DomainError]:
+        credential = await self._uow.identity.get_credential(credential_id)
+        if credential is None or credential.principal_id is None:
+            return Err(NotFound(f"credential {credential_id} not found"))
+        guard = await self._may_manage(actor, credential.principal_id)
+        if isinstance(guard, Err):
+            return guard
+        revoked = await self._uow.identity.revoke_credential(credential_id)
+        if not revoked:
+            return Err(Conflict(f"credential {credential_id} was already revoked"))
         return Ok(None)
 
-    async def _issue_api_key(self, principal_id: UUID) -> IssuedApiKey:
+    async def _issue_api_key(
+        self, principal_id: UUID, *, expires_at: datetime | None = None
+    ) -> IssuedApiKey:
         generated = generate_api_key()
         credential = await self._uow.identity.create_credential(
             principal_id=principal_id,
@@ -202,13 +240,29 @@ class IdentityService:
             kind=CredentialKind.API_KEY,
             key_prefix=generated.key_prefix,
             hashed_secret=generated.hashed_secret,
-            expires_at=None,
+            expires_at=expires_at,
         )
         return IssuedApiKey(
             credential_id=credential.id,
             principal_id=principal_id,
             api_key=generated.full_key,
         )
+
+    async def _may_manage(
+        self, actor: AuthenticatedPrincipal, principal_id: UUID
+    ) -> Result[None, DomainError]:
+        """The actor may manage the target's credentials if it is the target, or an admin
+        on a workspace the target belongs to.
+        """
+        if actor.id == principal_id:
+            return Ok(None)
+        for membership in await self._uow.identity.list_memberships(principal_id):
+            actor_membership = await self._uow.identity.find_membership(
+                principal_id=actor.id, workspace_id=membership.workspace_id
+            )
+            if actor_membership is not None and role_at_least(actor_membership.role, Role.ADMIN):
+                return Ok(None)
+        return Err(Forbidden(f"principal {actor.id} may not manage credentials for {principal_id}"))
 
     async def _require_role(
         self, actor: AuthenticatedPrincipal, workspace_id: UUID, minimum: Role

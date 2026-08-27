@@ -16,6 +16,7 @@ from vera.adapters.connectors.jira import JiraConnector
 from vera.adapters.connectors.pdf import PdfConnector
 from vera.adapters.connectors.registry import build_connector
 from vera.adapters.connectors.slack import SlackConnector
+from vera.shared.errors import VeraError
 from vera.shared.types import JsonDict
 
 
@@ -221,3 +222,29 @@ def test_registry_builds_connectors_by_kind() -> None:
     )
     with pytest.raises(ValueError, match="unknown connector kind"):
         build_connector({"kind": "nope"})
+
+
+def test_registry_resolves_token_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("VERA_TEST_JIRA_TOKEN", "secret-value")
+    client = build_connector(
+        {
+            "kind": "jira",
+            "base_url": "https://j",
+            "project_key": "ENG",
+            "token_env": "VERA_TEST_JIRA_TOKEN",
+        }
+    )
+    assert client.kind == "jira"  # built, secret pulled from the environment
+
+
+def test_registry_missing_token_env_is_an_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("VERA_TEST_ABSENT_TOKEN", raising=False)
+    with pytest.raises(VeraError, match="token env"):
+        build_connector(
+            {
+                "kind": "jira",
+                "base_url": "https://j",
+                "project_key": "ENG",
+                "token_env": "VERA_TEST_ABSENT_TOKEN",
+            }
+        )

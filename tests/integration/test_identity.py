@@ -72,10 +72,11 @@ async def test_revoked_key_stops_authenticating(
 ) -> None:
     async with _identity(sessionmaker) as svc:
         _, issued = await svc.register(display_name="Temp")
+    actor = await _authed(sessionmaker, issued.api_key)
     assert await ApiKeyAuthenticator(sessionmaker).authenticate(issued.api_key) is not None
 
     async with _identity(sessionmaker) as svc:
-        result = await svc.revoke_credential(credential_id=issued.credential_id)
+        result = await svc.revoke_credential(actor=actor, credential_id=issued.credential_id)
     assert isinstance(result, Ok)
     assert await ApiKeyAuthenticator(sessionmaker).authenticate(issued.api_key) is None
 
@@ -214,6 +215,69 @@ async def test_oidc_login_provisions_then_resolves_the_same_principal(
         algorithm="HS256",
     )
     assert await authenticator.authenticate(forged) is None
+
+
+async def test_admin_manages_a_members_api_key(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    # An admin can issue and revoke keys for a principal that belongs to a workspace it
+    # administers; a fresh, unrelated principal cannot.
+    async with _identity(sessionmaker) as svc:
+        _, admin_key = await svc.register(display_name="Admin")
+    admin = await _authed(sessionmaker, admin_key.api_key)
+
+    async with _identity(sessionmaker) as svc:
+        org = await svc.create_organization(name="Acme", slug=f"acme-{org_suffix()}")
+        ws = await svc.create_workspace(actor=admin, org_id=org.id, name="Platform", slug="plat")
+        member = await svc.create_principal(display_name="Member", email=None)
+        await svc.add_member(
+            actor=admin, workspace_id=ws.id, principal_id=member.id, role=Role.MEMBER
+        )
+
+    # The admin issues a key for the member.
+    async with _identity(sessionmaker) as svc:
+        issued = _ok(await svc.issue_api_key(actor=admin, principal_id=member.id))
+    assert await ApiKeyAuthenticator(sessionmaker).authenticate(issued.api_key) is not None
+
+    # An outsider (no shared workspace) cannot manage that credential.
+    async with _identity(sessionmaker) as svc:
+        _, outsider_key = await svc.register(display_name="Outsider")
+    outsider = await _authed(sessionmaker, outsider_key.api_key)
+    async with _identity(sessionmaker) as svc:
+        denied = await svc.revoke_credential(actor=outsider, credential_id=issued.credential_id)
+    assert isinstance(denied, Err)
+    assert await ApiKeyAuthenticator(sessionmaker).authenticate(issued.api_key) is not None
+
+    # The admin revokes it.
+    async with _identity(sessionmaker) as svc:
+        assert isinstance(
+            await svc.revoke_credential(actor=admin, credential_id=issued.credential_id), Ok
+        )
+    assert await ApiKeyAuthenticator(sessionmaker).authenticate(issued.api_key) is None
+
+
+async def test_rotate_replaces_the_key(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    async with _identity(sessionmaker) as svc:
+        _, first = await svc.register(display_name="Rotator")
+    actor = await _authed(sessionmaker, first.api_key)
+
+    async with _identity(sessionmaker) as svc:
+        rotated = _ok(await svc.rotate_api_key(actor=actor, credential_id=first.credential_id))
+
+    auth = ApiKeyAuthenticator(sessionmaker)
+    assert await auth.authenticate(first.api_key) is None  # old key revoked
+    assert await auth.authenticate(rotated.api_key) is not None  # new key works
+    # Rotating an already-revoked credential is a conflict.
+    async with _identity(sessionmaker) as svc:
+        again = await svc.rotate_api_key(actor=actor, credential_id=first.credential_id)
+    assert isinstance(again, Err)
+
+
+def _ok(result: object) -> object:
+    assert isinstance(result, Ok)
+    return result.value
 
 
 def org_suffix() -> str:
