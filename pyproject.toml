@@ -1,0 +1,153 @@
+[project]
+name = "vera"
+version = "0.1.0"
+description = "VERA: Verified Episodic Recall for Agents, a shared verified agent-memory platform."
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{ name = "VERA Team" }]
+dependencies = [
+    # --- API + MCP surface ---
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "mcp>=2.1",
+    # --- domain / validation / config ---
+    "pydantic>=2.9",
+    "pydantic-settings>=2.6",
+    # --- persistence (source of truth) ---
+    "sqlalchemy[asyncio]>=2.0.36",
+    "asyncpg>=0.30",
+    "alembic>=1.14",
+    # --- observability / logging ---
+    "structlog>=24.4",
+    # --- http + resilience ---
+    "httpx>=0.28",
+    "tenacity>=9.0",
+]
+
+# Optional stacks are grouped so the base skeleton installs lean and runnable.
+# Install everything into the active conda env with: pip install -e ".[all]"
+[project.optional-dependencies]
+memory = [
+    "graphiti-core>=0.29",
+    "neo4j>=5.26",
+]
+objectstore = [
+    "aioboto3>=13.0",
+]
+observability = [
+    "opentelemetry-sdk>=1.29",
+    "opentelemetry-exporter-otlp-proto-grpc>=1.29",
+    "opentelemetry-instrumentation-fastapi>=0.50b0",
+    "opentelemetry-instrumentation-sqlalchemy>=0.50b0",
+    "opentelemetry-instrumentation-asyncpg>=0.50b0",
+    "opentelemetry-instrumentation-httpx>=0.50b0",
+    "prometheus-client>=0.21",
+    "prometheus-fastapi-instrumentator>=7.0",
+]
+resilience = [
+    # Circuit breaking is in-house (a small async breaker) to avoid a legacy
+    # pkg_resources import and keep the dependency surface small; retry uses tenacity.
+    "cachetools>=5.5",
+    # RESP client for the distributed rate limiter. Speaks to Valkey or any
+    # redis-compatible server; no cloud lock-in.
+    "redis>=5",
+]
+security = [
+    # OAuth 2.1 Resource Server / OIDC JWT verification (API and MCP auth).
+    "pyjwt>=2.9",
+]
+dev = [
+    "ruff>=0.8",
+    "pyright>=1.1.390",
+    "pre-commit>=4.0",
+    "import-linter>=2.1",
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "pytest-cov>=6.0",
+    "respx>=0.22",
+    "factory-boy>=3.3",
+    "testcontainers[postgres,neo4j]>=4.9",
+    "detect-secrets>=1.5",
+    "pip-audit>=2.7",
+]
+all = [
+    "vera[memory,objectstore,observability,resilience,security,dev]",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/vera"]
+
+# ------------------------------------------------------------------ tooling ---
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+# E/F pyflakes+pycodestyle · I isort · B bugbear · UP pyupgrade
+# ASYNC async-correctness · S bandit-security · C4 comprehensions · SIM · RUF
+select = ["E", "F", "I", "B", "UP", "ASYNC", "S", "C4", "SIM", "RUF"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101"]                  # assert is fine in tests
+"migrations/**" = ["E501", "S608"]     # author-written DDL, long SQL lines are fine
+
+[tool.ruff.lint.isort]
+known-first-party = ["vera"]
+
+[tool.pyright]
+include = ["src"]
+exclude = ["**/__pycache__"]
+pythonVersion = "3.11"
+typeCheckingMode = "strict"
+reportMissingTypeStubs = false
+
+[tool.pytest.ini_options]
+asyncio_mode = "strict"
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
+markers = [
+    "integration: tests that need real Postgres/Neo4j (testcontainers)",
+    "llm: opt-in tests that call real LLM providers (nightly only)",
+]
+
+[tool.coverage.run]
+source = ["src/vera"]
+branch = true
+
+# ---- import-linter: architecture enforced by CI, not by convention ----------
+
+[tool.importlinter]
+root_package = "vera"
+include_external_packages = true
+
+[[tool.importlinter.contracts]]
+name = "Clean architecture layering (imports point inward only)"
+type = "layers"
+layers = [
+    "vera.entrypoints",
+    "vera.adapters",
+    "vera.application",
+    "vera.domain",
+]
+# vera.shared, vera.config, vera.observability are cross-cutting and unconstrained.
+
+[[tool.importlinter.contracts]]
+name = "Domain and application stay pure (no infrastructure)"
+type = "forbidden"
+source_modules = ["vera.domain", "vera.application"]
+forbidden_modules = [
+    "graphiti_core",
+    "sqlalchemy",
+    "asyncpg",
+    "boto3",
+    "aioboto3",
+    "neo4j",
+    "fastapi",
+    "httpx",
+]

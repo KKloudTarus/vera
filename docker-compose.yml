@@ -1,0 +1,90 @@
+# Local development stack. All services are vendor-neutral, self-hostable, cloud-portable.
+# No managed single-cloud services (no SQS/DynamoDB/etc.).
+name: vera
+
+services:
+  postgres:
+    image: postgres:18
+    environment:
+      POSTGRES_USER: vera
+      POSTGRES_PASSWORD: vera
+      POSTGRES_DB: vera
+    ports: ["${VERA_POSTGRES_HOST_PORT:-5432}:5432"]
+    # postgres:18+ stores data in a versioned subdir; mount the parent per the image guidance.
+    volumes: ["./.data/postgres:/var/lib/postgresql"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U vera"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  neo4j:
+    image: neo4j:5.26
+    environment:
+      NEO4J_AUTH: neo4j/vera-local-pass
+      NEO4J_PLUGINS: '["apoc"]'
+    ports: ["7474:7474", "7687:7687"]
+    volumes: ["./.data/neo4j:/data"]
+
+  valkey:
+    image: valkey/valkey:8
+    command: ["valkey-server", "--save", "", "--appendonly", "no"]
+    ports: ["6379:6379"]
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports: ["9000:9000", "9001:9001"]
+    volumes: ["./.data/minio:/data"]
+
+  # Application processes, all from one image. They stay under the "app" profile so the
+  # default `docker compose up` brings only local infra; run them with:
+  #   docker compose --profile app up --build
+  migrate:
+    build: .
+    profiles: ["app"]
+    command: ["alembic", "upgrade", "head"]
+    environment: &app_env
+      VERA_DB__DSN: postgresql+asyncpg://vera:vera@postgres:5432/vera
+      VERA_NEO4J__URI: bolt://neo4j:7687
+      VERA_NEO4J__USER: neo4j
+      VERA_NEO4J__PASSWORD: vera-local-pass
+      VERA_MEMORY__PROVIDER: graphiti
+      VERA_RESILIENCE__VALKEY_URL: redis://valkey:6379/0
+      VERA_OBJECTSTORE__ENDPOINT_URL: http://minio:9000
+      VERA_OBJECTSTORE__ACCESS_KEY: minioadmin
+      VERA_OBJECTSTORE__SECRET_KEY: minioadmin
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    build: .
+    profiles: ["app"]
+    environment: *app_env
+    ports: ["8000:8000"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  worker:
+    build: .
+    profiles: ["app"]
+    command: ["python", "-m", "vera.entrypoints.worker.main"]
+    environment: *app_env
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  mcp:
+    build: .
+    profiles: ["app"]
+    command: ["python", "-m", "vera.entrypoints.mcp.main"]
+    environment: *app_env
+    ports: ["8080:8080"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully

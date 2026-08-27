@@ -1,0 +1,34 @@
+# Keep the build context tiny and secrets out of the image.
+.git
+.github
+.claude
+.data
+.env
+.env.*
+!.env.example
+
+# Local-only docs and planning (never shipped in the image)
+CLAUDE.md
+BUILD_CHECKLIST.md
+
+# Tests and dev tooling are not part of the runtime image
+tests
+.pre-commit-config.yaml
+
+# Caches and build artifacts
+__pycache__
+*.py[cod]
+*.egg-info
+.eggs
+build
+dist
+.venv
+.ruff_cache
+.pytest_cache
+.mypy_cache
+.pyright
+.import_linter_cache
+.coverage
+htmlcov
+coverage.xml
+.DS_Store

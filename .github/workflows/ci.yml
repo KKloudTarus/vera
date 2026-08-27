@@ -1,0 +1,96 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # A DSN is required for settings to load; the check job never opens a connection.
+  VERA_DB__DSN: postgresql+asyncpg://vera:vera@localhost:5432/vera
+
+jobs:
+  check:
+    name: Lint, types, arch, unit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -e ".[all]"
+      - name: Ruff (lint)
+        run: ruff check src tests
+      - name: Ruff (format)
+        run: ruff format --check src tests
+      - name: Pyright
+        run: pyright
+      - name: Import contracts
+        run: lint-imports
+      - name: Unit tests
+        run: pytest -m "not integration and not llm"
+
+  integration:
+    name: Integration tests
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: vera
+          POSTGRES_PASSWORD: vera
+          POSTGRES_DB: vera
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U vera"
+          --health-interval 5s --health-timeout 3s --health-retries 20
+      neo4j:
+        image: neo4j:5.26
+        env:
+          NEO4J_AUTH: neo4j/vera-local-pass
+        ports: ["7687:7687", "7474:7474"]
+        options: >-
+          --health-cmd "wget -qO- http://localhost:7474 || exit 1"
+          --health-interval 10s --health-timeout 5s --health-retries 20
+      valkey:
+        image: valkey/valkey:8
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "valkey-cli ping"
+          --health-interval 5s --health-timeout 3s --health-retries 20
+    env:
+      VERA_NEO4J__URI: bolt://localhost:7687
+      VERA_NEO4J__USER: neo4j
+      VERA_NEO4J__PASSWORD: vera-local-pass
+      VERA_RESILIENCE__VALKEY_URL: redis://localhost:6379/0
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -e ".[all]"
+      - name: Apply migrations
+        run: alembic upgrade head
+      - name: Integration tests
+        run: pytest -m integration
+
+  security:
+    name: Dependency audit
+    runs-on: ubuntu-latest
+    # Advisory: report vulnerabilities without blocking merges.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -e ".[all]"
+      - name: pip-audit
+        run: pip-audit --strict

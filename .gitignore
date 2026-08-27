@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Virtualenv / uv
+.venv/
+.python-version
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# Tooling caches
+.ruff_cache/
+.pytest_cache/
+.mypy_cache/
+.pyright/
+.import_linter_cache/
+.coverage
+htmlcov/
+coverage.xml
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+
+# Local data volumes
+.data/
+
+# Local-only planning and assistant files (never published)
+.claude/
+CLAUDE.md
+BUILD_CHECKLIST.md
