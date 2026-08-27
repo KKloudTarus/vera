@@ -13,10 +13,11 @@ import math
 import time
 from collections.abc import Mapping
 from contextlib import AsyncExitStack
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 
 from vera.domain.ports.memory_engine import GraphHit, GraphQuery, MemoryEngine
+from vera.domain.ports.reranker import Reranker
 from vera.domain.ports.retrieval import HitProvenance, RetrievalReadModel
 from vera.observability import span
 from vera.observability.cost import UsageContext, reset_usage_context, set_usage_context
@@ -114,11 +115,17 @@ class SearchMemoryHandler:
         *,
         read_timeout_s: float | None = None,
         weights: RerankWeights | None = None,
+        reranker: Reranker | None = None,
+        cross_encoder_weight: float = 0.5,
+        cross_encoder_top_n: int = 20,
     ) -> None:
         self._engine = engine
         self._read_model = read_model
         self._read_timeout_s = read_timeout_s
         self._weights = (weights or RerankWeights()).normalized()
+        self._reranker = reranker
+        self._ce_weight = cross_encoder_weight
+        self._ce_top_n = cross_encoder_top_n
 
     async def handle(self, query: SearchMemory) -> list[RankedHit]:
         started = time.perf_counter()
@@ -158,7 +165,28 @@ class SearchMemoryHandler:
         feedback = await self._read_model.feedback_counts(group_ids=group_ids, refs=edge_uuids)
 
         with span("memory.rerank", candidates=len(candidates)):
-            return self._rerank(candidates, provenance, feedback, limit=query.limit)
+            if self._reranker is None:
+                return self._rerank(candidates, provenance, feedback, limit=query.limit)
+            head = self._rerank(candidates, provenance, feedback, limit=self._ce_top_n)
+        reordered = await self._cross_encode(query.text, head)
+        return reordered[: query.limit]
+
+    async def _cross_encode(self, query_text: str, head: list[RankedHit]) -> list[RankedHit]:
+        """Stage 3: blend a cross-encoder's query-fact relevance into the head's order."""
+        if not head or self._reranker is None:
+            return head
+        with span("memory.cross_encode", head=len(head)):
+            ce_scores = await self._reranker.rerank(query=query_text, facts=[h.fact for h in head])
+        blends = [h.score for h in head]
+        lo, hi = min(blends), max(blends)
+        span_ = hi - lo + 1e-9
+        w = self._ce_weight
+        scored: list[tuple[float, RankedHit]] = []
+        for hit, ce in zip(head, ce_scores, strict=True):
+            final = (1 - w) * ((hit.score - lo) / span_) + w * ce
+            scored.append((final, replace(hit, score=round(final, 6))))
+        scored.sort(key=lambda pair: pair[0], reverse=True)
+        return [hit for _, hit in scored]
 
     def _rerank(
         self,

@@ -68,14 +68,25 @@ def build_server(container: Container, settings: Settings) -> MCPServer:
     )
 
     @server.tool()
-    async def memory_search(query: str, limit: int = 10) -> list[dict[str, Any]]:
-        """Search verified memory in the caller's scopes. Returns ranked facts with provenance."""
-        return await service.search(_principal_id(), query=query, limit=limit)
+    async def memory_search(
+        query: str, limit: int = 10, as_of: str | None = None
+    ) -> list[dict[str, Any]]:
+        """Search verified memory in the caller's scopes. Returns ranked facts with
+        provenance. Pass `as_of` (ISO-8601) to query the memory as it stood at that time.
+        """
+        return await service.search(_principal_id(), query=query, limit=limit, as_of=as_of)
 
     @server.tool()
     async def memory_get_context(query: str, limit: int = 5) -> list[dict[str, Any]]:
         """Return the most relevant verified facts as context for a question."""
         return await service.get_context(_principal_id(), query=query, limit=limit)
+
+    @server.tool()
+    async def memory_explore(entity: str, depth: int = 2, limit: int = 20) -> list[dict[str, Any]]:
+        """Multi-hop reasoning: facts within `depth` hops of an entity (how it connects to
+        others), with provenance. Use to trace relationships the single-fact search misses.
+        """
+        return await service.explore(_principal_id(), entity=entity, depth=depth, limit=limit)
 
     @server.tool()
     async def memory_explain(query: str) -> list[dict[str, Any]]:

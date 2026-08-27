@@ -25,6 +25,7 @@ from vera.bootstrap import Container
 from vera.domain.ports.memory_engine import EpisodeSpec, GraphQuery
 from vera.entrypoints.worker.lane_pool import LanePool
 from vera.entrypoints.worker.main import run_until_empty
+from vera.shared.errors import Ok
 from vera.shared.ids import deterministic_id, uuid7
 from vera.shared.time import utc_now
 from vera.shared.types import GroupId, SourceId
@@ -77,6 +78,46 @@ async def _ingest_triple(engine: GraphitiMemoryEngine, *, group: str, source: st
             },
         )
     )
+
+
+async def _make_edge(
+    engine: GraphitiMemoryEngine, *, group: str, subject: str, obj: str, uuid: str
+) -> None:
+    # Seed a RELATES_TO edge directly. add_triplet would reconcile overlapping edges via
+    # the LLM (unavailable offline), so connected edges are written straight to the graph.
+    gid = group.replace(":", "_")
+    await engine._client.driver.execute_query(  # test-only graph seeding
+        "MERGE (s:Entity {group_id: $g, name: $subject}) "
+        "MERGE (o:Entity {group_id: $g, name: $obj}) "
+        "CREATE (s)-[:RELATES_TO {group_id: $g, name: 'DEPENDS_ON', uuid: $uuid, "
+        "fact: $fact, invalid_at: null}]->(o)",
+        g=gid,
+        subject=subject,
+        obj=obj,
+        uuid=uuid,
+        fact=f"{subject} DEPENDS_ON {obj}",
+    )
+
+
+async def test_neighbors_traverses_multiple_hops(
+    graphiti_engine: GraphitiMemoryEngine,
+) -> None:
+    group = f"p:{uuid7().hex[:12]}"
+    # A -> B -> C: from A, depth 2 should reach both the A->B and B->C edges.
+    await _make_edge(graphiti_engine, group=group, subject="alpha", obj="bravo", uuid="edge-ab")
+    await _make_edge(graphiti_engine, group=group, subject="bravo", obj="charlie", uuid="edge-bc")
+
+    one_hop = await graphiti_engine.neighbors(
+        group_ids=(GroupId(group),), center="alpha", depth=1, limit=20
+    )
+    assert any("bravo" in h.fact for h in one_hop)
+    assert not any("charlie" in h.fact for h in one_hop)  # charlie is two hops away
+
+    two_hop = await graphiti_engine.neighbors(
+        group_ids=(GroupId(group),), center="alpha", depth=2, limit=20
+    )
+    facts = " ".join(h.fact for h in two_hop)
+    assert "bravo" in facts and "charlie" in facts  # reached via the B->C edge
 
 
 async def test_graphiti_satisfies_contract(graphiti_engine: GraphitiMemoryEngine) -> None:
@@ -257,6 +298,49 @@ async def _publish_and_ingest(
     finally:
         await pool.stop()
     return container
+
+
+async def test_retract_source_removes_it_from_memory(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    make_container: Callable[[object], Container],
+    graphiti_engine: GraphitiMemoryEngine,
+) -> None:
+    from vera.adapters.persistence.retraction import RetractionService
+
+    group = f"p:{uuid7().hex[:12]}"
+    container = await _publish_and_ingest(
+        sessionmaker, make_container, graphiti_engine, group=group
+    )
+    handler = SearchMemoryHandler(container.memory, container.retrieval_read)
+    hits = await handler.handle(
+        SearchMemory(text="paymentapi", group_ids=(GroupId(group),), limit=5)
+    )
+    target = next(h for h in hits if "paymentapi" in h.fact)
+    assert target.source_id is not None
+
+    service = RetractionService(sessionmaker, container.memory, container.object_store)
+    result = await service.retract_source(group_id=group, source_id=target.source_id)
+    assert isinstance(result, Ok)
+    assert result.value.edges_removed >= 1
+
+    # Gone from the current view, its graph map cleared, and marked retracted in Postgres.
+    after = await handler.handle(
+        SearchMemory(text="paymentapi", group_ids=(GroupId(group),), limit=5)
+    )
+    assert all("paymentapi" not in h.fact for h in after)
+    async with sessionmaker() as s:
+        edges = await s.scalar(
+            text("SELECT count(*) FROM graph_edge_map WHERE group_id = :g"), {"g": group}
+        )
+        retracted = await s.scalar(
+            text(
+                "SELECT count(*) FROM published_episodes "
+                "WHERE group_id = :g AND retracted_at IS NOT NULL"
+            ),
+            {"g": group},
+        )
+    assert edges == 0
+    assert retracted == 1
 
 
 async def test_search_carries_provenance_and_feedback_lowers_score(

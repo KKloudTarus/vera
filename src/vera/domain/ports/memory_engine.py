@@ -89,10 +89,23 @@ class MemoryEngine(Protocol):
         """Stage-1 hybrid retrieval. Returns candidates; VERA owns the final rank."""
         ...
 
+    async def neighbors(
+        self, *, group_ids: Sequence[GroupId], center: str, depth: int, limit: int
+    ) -> Sequence[GraphHit]:
+        """Facts on paths within ``depth`` hops of the named entity (multi-hop reasoning).
+        Current-time only: superseded and retracted edges are excluded.
+        """
+        ...
+
     async def health(self) -> bool:
         """Cheap liveness probe of the underlying graph."""
         ...
 
     async def clear_group(self, group_id: str) -> None:
         """Delete all graph data for one group, so it can be rebuilt from Postgres."""
+        ...
+
+    async def retract_episode(self, *, group_id: str, edge_uuids: Sequence[str]) -> None:
+        """Permanently delete the given edges (and any node left with no edges) from the
+        graph, for retraction and erasure."""
         ...

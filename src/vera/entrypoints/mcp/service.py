@@ -7,6 +7,7 @@ caller's personal scope as an unverified, tier-4 claim (never auto-published).
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 from uuid import UUID
 
@@ -18,6 +19,13 @@ from vera.domain.ports.identity import ResolvedScope, ScopeResolver
 from vera.shared.errors import is_ok
 from vera.shared.ids import uuid7
 from vera.shared.types import GroupId
+
+
+def _parse_as_of(value: str | None) -> datetime | None:
+    """Parse an ISO-8601 instant (accepting a trailing Z) or None."""
+    if not value:
+        return None
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
 
 
 class ScopeError(Exception):
@@ -32,6 +40,9 @@ class VeraMcpService:
             container.memory,
             container.retrieval_read,
             weights=container.rerank_weights,
+            reranker=container.reranker,
+            cross_encoder_weight=container.settings.rerank.cross_encoder_weight,
+            cross_encoder_top_n=container.settings.rerank.cross_encoder_top_n,
         )
 
     async def _resolve(self, principal_id: UUID) -> ResolvedScope:
@@ -41,12 +52,15 @@ class VeraMcpService:
         return scope
 
     async def search(
-        self, principal_id: UUID, *, query: str, limit: int = 10
+        self, principal_id: UUID, *, query: str, limit: int = 10, as_of: str | None = None
     ) -> list[dict[str, Any]]:
         scope = await self._resolve(principal_id)
         hits = await self._search.handle(
             SearchMemory(
-                text=query, group_ids=tuple(GroupId(g) for g in scope.group_ids), limit=limit
+                text=query,
+                group_ids=tuple(GroupId(g) for g in scope.group_ids),
+                limit=limit,
+                as_of=_parse_as_of(as_of),
             )
         )
         return [
@@ -67,6 +81,33 @@ class VeraMcpService:
         self, principal_id: UUID, *, query: str, limit: int = 5
     ) -> list[dict[str, Any]]:
         return await self.search(principal_id, query=query, limit=limit)
+
+    async def explore(
+        self, principal_id: UUID, *, entity: str, depth: int = 2, limit: int = 20
+    ) -> list[dict[str, Any]]:
+        """Multi-hop: facts within ``depth`` hops of an entity, with provenance."""
+        scope = await self._resolve(principal_id)
+        hits = await self._container.memory.neighbors(
+            group_ids=tuple(GroupId(g) for g in scope.group_ids),
+            center=entity,
+            depth=depth,
+            limit=limit,
+        )
+        edge_uuids = [h.edge_uuid for h in hits if h.edge_uuid]
+        provenance = await self._container.retrieval_read.enrich(
+            group_ids=list(scope.group_ids), edge_uuids=edge_uuids
+        )
+        out: list[dict[str, Any]] = []
+        for hit in hits:
+            prov = provenance.get(hit.edge_uuid or "")
+            out.append(
+                {
+                    "fact": hit.fact,
+                    "source_id": prov.source_id if prov else None,
+                    "verification": prov.verification if prov else None,
+                }
+            )
+        return out
 
     async def recent_changes(self, principal_id: UUID, *, limit: int = 20) -> list[dict[str, Any]]:
         scope = await self._resolve(principal_id)

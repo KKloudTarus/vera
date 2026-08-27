@@ -39,6 +39,7 @@ from vera.domain.ports.identity import Authenticator
 from vera.domain.ports.job_queue import JobQueue
 from vera.domain.ports.memory_engine import MemoryEngine
 from vera.domain.ports.object_store import ObjectStore
+from vera.domain.ports.reranker import Reranker
 from vera.domain.ports.retrieval import RetrievalReadModel
 from vera.observability.cost import UsageSink
 
@@ -62,6 +63,7 @@ class Container:
     judge: ContradictionJudge | None
     entity_judge: EntityResolutionJudge | None
     embedder: Embedder | None
+    reranker: Reranker | None = None
     # Active rerank weights: the configured defaults until refresh_rerank_weights loads a
     # calibrated set from the database at startup.
     rerank_weights: RerankWeights = field(default_factory=RerankWeights)
@@ -112,6 +114,7 @@ def build_container(settings: Settings) -> Container:
     extractor: ClaimExtractor
     judge: ContradictionJudge | None = None
     entity_judge: EntityResolutionJudge | None = None
+    reranker: Reranker | None = None
     if settings.memory.openai_api_key is not None:
         from vera.adapters.curation.entity_judge import LlmEntityResolutionJudge
         from vera.adapters.curation.judge import LlmContradictionJudge
@@ -123,6 +126,10 @@ def build_container(settings: Settings) -> Container:
         # Entity equivalence is a subtle call where a false merge corrupts the graph; the
         # small model is measurably unstable on sibling-vs-same, so use the larger model.
         entity_judge = LlmEntityResolutionJudge(api_key=key, model=settings.memory.llm_model)
+        if settings.rerank.cross_encoder_enabled:
+            from vera.adapters.curation.reranker import LlmReranker
+
+            reranker = LlmReranker(api_key=key, model=settings.memory.small_llm_model)
     else:
         from vera.adapters.curation.extractor import StructuredClaimExtractor
 
@@ -144,6 +151,7 @@ def build_container(settings: Settings) -> Container:
         judge=judge,
         entity_judge=entity_judge,
         embedder=embedder,
+        reranker=reranker,
         rerank_weights=build_rerank_weights(settings),
     )
 

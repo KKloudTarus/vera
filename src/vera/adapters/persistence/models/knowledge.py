@@ -169,6 +169,8 @@ class PublishedEpisodeRow(Base, UUIDPK):
     # Bi-temporal invalidation: set when a newer, contradicting fact supersedes this one.
     invalid_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     superseded_by_source: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    # Retraction/erasure: set when a source is withdrawn; excluded from search and replay.
+    retracted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

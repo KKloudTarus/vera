@@ -129,6 +129,11 @@ class RerankSettings(BaseModel):
     # Calibration applies (persists) new weights only with at least this many labeled
     # feedback samples, so a handful of votes cannot swing ranking.
     min_calibration_samples: int = 20
+    # Optional stage-3 cross-encoder over the reranked head. Off by default (adds an LLM
+    # call per search); cross_encoder_weight blends its score with the stage-2 blend.
+    cross_encoder_enabled: bool = False
+    cross_encoder_weight: float = 0.5
+    cross_encoder_top_n: int = 20
 
 
 class ConnectorsSettings(BaseModel):

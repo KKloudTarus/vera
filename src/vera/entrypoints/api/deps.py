@@ -34,6 +34,9 @@ def get_search_handler(container: ContainerDep) -> SearchMemoryHandler:
         container.retrieval_read,
         read_timeout_s=container.settings.resilience.read_timeout_s,
         weights=container.rerank_weights,
+        reranker=container.reranker,
+        cross_encoder_weight=container.settings.rerank.cross_encoder_weight,
+        cross_encoder_top_n=container.settings.rerank.cross_encoder_top_n,
     )
 
 

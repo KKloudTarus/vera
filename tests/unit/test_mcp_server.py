@@ -11,6 +11,7 @@ from vera.entrypoints.mcp.main import build_server
 _EXPECTED = {
     "memory_search",
     "memory_get_context",
+    "memory_explore",
     "memory_explain",
     "memory_get_source",
     "memory_recent_changes",
@@ -20,7 +21,7 @@ _EXPECTED = {
 
 
 @pytest.mark.asyncio
-async def test_server_exposes_the_seven_memory_tools() -> None:
+async def test_server_exposes_the_memory_tools() -> None:
     settings = get_settings()
     container = build_container(settings)
     try:

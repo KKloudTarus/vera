@@ -54,7 +54,7 @@ async def verify_group(container: Container, group_id: str) -> RebuildReport:
 
 _EPISODES = text(
     "SELECT source_id, payload, dedup_uuid FROM published_episodes "
-    "WHERE group_id = :g ORDER BY reference_time ASC"
+    "WHERE group_id = :g AND retracted_at IS NULL ORDER BY reference_time ASC"
 )
 _CLEAR = (
     text("DELETE FROM graph_edge_map WHERE group_id = :g"),

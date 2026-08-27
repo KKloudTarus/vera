@@ -41,3 +41,19 @@ async def test_put_get_roundtrip_and_presign() -> None:
 
     url = await store.presigned_url(key=key)
     assert key in url and url.startswith("http")
+
+
+async def test_delete_is_idempotent() -> None:
+    store = _store()
+    key = f"artifacts/{uuid7().hex}/v1"
+    try:
+        await store.put(key=key, data=b"to be erased", content_type="text/plain")
+    except Exception as exc:  # MinIO not reachable
+        pytest.skip(f"object store not reachable: {exc}")
+
+    await store.delete(key=key)
+    # The object is gone.
+    with pytest.raises(Exception):  # noqa: B017  any not-found error is acceptable
+        await store.get(key=key)
+    # Deleting again is a no-op, not an error (idempotent erasure).
+    await store.delete(key=key)

@@ -84,3 +84,8 @@ class S3ObjectStore:
                 Params={"Bucket": self._settings.bucket, "Key": key},
                 ExpiresIn=expires_in_s,
             )
+
+    async def delete(self, *, key: str) -> None:
+        # S3 delete_object is idempotent: deleting an absent key returns success.
+        async with self._client() as client:
+            await client.delete_object(Bucket=self._settings.bucket, Key=key)

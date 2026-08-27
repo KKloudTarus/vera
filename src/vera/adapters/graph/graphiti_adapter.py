@@ -13,7 +13,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Sequence
 from datetime import datetime
-from typing import Any
+from typing import Any, LiteralString, cast
 
 from graphiti_core import Graphiti
 from graphiti_core.edges import EntityEdge
@@ -43,6 +43,33 @@ _EPISODE_TYPES = {
     "json": EpisodeType.json,
     "text": EpisodeType.text,
 }
+
+
+def _neighbors_query(hops: int) -> str:
+    return (
+        f"MATCH path=(s:Entity {{group_id: $gid, name: $center}})"
+        f"-[:RELATES_TO*1..{hops}]-(:Entity) "
+        "UNWIND relationships(path) AS r WITH DISTINCT r "
+        "WHERE r.group_id = $gid AND r.invalid_at IS NULL "
+        "RETURN r.fact AS fact, r.uuid AS uuid LIMIT $limit"
+    )
+
+
+# A LiteralString per allowed depth, so the driver's typed execute_query accepts it.
+_NEIGHBORS_QUERIES: dict[int, str] = {
+    1: _neighbors_query(1),
+    2: _neighbors_query(2),
+    3: _neighbors_query(3),
+}
+
+
+def _records(result: Any) -> list[Any]:
+    # neo4j's execute_query returns an EagerResult(records, summary, keys); the driver is
+    # untyped, so treat the records attribute as Any and fall back to a tuple's first item.
+    records: Any = getattr(result, "records", None)
+    if records is None:
+        records = cast("Any", result)[0] if isinstance(result, tuple) and result else []
+    return list(records)
 
 
 def _graphiti_group(group_id: str) -> str:
@@ -228,12 +255,54 @@ class GraphitiMemoryEngine:
             )
         return hits
 
+    async def neighbors(
+        self, *, group_ids: Sequence[GroupId], center: str, depth: int, limit: int
+    ) -> Sequence[GraphHit]:
+        # Variable-length bound cannot be a query parameter, so clamp and inline it.
+        # Variable-length bound cannot be a query parameter; select a fixed literal query
+        # per clamped depth so the driver still receives a LiteralString.
+        query = cast("LiteralString", _NEIGHBORS_QUERIES[max(1, min(int(depth), 3))])
+        merged: dict[str, GraphHit] = {}
+        with span("graph.neighbors", depth=int(depth)):
+            for group_id in group_ids:
+                gid = _graphiti_group(str(group_id))
+                result = cast(
+                    "Any",
+                    await self._client.driver.execute_query(  # pyright: ignore[reportUnknownMemberType]
+                        query, gid=gid, center=center, limit=limit
+                    ),
+                )
+                for record in _records(result):
+                    uuid = record["uuid"]
+                    merged.setdefault(
+                        uuid, GraphHit(fact=record["fact"], score=0.0, edge_uuid=uuid)
+                    )
+        return list(merged.values())[:limit]
+
     async def health(self) -> bool:
         try:
             await self._client.driver.execute_query("RETURN 1")  # pyright: ignore[reportUnknownMemberType]
         except Exception:  # health reports status instead of raising
             return False
         return True
+
+    async def retract_episode(self, *, group_id: str, edge_uuids: Sequence[str]) -> None:
+        if not edge_uuids:
+            return
+        gid = _graphiti_group(str(group_id))
+        # Delete the named edges, then any entity node in the group left with no relations.
+        await self._client.driver.execute_query(  # pyright: ignore[reportUnknownMemberType]
+            """
+            MATCH ()-[e:RELATES_TO {group_id: $gid}]->()
+            WHERE e.uuid IN $edge_uuids
+            DELETE e
+            """,
+            gid=gid,
+            edge_uuids=list(edge_uuids),
+        )
+        await self._client.driver.execute_query(  # pyright: ignore[reportUnknownMemberType]
+            "MATCH (n:Entity {group_id: $gid}) WHERE NOT (n)--() DELETE n", gid=gid
+        )
 
     async def clear_group(self, group_id: str) -> None:
         # Delete every node (and its edges) for the group so a reprocess rebuilds it
