@@ -2,6 +2,7 @@
 
 from vera.adapters.connectors.cmdb import CmdbConnector
 from vera.adapters.connectors.confluence import ConfluenceConnector
+from vera.adapters.connectors.filesystem import FilesystemConnector
 from vera.adapters.connectors.git import GitConnector
 from vera.adapters.connectors.jira import JiraConnector
 from vera.adapters.connectors.pdf import PdfConnector
@@ -10,6 +11,7 @@ from vera.adapters.connectors.slack import SlackConnector
 __all__ = [
     "CmdbConnector",
     "ConfluenceConnector",
+    "FilesystemConnector",
     "GitConnector",
     "JiraConnector",
     "PdfConnector",

@@ -23,6 +23,7 @@ class SourceKind(StrEnum):
     CMDB = "cmdb"
     SLACK = "slack"
     PDF = "pdf"
+    FILESYSTEM = "filesystem"
     AGENT = "agent"
 
 

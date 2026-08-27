@@ -19,6 +19,7 @@ from vera.domain.curation.trust import TrustAction, action_for_tier, authority_f
 from vera.domain.knowledge.models import ReviewDecision, VerificationStatus
 from vera.domain.ontology import CURRENT_PIPELINE_VERSIONS
 from vera.domain.ports.curation import ClaimExtractor
+from vera.domain.ports.object_store import ObjectStore
 from vera.domain.ports.unit_of_work import UnitOfWork
 from vera.shared.errors import Conflict, DomainError, Err, NotFound, Ok, PolicyRejected, Result
 from vera.shared.ids import deterministic_id
@@ -59,9 +60,12 @@ def _payload_for(
 
 
 class CurationService:
-    def __init__(self, uow: UnitOfWork, extractor: ClaimExtractor) -> None:
+    def __init__(
+        self, uow: UnitOfWork, extractor: ClaimExtractor, object_store: ObjectStore | None = None
+    ) -> None:
         self._uow = uow
         self._extractor = extractor
+        self._object_store = object_store
 
     async def ingest_artifact(self, cmd: IngestArtifact) -> Result[IngestResult, DomainError]:
         uow = self._uow
@@ -84,6 +88,11 @@ class CurationService:
                 )
             )
         s3_key = f"artifacts/{cmd.source_id}/{cmd.external_id}/v{(head.version + 1) if head else 1}"
+        # Persist the raw artifact bytes so the graph stays rebuildable from Postgres + S3.
+        if self._object_store is not None and cmd.body:
+            await self._object_store.put(
+                key=s3_key, data=cmd.body.encode("utf-8"), content_type="text/plain"
+            )
         if head is None:
             ref = await uow.artifacts.create_with_version(
                 source_id=cmd.source_id,

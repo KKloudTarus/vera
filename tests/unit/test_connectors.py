@@ -10,6 +10,7 @@ import respx
 
 from vera.adapters.connectors.cmdb import CmdbConnector
 from vera.adapters.connectors.confluence import ConfluenceConnector
+from vera.adapters.connectors.filesystem import FilesystemConnector
 from vera.adapters.connectors.git import GitConnector
 from vera.adapters.connectors.jira import JiraConnector
 from vera.adapters.connectors.pdf import PdfConnector
@@ -172,6 +173,25 @@ async def test_cmdb_maps_relations_to_triples_incrementally() -> None:
 
     # Nothing changed since the watermark: no records.
     batch2 = await connector.fetch_changes({"since": "2026-01-05"})
+    assert batch2.records == ()
+
+
+@pytest.mark.asyncio
+async def test_filesystem_reads_markdown_recursively_and_incrementally(tmp_path: Path) -> None:
+    (tmp_path / "README.md").write_text("# synapse\nA control plane.")
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "guide.md").write_text("## guide\nrun the cli")
+    (tmp_path / "notes.txt").write_text("plain note")
+    (tmp_path / "ignore.go").write_text("package main")
+
+    connector = FilesystemConnector(str(tmp_path))
+    batch = await connector.fetch_changes(None)
+    ids = {r.external_id for r in batch.records}
+    assert ids == {"fs:README.md", "fs:docs/guide.md", "fs:notes.txt"}  # .go excluded
+    assert any("control plane" in r.body for r in batch.records)
+
+    # Re-run with the watermark: nothing new.
+    batch2 = await connector.fetch_changes(batch.next_cursor)
     assert batch2.records == ()
 
 

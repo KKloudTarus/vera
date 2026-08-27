@@ -14,6 +14,7 @@ from uuid import UUID
 from vera.application.curation.service import CurationService, IngestArtifact
 from vera.domain.ports.connectors import SourceConnector, SyncOutcome, SyncStateStore
 from vera.domain.ports.curation import ClaimExtractor
+from vera.domain.ports.object_store import ObjectStore
 from vera.domain.ports.unit_of_work import UnitOfWork
 from vera.shared.errors import is_ok
 
@@ -27,10 +28,12 @@ class SyncRunner:
         uow_factory: UnitOfWorkFactory,
         extractor: ClaimExtractor,
         state: SyncStateStore,
+        object_store: ObjectStore | None = None,
     ) -> None:
         self._uow_factory = uow_factory
         self._extractor = extractor
         self._state = state
+        self._object_store = object_store
 
     async def sync(
         self, *, source_id: UUID, group_id: str, connector: SourceConnector
@@ -44,7 +47,9 @@ class SyncRunner:
             for record in batch.records:
                 async with self._uow_factory() as uow:
                     await uow.use_tenant(group_id)
-                    result = await CurationService(uow, self._extractor).ingest_artifact(
+                    result = await CurationService(
+                        uow, self._extractor, self._object_store
+                    ).ingest_artifact(
                         IngestArtifact(
                             source_id=source_id,
                             group_id=group_id,

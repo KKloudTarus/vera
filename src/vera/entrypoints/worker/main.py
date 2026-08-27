@@ -48,6 +48,7 @@ def _build_scheduler(container: Container) -> SyncScheduler | None:
         uow_factory=lambda: SqlAlchemyUnitOfWork(container.sessionmaker),
         extractor=container.extractor,
         state=container.sync_state,
+        object_store=container.object_store,
     )
     return SyncScheduler(runner=runner, state=container.sync_state, registrations=registrations)
 
@@ -66,11 +67,18 @@ async def run_until_empty(container: Container, pool: LanePool, *, batch_size: i
     processed = 0
     while True:
         jobs = await container.queue.claim(batch_size=batch_size)
-        if not jobs:
+        if jobs:
+            for job in jobs:
+                await pool.submit(job)
+            processed += len(jobs)
+            continue
+        # claim() skips groups with an in-flight job (per-group serialization), so a
+        # single-group backlog can look empty while jobs remain pending. Drain the
+        # in-flight batch, then stop only once nothing is pending.
+        await pool.join()
+        depth = await container.queue.depth_by_status()
+        if depth.get("pending", 0) == 0:
             break
-        for job in jobs:
-            await pool.submit(job)
-        processed += len(jobs)
     await pool.join()
     return processed
 

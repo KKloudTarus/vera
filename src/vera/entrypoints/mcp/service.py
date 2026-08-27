@@ -113,7 +113,7 @@ class VeraMcpService:
             source_id = await uow.sources.get_or_create_agent(
                 workspace_id=scope.primary_workspace_id
             )
-            service = CurationService(uow, self._container.extractor)
+            service = CurationService(uow, self._container.extractor, self._container.object_store)
             result = await service.ingest_artifact(
                 IngestArtifact(
                     source_id=source_id,
