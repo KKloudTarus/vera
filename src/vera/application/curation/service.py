@@ -302,10 +302,24 @@ class CurationService:
             confidence=claim.confidence if claim.confidence is not None else 1.0,
         )
         if inserted:
+            # Carry the real provenance the worker's Fabric reconciliation needs, so it never
+            # has to guess authority or trust. Namespaced under `_fabric`; the legacy graph
+            # path and the triple payload are unchanged (extra keys are ignored there).
+            outbox_payload = {
+                **payload,
+                "_fabric": {
+                    "trust_tier": int(tier) if tier is not None else int(TrustTier.UNVERIFIED),
+                    "authority": authority,
+                    "confidence": claim.confidence if claim.confidence is not None else 1.0,
+                    "verification": "human_verified",
+                    "ontology_version_id": str(ontology_id) if ontology_id is not None else None,
+                    "artifact_version_id": str(claim.artifact_version_id),
+                },
+            }
             await uow.outbox.add(
                 group_id=claim.group_id,
                 source_id=durable_source,
                 dedup_uuid=dedup,
-                payload=payload,
+                payload=outbox_payload,
             )
         return Ok(PublishOutcome(status="published"))

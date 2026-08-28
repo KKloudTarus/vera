@@ -40,6 +40,7 @@ from vera.application.curation.reconciliation import (
 )
 from vera.bootstrap import Container
 from vera.config.settings import active_embedding
+from vera.domain.curation.trust import TrustTier, authority_for_tier
 from vera.domain.ports.job_queue import QueuedJob
 from vera.domain.ports.memory_engine import EpisodeSpec, IngestReceipt
 from vera.observability import bind_log_context, clear_log_context, get_logger, span
@@ -183,8 +184,10 @@ class LanePool:
     async def _reconcile_to_fabric(self, session: AsyncSession, job: QueuedJob) -> None:
         """Populate the authoritative fact store from the same triples, so the /v2 knowledge
         surface reflects live ingest. Gated by memory.fabric_enabled. Idempotent on replay:
-        an episode already reconciled (by its extraction_run_id) is skipped. Episodes reaching
-        the worker are already curated/published, so they reconcile at authoritative trust.
+        an episode already reconciled (by its extraction_run_id) is skipped. The real trust,
+        authority, confidence, ontology version, and artifact/version provenance come from the
+        publish path (the ``_fabric`` block); nothing is assumed authoritative. A meta-less job
+        defaults to the safest (unverified) tier, never to authoritative.
         """
         triples = cast("list[dict[str, Any]]", job.payload.get("triples") or [])
         if not triples:
@@ -197,6 +200,26 @@ class LanePool:
         )
         if already:
             return
+
+        meta = cast("dict[str, Any]", job.payload.get("_fabric") or {})
+        trust_tier = int(meta.get("trust_tier", int(TrustTier.UNVERIFIED)))
+        source_authority = float(meta.get("authority", authority_for_tier(trust_tier)))
+        confidence = float(meta.get("confidence", 0.5))
+        ontology_version_id = (
+            UUID(str(meta["ontology_version_id"])) if meta.get("ontology_version_id") else None
+        )
+        version_id = (
+            UUID(str(meta["artifact_version_id"])) if meta.get("artifact_version_id") else None
+        )
+        # The artifact id lets reconciliation withdraw the previous version's assertions when a
+        # new version of the same artifact drops a proposition (live update path).
+        artifact_id: UUID | None = None
+        if version_id is not None:
+            found = await session.scalar(
+                text("SELECT artifact_id FROM artifact_versions WHERE id = :v"),
+                {"v": str(version_id)},
+            )
+            artifact_id = UUID(str(found)) if found is not None else None
 
         canonical = SqlAlchemyCanonicalEntityRepository(session)
         propositions: list[ResolvedProposition] = []
@@ -217,7 +240,7 @@ class LanePool:
                     subject_entity_id=entity.id,
                     predicate=predicate,
                     object_scalar=obj,
-                    extractor_confidence=0.9,
+                    extractor_confidence=confidence,
                     excerpt=f"{subject} {predicate} {obj}",
                 )
             )
@@ -233,9 +256,12 @@ class LanePool:
         await service.reconcile(
             ArtifactReconciliation(
                 group_id=group,
-                source_authority=1.0,
-                trust_tier=1,
+                source_authority=source_authority,
+                trust_tier=trust_tier,
                 propositions=propositions,
+                artifact_version_id=version_id,
+                artifact_id=artifact_id,
+                ontology_version_id=ontology_version_id,
                 extraction_run_id=run_id,
                 actor="worker",
             )
