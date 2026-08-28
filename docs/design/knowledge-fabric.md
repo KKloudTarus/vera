@@ -103,13 +103,20 @@ Phases are sequential where they share schema; independent within a phase.
 
 Delivered so far: Phase 0 (this document, the ADRs, characterization tests), Phase 1 (the
 authoritative model, migration `f3a1b2c4d5e6`), Phase 2 (chunking, ontology-driven
-reconciliation, change events), and Phase 3 (fact projection into Graphiti, the Graphiti
-0.29.x compatibility contract tests, and rebuild verification). Within Phase 3, projecting
+reconciliation, change events), Phase 3 (fact projection into Graphiti, the Graphiti 0.29.x
+compatibility contract tests, and rebuild verification), and Phase 4 (Postgres full-text
+passage/code/fact candidate sources over rebuildable `search_vector` columns, migration
+`a7c9e1f2b3d4`, and a `ContextAssembler` that fans out to them in parallel, dedups, scores
+with an explainable signal vector, applies source-diversity, annotates conflicts, cites
+every hit, and packs to a token budget with no LLM on the path). Within Phase 3, projecting
 Sagas and building derived communities/summaries is deferred: those depend on Graphiti's
 LLM-driven community APIs, whereas the invariant that matters here, a graph rebuildable from
-Postgres, is delivered and verified by `FactProjectionService` and its drift check. The
-reconciliation and projection services are not yet wired into the live worker; that wiring
-lands with Phase 4 retrieval and the Phase 8 migration.
+Postgres, is delivered and verified by `FactProjectionService` and its drift check. Within
+Phase 4, a vector backend (pgvector) and the full evaluation-metric expansion (nDCG, citation
+and temporal correctness datasets) are deferred behind the swappable ports; the combined,
+cited, diversity-aware retrieval and its scoring are delivered and tested. The reconciliation,
+projection, and retrieval services are not yet wired into the live worker or the MCP/REST
+surface; that wiring lands with Phase 6 (contracts) and the Phase 8 migration.
 
 Cross-cutting risks: (a) Graphiti making itself authoritative is prevented by keeping it a
 projection and adding rebuild-equivalence tests (invariant 10); (b) agents mutating shared

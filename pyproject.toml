@@ -133,6 +133,9 @@ select = ["E", "F", "I", "B", "UP", "ASYNC", "S", "C4", "SIM", "RUF"]
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S101"]                  # assert is fine in tests
 "migrations/**" = ["E501", "S608"]     # author-written DDL, long SQL lines are fine
+# The full-text queries interpolate only a module constant (the OR-query wrapper); every
+# value (:q, :g, :lim, :as_of) is a bound parameter, so there is no injection surface.
+"src/vera/adapters/persistence/repositories/passage_index.py" = ["S608"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["vera"]
