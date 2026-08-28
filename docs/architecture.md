@@ -120,13 +120,15 @@ It runs only on the top candidates (bounded cost) and catches head cases the ble
 
 ## Embeddings and entity resolution
 
-**Model.** OpenAI `text-embedding-3-small` at 1536 dimensions by default; the provider is a
-configuration choice (`deterministic`, `openai`, or `voyage`) reached through the `Embedder`
-port, so Voyage AI (e.g. `voyage-3.5`) can back embeddings without any code change.
-Embeddings are cached in-process (LRU + TTL) and optionally in Valkey, keyed by `model:dim`
-plus a content hash. Every provider call is metered for cost, inside the cache, so hits cost
-nothing. The stage-3 reranker is likewise swappable (`llm` or a Voyage reranker such as
-`rerank-2.5`) through the `Reranker` port.
+**Provider.** Embeddings come from a pluggable provider chosen by configuration, reached
+through the `Embedder` port, so no vendor is baked in: `deterministic` (offline),
+`openai` (`text-embedding-3-small`), or `voyage` (Voyage AI, e.g. `voyage-3.5`). Each carries
+its own model and dimension; a group is pinned to one dimension. Embeddings are cached
+in-process (LRU + TTL) and optionally in Valkey, keyed by `model:dim` plus a content hash.
+Every provider call is metered and priced for cost, inside the cache, so hits cost nothing.
+The stage-3 reranker is likewise swappable through the `Reranker` port (`llm`, i.e. an LLM
+scorer, or a dedicated reranker such as Voyage `rerank-2.5`). Providers are peers; none is a
+default, and adding one (Cohere, a local model, ...) is a single adapter plus a config value.
 
 **One dimension per group.** A group records the model and dimension it was first built with
 and refuses a later write under a different one, so dimensions never silently mix. A model

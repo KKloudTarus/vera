@@ -201,11 +201,13 @@ bag-of-signals blend cannot. Off by default, since it adds a model call per sear
 
 ## Embeddings and entity resolution
 
-**Embedding model.** OpenAI `text-embedding-3-small` at 1536 dimensions by default (a
-deterministic offline embedder is used in tests). Embeddings are cached in-process (LRU
-with TTL) and optionally in Valkey (L2), keyed by `model:dim` plus a content hash, so a
-repeated text never pays for a second call. Every provider call is metered for cost, inside
-the cache, so cache hits cost nothing.
+**Embedding provider.** Embeddings come from a pluggable provider chosen by configuration,
+reached through the `Embedder` port so no vendor is baked in: a deterministic offline
+embedder (tests and air-gapped runs), OpenAI (`text-embedding-3-small`), or Voyage AI
+(`voyage-3.5`, `voyage-code-4`, ...). Adding another provider is one adapter. Embeddings are
+cached in-process (LRU with TTL) and optionally in Valkey (L2), keyed by `model:dim` plus a
+content hash, so a repeated text never pays for a second call. Every provider call is metered
+and priced for cost, inside the cache, so cache hits cost nothing.
 
 **One dimension per group.** A group's vectors must share one embedding dimension or
 similarity is meaningless. Ingestion records the model and dimension a group was first

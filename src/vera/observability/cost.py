@@ -15,14 +15,26 @@ from typing import Protocol
 
 from vera.observability.metrics import record_llm_usage
 
-# USD per one million tokens, (prompt, completion). Embedding models bill prompt only.
-# Keep this in sync with the configured models; unknown models cost 0 (metered, not priced).
+# USD per one million tokens, (prompt, completion). Embedding and rerank models bill prompt
+# only. Every provider VERA can use is priced here so cost tracking is provider-neutral;
+# an unknown model costs 0 (metered, not priced). Keep in sync with the configured models.
 _PRICES_PER_MTOK: dict[str, tuple[float, float]] = {
+    # OpenAI
     "gpt-4.1-mini": (0.40, 1.60),
     "gpt-4.1-nano": (0.10, 0.40),
     "gpt-4o-mini": (0.15, 0.60),
     "text-embedding-3-small": (0.02, 0.0),
     "text-embedding-3-large": (0.13, 0.0),
+    # Voyage AI (embeddings and rerankers)
+    "voyage-3.5": (0.06, 0.0),
+    "voyage-3.5-lite": (0.02, 0.0),
+    "voyage-4": (0.06, 0.0),
+    "voyage-4-lite": (0.02, 0.0),
+    "voyage-4-large": (0.12, 0.0),
+    "voyage-code-4": (0.12, 0.0),
+    "voyage-context-4": (0.12, 0.0),
+    "rerank-2.5": (0.05, 0.0),
+    "rerank-2.5-lite": (0.02, 0.0),
 }
 
 

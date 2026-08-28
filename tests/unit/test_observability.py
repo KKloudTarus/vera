@@ -37,6 +37,12 @@ def test_cost_uses_the_price_table() -> None:
     assert cost_usd("text-embedding-3-small", 1_000_000, 0) == 0.02
 
 
+def test_cost_is_priced_across_providers() -> None:
+    # Cost tracking is provider-neutral: Voyage models are priced too, not just OpenAI.
+    assert cost_usd("voyage-3.5", 1_000_000, 0) == 0.06
+    assert cost_usd("rerank-2.5", 1_000_000, 0) == 0.05
+
+
 def test_unknown_model_is_metered_but_not_priced() -> None:
     assert cost_usd("some-future-model", 5000, 5000) == 0.0
 
