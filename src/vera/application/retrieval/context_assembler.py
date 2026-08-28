@@ -276,10 +276,17 @@ class ContextAssembler:
         limit: int = 10,
         token_budget: int = 2000,
         as_of: datetime | None = None,
+        snapshot_fact_ids: set[str] | None = None,
     ) -> AssembledContext:
         k = max(limit * 4, 20)
         fact_hits, passage_hits, code_hits = await asyncio.gather(
-            self._facts.search(group_id=group_id, query=query, limit=k, as_of=as_of),
+            self._facts.search(
+                group_id=group_id,
+                query=query,
+                limit=k,
+                as_of=as_of,
+                restrict_fact_ids=snapshot_fact_ids,
+            ),
             self._passages.search(group_id=group_id, query=query, limit=k),
             self._code.search(group_id=group_id, query=query, limit=k),
         )

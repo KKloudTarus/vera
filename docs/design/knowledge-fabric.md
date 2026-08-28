@@ -108,7 +108,11 @@ compatibility contract tests, and rebuild verification), and Phase 4 (Postgres f
 passage/code/fact candidate sources over rebuildable `search_vector` columns, migration
 `a7c9e1f2b3d4`, and a `ContextAssembler` that fans out to them in parallel, dedups, scores
 with an explainable signal vector, applies source-diversity, annotates conflicts, cites
-every hit, and packs to a token budget with no LLM on the path). Within Phase 3, projecting
+every hit, and packs to a token budget with no LLM on the path), and Phase 5 (immutable
+`KnowledgeSnapshot`s that freeze the active fact revisions with the ontology/policy versions
+and source boundaries, migration `b8d0f1a2c3e4`, snapshot-scoped retrieval that stays
+reproducible after supersession, and persisted `ContextPack`s carrying the cited results and
+the conflict/freshness counts, both appending to the change ledger). Within Phase 3, projecting
 Sagas and building derived communities/summaries is deferred: those depend on Graphiti's
 LLM-driven community APIs, whereas the invariant that matters here, a graph rebuildable from
 Postgres, is delivered and verified by `FactProjectionService` and its drift check. Within

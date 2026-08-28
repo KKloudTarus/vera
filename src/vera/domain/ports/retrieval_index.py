@@ -54,5 +54,16 @@ class CodeIndex(Protocol):
 
 class FactCandidateSource(Protocol):
     async def search(
-        self, *, group_id: str, query: str, limit: int, as_of: datetime | None = None
-    ) -> list[FactHit]: ...
+        self,
+        *,
+        group_id: str,
+        query: str,
+        limit: int,
+        as_of: datetime | None = None,
+        restrict_fact_ids: set[str] | None = None,
+    ) -> list[FactHit]:
+        """Search active facts, or, when ``restrict_fact_ids`` is given (a snapshot's frozen
+        membership), only those facts regardless of their current lifecycle, for reproducible
+        snapshot retrieval.
+        """
+        ...

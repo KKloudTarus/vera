@@ -76,7 +76,7 @@ class _FakeFacts:
     def __init__(self, hits: list[FactHit]) -> None:
         self._hits = hits
 
-    async def search(self, *, group_id, query, limit, as_of=None):
+    async def search(self, *, group_id, query, limit, as_of=None, restrict_fact_ids=None):
         return self._hits
 
 

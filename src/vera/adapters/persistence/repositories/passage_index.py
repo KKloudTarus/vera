@@ -33,7 +33,7 @@ ORDER BY score DESC
 LIMIT :lim
 """
 
-_FACTS = f"""
+_FACTS_TMPL = f"""
 SELECT f.fact_key AS fact_key, f.id AS fact_id, cs.canonical_name AS subject_name,
        f.predicate AS predicate, COALESCE(co.canonical_name, f.object_scalar) AS object_name,
        f.authority AS authority, f.confidence AS confidence,
@@ -52,13 +52,24 @@ LEFT JOIN LATERAL (
     WHERE a.fact_id = f.id AND a.state = 'active' AND a.polarity = 'supports'
 ) sup ON true
 WHERE f.group_id = :g
-  AND f.lifecycle_state IN ('active', 'disputed')
   AND (f.search_vector @@ q.q OR to_tsvector('english', cs.canonical_name) @@ q.q)
-  AND (CAST(:as_of AS timestamptz) IS NULL OR f.valid_from IS NULL OR f.valid_from <= :as_of)
-  AND (CAST(:as_of AS timestamptz) IS NULL OR f.valid_to IS NULL OR f.valid_to > :as_of)
+  AND {{membership}}
 ORDER BY score DESC
 LIMIT :lim
 """
+
+# Latest view: currently active or disputed facts, honoring an optional as_of valid-time.
+_FACTS_LATEST = _FACTS_TMPL.format(
+    membership=(
+        "f.lifecycle_state IN ('active', 'disputed') "
+        "AND (CAST(:as_of AS timestamptz) IS NULL OR f.valid_from IS NULL "
+        "     OR f.valid_from <= :as_of) "
+        "AND (CAST(:as_of AS timestamptz) IS NULL OR f.valid_to IS NULL "
+        "     OR f.valid_to > :as_of)"
+    )
+)
+# Snapshot view: exactly the frozen fact revisions, regardless of their current lifecycle.
+_FACTS_SNAPSHOT = _FACTS_TMPL.format(membership="f.id = ANY(CAST(:ids AS uuid[]))")
 
 
 def _passage_hit(row: Any) -> PassageHit:
@@ -120,18 +131,29 @@ class SqlAlchemyFactCandidateSource:
         self._session_factory = session_factory
 
     async def search(
-        self, *, group_id: str, query: str, limit: int, as_of: datetime | None = None
+        self,
+        *,
+        group_id: str,
+        query: str,
+        limit: int,
+        as_of: datetime | None = None,
+        restrict_fact_ids: set[str] | None = None,
     ) -> list[FactHit]:
+        if restrict_fact_ids is not None:
+            if not restrict_fact_ids:
+                return []  # an empty snapshot contains no facts
+            sql = text(_FACTS_SNAPSHOT)
+            params: dict[str, object] = {
+                "g": group_id,
+                "q": query,
+                "lim": limit,
+                "ids": list(restrict_fact_ids),
+            }
+        else:
+            sql = text(_FACTS_LATEST)
+            params = {"g": group_id, "q": query, "lim": limit, "as_of": as_of}
         async with self._session_factory() as session:
-            rows = (
-                (
-                    await session.execute(
-                        text(_FACTS), {"g": group_id, "q": query, "lim": limit, "as_of": as_of}
-                    )
-                )
-                .mappings()
-                .all()
-            )
+            rows = (await session.execute(sql, params)).mappings().all()
         hits: list[FactHit] = []
         for row in rows:
             object_name = row["object_name"] or ""
