@@ -31,6 +31,13 @@ services:
     command: ["valkey-server", "--save", "", "--appendonly", "no"]
     ports: ["6379:6379"]
 
+  # Optional alternative graph backend to Neo4j (VERA_MEMORY__GRAPH_BACKEND=falkordb).
+  # Host port 6380 avoids the Valkey 6379 clash; container speaks Redis on 6379.
+  falkordb:
+    image: falkordb/falkordb:latest
+    ports: ["6380:6379"]
+    volumes: ["./.data/falkordb:/data"]
+
   minio:
     image: minio/minio:latest
     command: server /data --console-address ":9001"

@@ -165,6 +165,20 @@ class Neo4jSettings(BaseModel):
     password: SecretStr | None = None
 
 
+class FalkorSettings(BaseModel):
+    """FalkorDB graph backend (a Redis-module graph), an alternative to Neo4j.
+
+    Used only when ``memory.graph_backend`` is ``falkordb``. The graph is a rebuildable
+    projection, so FalkorDB's snapshot durability is acceptable here (a lost graph is
+    reprocessed from Postgres and S3).
+    """
+
+    host: str = "localhost"
+    port: int = 6379
+    password: SecretStr | None = None
+    database: str = "default_db"
+
+
 class VoyageSettings(BaseModel):
     """Voyage AI (embeddings and reranking), reached over HTTP through a port.
 
@@ -189,6 +203,9 @@ class MemorySettings(BaseModel):
     """
 
     provider: Literal["null", "graphiti"] = "null"
+    # The graph backend behind Graphiti. Neither is privileged; the graph is a rebuildable
+    # projection, so switching is a config change plus a reprocess.
+    graph_backend: Literal["neo4j", "falkordb"] = "neo4j"
     embedder: Literal["deterministic", "openai", "voyage"] = "deterministic"
     embedding_model: str = "text-embedding-3-small"
     embedding_dim: int = 1536
@@ -229,6 +246,7 @@ class Settings(BaseSettings):
     worker: WorkerSettings = Field(default_factory=WorkerSettings)
     mcp: McpSettings = Field(default_factory=McpSettings)
     neo4j: Neo4jSettings = Field(default_factory=Neo4jSettings)
+    falkor: FalkorSettings = Field(default_factory=FalkorSettings)
     memory: MemorySettings = Field(default_factory=MemorySettings)
     voyage: VoyageSettings = Field(default_factory=VoyageSettings)
     observability: ObservabilitySettings = Field(default_factory=ObservabilitySettings)

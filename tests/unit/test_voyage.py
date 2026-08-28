@@ -106,6 +106,14 @@ def test_active_embedding_honors_provider() -> None:
     assert active_embedding(openai) == ("text-embedding-3-small", 1536)
 
 
+def test_graph_backend_default_is_neutral() -> None:
+    # No backend is privileged: the default is neo4j, and falkordb is opt-in.
+    from vera.config.settings import FalkorSettings, MemorySettings
+
+    assert MemorySettings().graph_backend == "neo4j"
+    assert FalkorSettings().port == 6379 and FalkorSettings().database == "default_db"
+
+
 def test_voyage_api_key_treats_empty_as_none() -> None:
     base = get_settings()
     assert voyage_api_key(base.model_copy(update={"voyage": VoyageSettings(api_key="")})) is None

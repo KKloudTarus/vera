@@ -39,6 +39,20 @@ PostgreSQL and S3 are authoritative. Neo4j is a projection that can be rebuilt f
 any time. Writes commit to Postgres first; graph updates flow through an outbox, so the graph
 is always reconstructable and never the system of record.
 
+### Graph backend (swappable)
+
+The graph is reached through the `MemoryEngine` port and Graphiti, which supports several
+backends. VERA exposes `VERA_MEMORY__GRAPH_BACKEND` = `neo4j` (default) or `falkordb`; no
+backend is privileged, and because the graph is a rebuildable projection, switching is a
+config change plus a `reprocess`. This matters for cost and scale: Neo4j clustering/HA needs
+the paid Enterprise edition, whereas FalkorDB (a Redis-module graph) avoids that. FalkorDB
+support is **experimental** as of this writing: ingestion and the custom graph operations
+(multi-hop traversal, retraction, bi-temporal `as_of`) work, but Graphiti's hybrid *search*
+returns no results on FalkorDB in the current version combination, so it is not yet a drop-in
+replacement for the retrieval path. Neo4j Community remains the recommended backend; its
+usual "need Enterprise for backups" argument is weakened here because a lost graph is rebuilt
+from Postgres and S3 rather than restored.
+
 ### Tenancy
 
 Every scope has an opaque `group_id`: `o:` organization, `w:` workspace, `p:` project, `u:`

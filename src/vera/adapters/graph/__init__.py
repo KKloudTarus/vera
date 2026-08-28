@@ -107,13 +107,27 @@ def build_graphiti_client(settings: Settings, usage_sink: UsageSink | None = Non
         client = Redis.from_url(settings.resilience.valkey_url)  # pyright: ignore[reportUnknownMemberType]
         l2 = ValkeyEmbeddingCache(client)
     embedder = CachingEmbedder(metered, namespace=namespace, l2=l2)
+    common = {
+        "embedder": embedder,
+        "llm_client": _llm_client(settings, usage_sink),
+        "cross_encoder": NoCrossEncoder(),
+    }
+    if settings.memory.graph_backend == "falkordb":
+        from graphiti_core.driver.falkordb_driver import FalkorDriver
+
+        falkor = settings.falkor
+        driver = FalkorDriver(
+            host=falkor.host,
+            port=falkor.port,
+            password=falkor.password.get_secret_value() if falkor.password else None,
+            database=falkor.database,
+        )
+        return Graphiti(graph_driver=driver, **common)  # type: ignore[arg-type]
     return Graphiti(
         uri=settings.neo4j.uri,
         user=settings.neo4j.user,
         password=password,
-        embedder=embedder,
-        llm_client=_llm_client(settings, usage_sink),  # type: ignore[arg-type]
-        cross_encoder=NoCrossEncoder(),
+        **common,  # type: ignore[arg-type]
     )
 
 
@@ -129,7 +143,10 @@ def build_embedder(settings: Settings) -> object:
 
 
 def build_memory_engine(settings: Settings, usage_sink: UsageSink | None = None) -> MemoryEngine:
-    if settings.memory.provider != "graphiti" or not settings.neo4j.uri:
+    # Neo4j needs a URI; FalkorDB configures via its own host/port, so don't require one.
+    if settings.memory.provider != "graphiti":
+        return NullMemoryEngine()
+    if settings.memory.graph_backend == "neo4j" and not settings.neo4j.uri:
         return NullMemoryEngine()
     from vera.adapters.graph.graphiti_adapter import GraphitiMemoryEngine
 
