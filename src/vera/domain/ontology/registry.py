@@ -81,6 +81,14 @@ def is_single_valued(predicate: str) -> bool:
     return predicate.upper() in SINGLE_VALUED_PREDICATES
 
 
+def is_edge_predicate(predicate: str) -> bool:
+    """True when the predicate is an entity-to-entity relation (a known edge type), so its
+    object is another entity rather than a scalar attribute value. Drives whether an ingested
+    or backfilled triple resolves its object to a canonical entity or stores it as a scalar.
+    """
+    return predicate.upper() in EDGE_TYPES
+
+
 def entity_type_names() -> list[str]:
     return list(ENTITY_TYPES.keys())
 

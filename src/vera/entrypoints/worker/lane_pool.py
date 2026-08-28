@@ -41,6 +41,7 @@ from vera.application.curation.reconciliation import (
 from vera.bootstrap import Container
 from vera.config.settings import active_embedding
 from vera.domain.curation.trust import TrustTier, authority_for_tier
+from vera.domain.ontology import is_edge_predicate
 from vera.domain.ports.job_queue import QueuedJob
 from vera.domain.ports.memory_engine import EpisodeSpec, IngestReceipt
 from vera.observability import bind_log_context, clear_log_context, get_logger, span
@@ -235,11 +236,25 @@ class LanePool:
                 name=subject,
                 entity_type=str(triple.get("entity_type", "Entity")),
             )
+            # An edge predicate relates two entities, so resolve the object to a canonical
+            # entity and record the object side of the graph edge; scalar attributes stay scalar.
+            object_entity_id: UUID | None = None
+            object_scalar: str | None = obj
+            if is_edge_predicate(predicate):
+                object_entity = await self._resolver.resolve_or_create(
+                    canonical,
+                    group_id=group,
+                    name=obj,
+                    entity_type=str(triple.get("object_type", "Entity")),
+                )
+                object_entity_id = object_entity.id
+                object_scalar = None
             propositions.append(
                 ResolvedProposition(
                     subject_entity_id=entity.id,
                     predicate=predicate,
-                    object_scalar=obj,
+                    object_entity_id=object_entity_id,
+                    object_scalar=object_scalar,
                     extractor_confidence=confidence,
                     excerpt=f"{subject} {predicate} {obj}",
                 )

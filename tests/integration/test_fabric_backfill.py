@@ -120,3 +120,115 @@ async def test_backfill_converts_and_flags_and_is_idempotent(
         await uow.use_tenant(group)
         counts = await FabricBackfillService(uow.session).verify_group(group_id=group)
     assert counts == {"episodes": 3, "facts": 2, "assertions": 2}
+
+
+async def test_backfill_links_edge_objects_as_entities(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """gap 17: an edge-predicate triple's object becomes a canonical entity (the object side of
+    the graph edge is reconstructed), not a scalar string.
+    """
+    group = f"p:oe-{uuid7().hex[:12]}"
+    async with _tenant(sessionmaker, group) as s:
+        s.add(
+            PublishedEpisodeRow(
+                source_id=f"{group}:{uuid7()}",
+                group_id=group,
+                knowledge_type="fact_triple",
+                verification="verified",
+                authority=1.0,
+                confidence=0.9,
+                reference_time=utc_now(),
+                payload={
+                    "triples": [{"subject": "paymentapi", "predicate": "RUNS_ON", "object": "eks"}]
+                },
+                dedup_uuid=uuid7(),
+            )
+        )
+    async with SqlAlchemyUnitOfWork(sessionmaker) as uow:
+        await uow.use_tenant(group)
+        await FabricBackfillService(uow.session).backfill_group(group_id=group)
+        await uow.commit()
+
+    async with _tenant(sessionmaker, group) as s:
+        row = (
+            (
+                await s.execute(
+                    text(
+                        "SELECT f.object_type, f.object_scalar, co.canonical_name AS obj_name "
+                        "FROM facts f "
+                        "LEFT JOIN canonical_entities co ON co.id = f.object_entity_id "
+                        "WHERE f.group_id = :g AND f.predicate = 'RUNS_ON'"
+                    ),
+                    {"g": group},
+                )
+            )
+            .mappings()
+            .one()
+        )
+    assert row["object_type"] == "entity"  # not a scalar
+    assert row["object_scalar"] is None
+    assert row["obj_name"] == "eks"  # the object resolved to the eks canonical entity
+
+
+class _FakeExtractor:
+    """A deterministic stand-in for the LLM extractor: turns known prose into one triple."""
+
+    async def extract(self, *, body, knowledge_type, metadata):
+        from vera.domain.ports.curation import ExtractedClaim
+
+        if "runs on" in body.lower():
+            return [
+                ExtractedClaim(
+                    statement=body, subject="checkout", predicate="RUNS_ON", object="gke"
+                )
+            ]
+        return []
+
+
+async def test_backfill_reextracts_free_text_with_episode_provenance(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """gap 17: with an extractor, a free-text episode is turned into a fact carrying the
+    episode's own provenance (authority/confidence), so it is no longer merely needs_review.
+    """
+    group = f"p:ft-{uuid7().hex[:12]}"
+    async with _tenant(sessionmaker, group) as s:
+        s.add(
+            PublishedEpisodeRow(
+                source_id=f"{group}:{uuid7()}",
+                group_id=group,
+                knowledge_type="text",
+                verification="verified",
+                authority=0.7,
+                confidence=0.8,
+                reference_time=utc_now(),
+                payload={"body": "The checkout service runs on gke in production."},
+                dedup_uuid=uuid7(),
+            )
+        )
+
+    # Without an extractor the free-text episode is only flagged for review, no fact.
+    async with SqlAlchemyUnitOfWork(sessionmaker) as uow:
+        await uow.use_tenant(group)
+        plain = await FabricBackfillService(uow.session).backfill_group(group_id=group)
+        await uow.commit()
+    assert plain.needs_review == 1
+    assert plain.facts_created == 0
+
+    # With an extractor, the same episode yields a fact carrying the episode's provenance.
+    async with SqlAlchemyUnitOfWork(sessionmaker) as uow:
+        await uow.use_tenant(group)
+        rep = await FabricBackfillService(uow.session, _FakeExtractor()).backfill_group(
+            group_id=group
+        )
+        await uow.commit()
+    assert rep.needs_review == 0
+    assert rep.facts_created == 1
+
+    async with _tenant(sessionmaker, group) as s:
+        auth = await s.scalar(
+            text("SELECT authority FROM facts WHERE group_id = :g AND predicate = 'RUNS_ON'"),
+            {"g": group},
+        )
+    assert auth == 0.7  # provenance from the episode, not invented

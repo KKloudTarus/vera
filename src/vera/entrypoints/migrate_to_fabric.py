@@ -34,7 +34,12 @@ async def _group_ids(container: Container) -> list[str]:
 async def backfill_group(container: Container, group_id: str) -> None:
     async with SqlAlchemyUnitOfWork(container.sessionmaker) as uow:
         await uow.use_tenant(group_id)
-        report = await FabricBackfillService(uow.session).backfill_group(group_id=group_id)
+        # Pass the configured extractor so free-text episodes are re-extracted into facts with
+        # the episode's own provenance; without an LLM key the structured extractor yields
+        # nothing for prose and those episodes are counted for review.
+        report = await FabricBackfillService(uow.session, container.extractor).backfill_group(
+            group_id=group_id
+        )
         await uow.commit()
     log.info(
         "fabric.backfill.done",

@@ -16,6 +16,7 @@ from vera.domain.ontology.registry import (
     SINGLE_VALUED_PREDICATES,
     edge_type_names,
     entity_type_names,
+    is_edge_predicate,
     is_single_valued,
 )
 from vera.domain.ontology.versions import CURRENT_PIPELINE_VERSIONS, PipelineVersions
@@ -36,5 +37,6 @@ __all__ = [
     "edge_type_names",
     "entity_type_names",
     "governed_predicates",
+    "is_edge_predicate",
     "is_single_valued",
 ]

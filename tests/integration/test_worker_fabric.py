@@ -121,11 +121,15 @@ async def _drain(container: Container) -> None:
 
 
 async def _fact_state(container: Container, group: str, obj: str) -> str | None:
+    # Edge-predicate objects are canonical entities (gap 17); scalar attributes stay scalar.
+    # Match either representation by name.
     async with _tenant(container.sessionmaker, group) as s:
         return await s.scalar(
             text(
-                "SELECT lifecycle_state FROM facts WHERE group_id = :g AND object_scalar = :o "
-                "ORDER BY system_from DESC LIMIT 1"
+                "SELECT f.lifecycle_state FROM facts f "
+                "LEFT JOIN canonical_entities co ON co.id = f.object_entity_id "
+                "WHERE f.group_id = :g AND (f.object_scalar = :o OR co.canonical_name = :o) "
+                "ORDER BY f.system_from DESC LIMIT 1"
             ),
             {"g": group, "o": obj},
         )
