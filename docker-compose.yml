@@ -4,7 +4,10 @@ name: vera
 
 services:
   postgres:
-    image: postgres:18
+    # pgvector's image is the official postgres:18 plus the `vector` extension, so the data
+    # layout is identical and enabling pgvector needs no data migration. Stock postgres:18 also
+    # works: the vector migration is a no-op when the extension is unavailable.
+    image: pgvector/pgvector:pg18
     environment:
       POSTGRES_USER: vera
       POSTGRES_PASSWORD: vera

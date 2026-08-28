@@ -223,6 +223,12 @@ class MemorySettings(BaseModel):
     # a key), so it stays inert in offline and unit runs. Run the embedding backfill for
     # pre-existing entities before relying on it, and watch vera_entity_resolution_total.
     semantic_dedup_enabled: bool = True
+    # pgvector passage retrieval: when on (and an embedder is configured, and the pgvector
+    # chunk embedding column exists), the passage candidate source uses approximate
+    # nearest-neighbor search instead of full-text. vector_dim must match the migration's
+    # frozen column dimension and the embedder's output length.
+    vector_search_enabled: bool = False
+    vector_dim: int = 1024
     # Phase 8 cutover: when on, the worker also reconciles each ingested episode's triples into
     # the authoritative fact store (Fact/Assertion/Evidence), so the /v2 knowledge surface
     # reflects live ingest. Off by default; the legacy published-episode path is unchanged.

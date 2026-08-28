@@ -76,7 +76,7 @@ _FACTS_LATEST = _FACTS_TMPL.format(
 _FACTS_SNAPSHOT = _FACTS_TMPL.format(membership="f.id = ANY(CAST(:ids AS uuid[]))")
 
 
-def _passage_hit(row: Any) -> PassageHit:
+def passage_hit(row: Any) -> PassageHit:
     return PassageHit(
         chunk_id=str(row["id"]),
         artifact_version_id=str(row["artifact_version_id"]),
@@ -115,7 +115,7 @@ class SqlAlchemyPassageIndex:
                 .mappings()
                 .all()
             )
-        return [_passage_hit(r) for r in rows]
+        return [passage_hit(r) for r in rows]
 
 
 class SqlAlchemyCodeIndex:
@@ -141,7 +141,7 @@ class SqlAlchemyCodeIndex:
                 .mappings()
                 .all()
             )
-        return [_passage_hit(r) for r in rows]
+        return [passage_hit(r) for r in rows]
 
 
 class SqlAlchemyFactCandidateSource:

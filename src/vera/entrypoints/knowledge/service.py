@@ -27,6 +27,10 @@ from vera.adapters.persistence.repositories.passage_index import (
     SqlAlchemyFactCandidateSource,
     SqlAlchemyPassageIndex,
 )
+from vera.adapters.persistence.repositories.pgvector_index import (
+    PgVectorCodeIndex,
+    PgVectorPassageIndex,
+)
 from vera.adapters.persistence.repositories.snapshot import (
     SqlAlchemyContextPackRepository,
     SqlAlchemySnapshotRepository,
@@ -52,6 +56,7 @@ from vera.domain.knowledge.fabric import (
 )
 from vera.domain.ontology import current_descriptor
 from vera.domain.ports.identity import ResolvedScope, ScopeResolver
+from vera.domain.ports.retrieval_index import CodeIndex, PassageIndex
 from vera.shared.ids import uuid7
 from vera.shared.time import utc_now
 from vera.shared.types import JsonDict
@@ -73,10 +78,17 @@ class KnowledgeService:
         self._read = SqlAlchemyKnowledgeReadModel(sm)
         self._snapshots = SqlAlchemySnapshotRepository(sm)
         self._packs = SqlAlchemyContextPackRepository(sm)
+        passages: PassageIndex
+        code: CodeIndex
+        if container.settings.memory.vector_search_enabled and container.embedder is not None:
+            # ANN over chunk embeddings; the query is embedded per call through the embedder.
+            passages = PgVectorPassageIndex(sm, container.embedder)
+            code = PgVectorCodeIndex(sm, container.embedder)
+        else:
+            passages = SqlAlchemyPassageIndex(sm)
+            code = SqlAlchemyCodeIndex(sm)
         self._assembler = ContextAssembler(
-            facts=SqlAlchemyFactCandidateSource(sm),
-            passages=SqlAlchemyPassageIndex(sm),
-            code=SqlAlchemyCodeIndex(sm),
+            facts=SqlAlchemyFactCandidateSource(sm), passages=passages, code=code
         )
 
     async def _resolve(self, principal_id: UUID) -> ResolvedScope:

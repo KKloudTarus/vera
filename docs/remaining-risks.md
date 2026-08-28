@@ -24,9 +24,14 @@ making the fabric the primary production path.
 
 ## Retrieval
 
-- **Vector search is deferred.** Candidate generation is Postgres full-text over rebuildable
-  `search_vector` columns behind swappable ports; a pgvector backend is not yet implemented.
-  Semantic recall depends on adding it.
+- **pgvector passage search is available, gated.** Full-text over rebuildable `search_vector`
+  columns is the default; with `VERA_MEMORY__VECTOR_SEARCH_ENABLED=true` and an embedder, the
+  passage and code candidate sources use approximate nearest-neighbor search over a
+  `chunks.embedding vector(1024)` HNSW index behind the same PassageIndex/CodeIndex ports (gap
+  11). The column and index are added conditionally (migration `e2b3c4d5f6a7`, a no-op on a
+  stock postgres image; the `pgvector/pgvector:pg18` compose image ships the extension), and
+  `backfill_chunk_embeddings` populates embeddings per group. The embedding dimension is frozen
+  at 1024 and must match the embedder.
 - **A committed golden set gates retrieval quality in CI.** `datasets/retrieval/golden.json`
   seeds a fixed set of entities, facts, and passages; `tests/integration/test_retrieval_golden.py`
   runs the real ContextAssembler over it and fails the build if hit@k, nDCG@k, or the citation
