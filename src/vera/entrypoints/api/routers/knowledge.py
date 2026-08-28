@@ -173,7 +173,7 @@ async def fact_timeline(
 
 @router.get("/ontology", summary="Predicate governance policies and the ontology version")
 async def ontology(principal: PrincipalDep, service: KnowledgeServiceDep) -> dict[str, Any]:
-    return service.ontology()
+    return await service.ontology()
 
 
 @router.get("/review", summary="The review queue: proposed facts awaiting a decision")

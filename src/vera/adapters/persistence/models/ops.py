@@ -83,6 +83,11 @@ class OntologyVersionRow(Base, UUIDPK):
     edge_types: Mapped[dict[str, Any]] = mapped_column(
         JSONB, nullable=False, server_default=text("'{}'::jsonb")
     )
+    # Per-predicate governance (cardinality, absence, conflict) versioned with the ontology,
+    # so reconciliation reads the same rules the version was published under.
+    predicate_policies: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

@@ -13,7 +13,7 @@ import signal
 
 from vera.adapters.persistence.unit_of_work import SqlAlchemyUnitOfWork
 from vera.application.connectors import SyncRegistration, SyncRunner, SyncScheduler
-from vera.bootstrap import Container, build_container, dispose_container
+from vera.bootstrap import Container, build_container, dispose_container, verify_ontology
 from vera.config.settings import Settings, get_settings
 from vera.entrypoints.worker.lane_pool import LanePool
 from vera.observability import (
@@ -117,6 +117,8 @@ async def run() -> None:
     configure_tracing(settings)
     instrument_worker()
     container = build_container(settings)
+    # Fail fast if code and the persisted ontology disagree before the worker reconciles.
+    await verify_ontology(container)
     if settings.observability.metrics_enabled:
         start_metrics_server(settings.observability.worker_metrics_port)
     pool = _build_pool(container, settings)

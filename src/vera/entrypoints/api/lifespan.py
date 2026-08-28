@@ -12,6 +12,7 @@ from vera.bootstrap import (
     build_container,
     dispose_container,
     refresh_rerank_weights,
+    verify_ontology,
 )
 from vera.config.settings import get_settings
 from vera.observability import (
@@ -30,6 +31,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     configure_logging(json=settings.log_json, level=settings.log_level)
     configure_tracing(settings)
     container: Container = build_container(settings)
+    # Fail fast if the code ontology and the persisted registry disagree; this is not
+    # suppressed, because running under mismatched governance rules corrupts reconciliation.
+    await verify_ontology(container)
     # Adopt feedback-calibrated rerank weights, if calibration has persisted any.
     with contextlib.suppress(Exception):
         await refresh_rerank_weights(container)

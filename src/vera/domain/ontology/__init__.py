@@ -1,5 +1,12 @@
 """The VERA domain ontology: typed entities and edges, and pipeline versioning."""
 
+from vera.domain.ontology.descriptor import (
+    OntologyDescriptor,
+    current_descriptor,
+    descriptor_from_row,
+    detect_drift,
+    governed_predicates,
+)
 from vera.domain.ontology.registry import (
     EDGE_TYPE_MAP,
     EDGE_TYPES,
@@ -21,8 +28,13 @@ __all__ = [
     "ONTOLOGY_NAME",
     "ONTOLOGY_VERSION",
     "SINGLE_VALUED_PREDICATES",
+    "OntologyDescriptor",
     "PipelineVersions",
+    "current_descriptor",
+    "descriptor_from_row",
+    "detect_drift",
     "edge_type_names",
     "entity_type_names",
+    "governed_predicates",
     "is_single_valued",
 ]

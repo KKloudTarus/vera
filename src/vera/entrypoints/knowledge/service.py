@@ -21,6 +21,7 @@ from vera.adapters.persistence.repositories.fabric import (
     SqlAlchemyKnowledgeEventLog,
 )
 from vera.adapters.persistence.repositories.knowledge_read import SqlAlchemyKnowledgeReadModel
+from vera.adapters.persistence.repositories.ontology import SqlAlchemyOntologyRepository
 from vera.adapters.persistence.repositories.passage_index import (
     SqlAlchemyCodeIndex,
     SqlAlchemyFactCandidateSource,
@@ -49,8 +50,7 @@ from vera.domain.knowledge.fabric import (
     normalize_object,
     slot_key,
 )
-from vera.domain.ontology.policy import policy_for
-from vera.domain.ontology.registry import EDGE_TYPES, ONTOLOGY_VERSION
+from vera.domain.ontology import current_descriptor
 from vera.domain.ports.identity import ResolvedScope, ScopeResolver
 from vera.shared.ids import uuid7
 from vera.shared.time import utc_now
@@ -389,16 +389,26 @@ class KnowledgeService:
             await uow.commit()
         return {"fact_key": fact_key, "lifecycle": to.value, "group_id": group}
 
-    def ontology(self) -> JsonDict:
+    async def ontology(self) -> JsonDict:
+        """The active ontology from the persisted registry: its identity and the governance
+        policies it shipped with. Falls back to the code registry only if nothing is persisted.
+        """
+        async with self._c.sessionmaker() as session:
+            active = await SqlAlchemyOntologyRepository(session).get_active()
+        if active is None:
+            active = current_descriptor()
         return {
-            "ontology_version": ONTOLOGY_VERSION,
+            "ontology_version_id": str(active.id) if active.id is not None else None,
+            "ontology_version": active.version,
+            "name": active.name,
+            "entity_types": list(active.entity_types),
             "predicates": [
                 {
-                    "predicate": name,
-                    "cardinality": policy_for(name).cardinality.value,
-                    "absence_semantics": policy_for(name).absence_semantics.value,
-                    "conflict_strategy": policy_for(name).conflict_strategy.value,
+                    "predicate": p.predicate,
+                    "cardinality": p.cardinality.value,
+                    "absence_semantics": p.absence_semantics.value,
+                    "conflict_strategy": p.conflict_strategy.value,
                 }
-                for name in sorted(EDGE_TYPES)
+                for p in active.predicate_policies
             ],
         }

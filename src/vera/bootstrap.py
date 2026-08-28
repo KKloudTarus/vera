@@ -42,6 +42,7 @@ from vera.domain.ports.object_store import ObjectStore
 from vera.domain.ports.reranker import Reranker
 from vera.domain.ports.retrieval import RetrievalReadModel
 from vera.observability.cost import UsageSink
+from vera.shared.errors import ConfigError
 
 
 @dataclass(slots=True)
@@ -210,6 +211,44 @@ async def refresh_rerank_weights(container: Container) -> None:
     active = await SqlAlchemyRerankWeightsRepository(container.sessionmaker).get_active()
     if active is not None:
         container.rerank_weights = active
+
+
+async def verify_ontology(container: Container) -> None:
+    """Reconcile the code ontology with the persisted registry at startup.
+
+    Seeds the current version's row if it is absent (including its predicate policies), then
+    fails fast if the code and the active persisted row disagree, so a process never runs
+    reconciliation under governance rules that differ from what it stamps onto episodes.
+
+    Drift is only observable once the database is reachable, so a connection failure here is
+    logged and skipped rather than fatal: liveness must not depend on the database, and a
+    process that cannot reach Postgres does no reconciliation anyway. A successful connection
+    that reveals a mismatch still raises.
+    """
+    from vera.adapters.persistence.repositories.ontology import SqlAlchemyOntologyRepository
+    from vera.domain.ontology import current_descriptor, detect_drift
+    from vera.observability import get_logger
+
+    code = current_descriptor()
+    try:
+        async with container.sessionmaker() as session:
+            repo = SqlAlchemyOntologyRepository(session)
+            await repo.ensure_current(code)
+            await session.commit()
+            persisted = await repo.get_active()
+    except Exception as exc:  # connection/DDL failure: cannot verify, so skip rather than crash
+        get_logger(__name__).warning("ontology.verify_skipped", error=str(exc))
+        return
+    if persisted is None:  # pragma: no cover - ensure_current guarantees a row
+        raise ConfigError("ontology registry is empty after ensure")
+    if persisted.version != code.version:
+        raise ConfigError(
+            f"ontology drift: code version {code.version} but the active persisted version is "
+            f"{persisted.version}; deploy the matching code or run the ontology migration"
+        )
+    drift = detect_drift(code, persisted)
+    if drift:
+        raise ConfigError("ontology drift between code and database: " + "; ".join(drift))
 
 
 async def dispose_container(container: Container) -> None:
