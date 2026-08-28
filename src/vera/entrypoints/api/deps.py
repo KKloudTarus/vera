@@ -13,9 +13,11 @@ from typing import Annotated
 from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
+from vera.adapters.persistence.repositories.scope import SqlAlchemyScopeResolver
 from vera.adapters.persistence.unit_of_work import SqlAlchemyUnitOfWork
 from vera.application.commands import IngestSourceHandler
 from vera.application.identity import IdentityService, ScopeResolutionService
+from vera.application.knowledge import KnowledgeService
 from vera.application.queries import SearchMemoryHandler
 from vera.bootstrap import Container
 from vera.domain.identity.models import AuthenticatedPrincipal
@@ -48,9 +50,14 @@ def get_scopes(container: ContainerDep) -> ScopeResolutionService:
     return container.scopes
 
 
+def get_knowledge_service(container: ContainerDep) -> KnowledgeService:
+    return KnowledgeService(container, SqlAlchemyScopeResolver(container.sessionmaker))
+
+
 SearchHandlerDep = Annotated[SearchMemoryHandler, Depends(get_search_handler)]
 IngestHandlerDep = Annotated[IngestSourceHandler, Depends(get_ingest_handler)]
 ScopesDep = Annotated[ScopeResolutionService, Depends(get_scopes)]
+KnowledgeServiceDep = Annotated[KnowledgeService, Depends(get_knowledge_service)]
 
 
 async def get_uow(container: ContainerDep) -> AsyncIterator[SqlAlchemyUnitOfWork]:

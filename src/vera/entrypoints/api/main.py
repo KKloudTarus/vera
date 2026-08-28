@@ -16,7 +16,7 @@ from starlette.responses import Response
 
 from vera.config.settings import get_settings
 from vera.entrypoints.api.lifespan import lifespan
-from vera.entrypoints.api.routers import health, identity, memory
+from vera.entrypoints.api.routers import health, identity, knowledge, memory
 from vera.observability import bind_log_context, clear_log_context, get_logger
 from vera.shared.errors import VeraError
 
@@ -77,6 +77,7 @@ def create_app() -> FastAPI:
     app.include_router(health.router)
     app.include_router(identity.router)
     app.include_router(memory.router)
+    app.include_router(knowledge.router)
     return app
 
 

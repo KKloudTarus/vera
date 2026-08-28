@@ -108,11 +108,18 @@ compatibility contract tests, and rebuild verification), and Phase 4 (Postgres f
 passage/code/fact candidate sources over rebuildable `search_vector` columns, migration
 `a7c9e1f2b3d4`, and a `ContextAssembler` that fans out to them in parallel, dedups, scores
 with an explainable signal vector, applies source-diversity, annotates conflicts, cites
-every hit, and packs to a token budget with no LLM on the path), and Phase 5 (immutable
+every hit, and packs to a token budget with no LLM on the path), Phase 5 (immutable
 `KnowledgeSnapshot`s that freeze the active fact revisions with the ontology/policy versions
 and source boundaries, migration `b8d0f1a2c3e4`, snapshot-scoped retrieval that stays
 reproducible after supersession, and persisted `ContextPack`s carrying the cited results and
-the conflict/freshness counts, both appending to the change ledger). Within Phase 3, projecting
+the conflict/freshness counts, both appending to the change ledger), and Phase 6 (a
+`KnowledgeService` behind a versioned REST surface `/v2/knowledge` and generic `knowledge_*`
+MCP tools with `knowledge_get_context` as the primary entry point: context, search,
+get_fact, explain_fact, changes, conflicts, snapshots, and propose, all with scopes resolved
+server-side and proposals confined to the caller's personal scope; the existing `/memory`
+endpoints and `memory_*` tools remain for backward compatibility). Within Phase 6,
+`knowledge_feedback` reuses the existing `memory_feedback` path and `get_evidence` is served
+by `explain_fact`; migrating them to the new model follows the Phase 8 cutover. Within Phase 3, projecting
 Sagas and building derived communities/summaries is deferred: those depend on Graphiti's
 LLM-driven community APIs, whereas the invariant that matters here, a graph rebuildable from
 Postgres, is delivered and verified by `FactProjectionService` and its drift check. Within

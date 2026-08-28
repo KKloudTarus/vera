@@ -11,6 +11,7 @@ from vera.entrypoints.mcp.main import build_server
 from vera.shared.ids import deterministic_id
 
 _EXPECTED = {
+    # Legacy memory_* tools (kept for backward compatibility).
     "memory_search",
     "memory_get_context",
     "memory_explore",
@@ -19,6 +20,15 @@ _EXPECTED = {
     "memory_recent_changes",
     "memory_propose",
     "memory_feedback",
+    # Generic knowledge_* contracts (Phase 6).
+    "knowledge_get_context",
+    "knowledge_search",
+    "knowledge_explain_fact",
+    "knowledge_get_changes",
+    "knowledge_get_conflicts",
+    "knowledge_create_snapshot",
+    "knowledge_get_snapshot",
+    "knowledge_propose",
 }
 _JWT_SECRET = "test-secret"  # noqa: S105
 

@@ -26,6 +26,7 @@ from vera import __version__
 from vera.adapters.mcp.auth import JwtTokenVerifier
 from vera.adapters.persistence.repositories.scope import SqlAlchemyScopeResolver
 from vera.adapters.persistence.unit_of_work import SqlAlchemyUnitOfWork
+from vera.application.knowledge import KnowledgeService
 from vera.bootstrap import (
     Container,
     build_container,
@@ -69,16 +70,18 @@ async def _ensure_local_principal(container: Container, principal_id: UUID) -> N
 
 def build_server(container: Container, settings: Settings) -> MCPServer:
     service: VeraMcpService | None = None
+    knowledge: KnowledgeService | None = None
 
     @contextlib.asynccontextmanager
     async def lifespan(_server: MCPServer) -> AsyncGenerator[None]:
-        nonlocal service
+        nonlocal service, knowledge
         if _uses_local_principal(settings):
             await _ensure_local_principal(container, settings.mcp.local_principal_id)
         # Adopt feedback-calibrated rerank weights before the service snapshots them.
         with contextlib.suppress(Exception):
             await refresh_rerank_weights(container)
         service = VeraMcpService(container, SqlAlchemyScopeResolver(container.sessionmaker))
+        knowledge = KnowledgeService(container, SqlAlchemyScopeResolver(container.sessionmaker))
         log.info(
             "mcp.startup",
             auth="jwt" if settings.mcp.jwt_secret is not None else "disabled",
@@ -90,6 +93,7 @@ def build_server(container: Container, settings: Settings) -> MCPServer:
             yield
         finally:
             service = None
+            knowledge = None
             await dispose_container(container)
             log.info("mcp.shutdown")
 
@@ -97,6 +101,11 @@ def build_server(container: Container, settings: Settings) -> MCPServer:
         if service is None:
             raise RuntimeError("MCP service is not initialized")
         return service
+
+    def get_knowledge() -> KnowledgeService:
+        if knowledge is None:
+            raise RuntimeError("MCP knowledge service is not initialized")
+        return knowledge
 
     token_verifier = None
     auth = None
@@ -188,6 +197,74 @@ def build_server(container: Container, settings: Settings) -> MCPServer:
             signal=signal,
             query=query,
             signals=signals,
+        )
+
+    # -- Generic knowledge_* contracts over the authoritative fact model (Phase 6). The server
+    #    resolves the caller's scopes; these accept context hints, never authorization scopes.
+
+    @server.tool()
+    async def knowledge_get_context(
+        query: str, project: str | None = None, snapshot_id: str | None = None, limit: int = 10
+    ) -> dict[str, Any]:
+        """Primary tool: assemble a bounded, cited context pack for a task from the caller's
+        scopes. Pass `snapshot_id` for a reproducible view; `project` selects among the
+        caller's scopes when they span more than one.
+        """
+        return await get_knowledge().get_context(
+            _principal_id(settings),
+            query=query,
+            project=project,
+            snapshot_id=snapshot_id,
+            limit=limit,
+        )
+
+    @server.tool()
+    async def knowledge_search(
+        query: str, project: str | None = None, limit: int = 10
+    ) -> dict[str, Any]:
+        """Combined, cited search over facts and passages in the caller's scopes."""
+        return await get_knowledge().search(
+            _principal_id(settings), query=query, project=project, limit=limit
+        )
+
+    @server.tool()
+    async def knowledge_explain_fact(fact_key: str) -> dict[str, Any] | None:
+        """Explain a fact: its assertions (which sources support or refute it) and evidence."""
+        return await get_knowledge().explain_fact(_principal_id(settings), fact_key=fact_key)
+
+    @server.tool()
+    async def knowledge_get_changes(limit: int = 50) -> list[dict[str, Any]]:
+        """The semantic change feed across the caller's scopes."""
+        return await get_knowledge().get_changes(_principal_id(settings), limit=limit)
+
+    @server.tool()
+    async def knowledge_get_conflicts(limit: int = 50) -> list[dict[str, Any]]:
+        """Disputed facts in the caller's scopes that need resolution."""
+        return await get_knowledge().get_conflicts(_principal_id(settings), limit=limit)
+
+    @server.tool()
+    async def knowledge_create_snapshot(project: str | None = None) -> dict[str, Any]:
+        """Freeze an immutable snapshot of the current knowledge for reproducible workflows."""
+        return await get_knowledge().create_snapshot(_principal_id(settings), project=project)
+
+    @server.tool()
+    async def knowledge_get_snapshot(snapshot_id: str) -> dict[str, Any] | None:
+        """Get a snapshot's metadata (ontology/policy version, fact count, source boundaries)."""
+        return await get_knowledge().get_snapshot(_principal_id(settings), snapshot_id=snapshot_id)
+
+    @server.tool()
+    async def knowledge_propose(
+        subject: str, predicate: str, object: str, evidence_text: str | None = None
+    ) -> dict[str, Any]:
+        """Propose knowledge. It enters the caller's personal scope as a PROPOSED fact with a
+        pending assertion; it is never published as shared truth.
+        """
+        return await get_knowledge().propose(
+            _principal_id(settings),
+            subject=subject,
+            predicate=predicate,
+            object=object,
+            evidence_text=evidence_text,
         )
 
     return server
