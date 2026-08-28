@@ -29,10 +29,12 @@ class FactProjectionService:
         return len(facts)
 
     async def project_group(self, group_id: str) -> int:
-        """Project the active facts without clearing first (upsert by fact_key). Returns the
-        number projected.
-        """
+        """Converge the graph to the authoritative active fact set without a full rebuild."""
         facts = await self._source.active_facts(group_id=group_id)
+        active_keys = {fact.fact_key for fact in facts}
+        projected_keys = await self._projection.projected_fact_keys(group_id=group_id)
+        for fact_key in sorted(projected_keys - active_keys):
+            await self._projection.remove(group_id=group_id, fact_key=fact_key)
         for fact in facts:
             await self._projection.project(fact)
         return len(facts)

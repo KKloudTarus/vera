@@ -247,6 +247,7 @@ class LanePool:
                 async with asyncio.timeout(episode_budget):
                     async with self._container.workers() as session, session.begin():
                         await session.execute(_GROUP_LOCK, {"g": str(job.group_id)})
+                        write_mode = self._container.settings.memory.effective_fabric_write_mode
                         fabric_meta = cast("dict[str, Any]", job.payload.get("_fabric") or {})
                         triples = cast("list[dict[str, Any]]", job.payload.get("triples") or [])
                         needs_review = bool(fabric_meta.get("needs_review"))
@@ -258,7 +259,7 @@ class LanePool:
                                 triple=triple,
                             )
                         reconcile_only = job.payload.get("job_kind") == "fabric_reconcile_version"
-                        if not needs_review and not reconcile_only:
+                        if not needs_review and not reconcile_only and write_mode != "fabric":
                             # One embedding dimension per group: refuse a write under a changed
                             # model/dim (job dead-letters with a clear message) until reprocess.
                             model_name, dim = active_embedding(self._container.settings)
@@ -277,7 +278,7 @@ class LanePool:
                             await self._stitch(
                                 session, str(job.group_id), str(job.source_id), receipt
                             )
-                        if self._container.settings.memory.fabric_enabled:
+                        if write_mode != "legacy":
                             await self._reconcile_to_fabric(session, job)
                         await session.execute(_MARK_DONE, {"id": job.id})
             record_ingestion(result="done", duration_s=time.perf_counter() - started)
@@ -288,7 +289,7 @@ class LanePool:
 
     async def _reconcile_to_fabric(self, session: AsyncSession, job: QueuedJob) -> None:
         """Populate the authoritative fact store from the same triples, so the /v2 knowledge
-        surface reflects live ingest. Gated by memory.fabric_enabled. Idempotent on replay:
+        surface reflects live ingest. Gated by the dual/fabric write modes. Idempotent on replay:
         an episode already reconciled (by its source run key) is skipped. The real trust,
         authority, confidence, ontology version, and artifact/version provenance come from the
         publish path (the ``_fabric`` block); nothing is assumed authoritative. A meta-less job

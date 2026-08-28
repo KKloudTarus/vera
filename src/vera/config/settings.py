@@ -234,10 +234,17 @@ class MemorySettings(BaseModel):
     # the authoritative fact store (Fact/Assertion/Evidence), so the /v2 knowledge surface
     # reflects live ingest. Off by default; the legacy published-episode path is unchanged.
     fabric_enabled: bool = False
+    fabric_write_mode: Literal["legacy", "dual", "fabric"] = "legacy"
     semantic_dedup_threshold: float = 0.86
     # Below the auto-link threshold, names this similar become candidates an LLM judge
     # confirms. Kept low, since embedding cosine over bare names is only a coarse blocker.
     semantic_dedup_block_threshold: float = 0.55
+
+    @property
+    def effective_fabric_write_mode(self) -> Literal["legacy", "dual", "fabric"]:
+        if self.fabric_write_mode == "legacy" and self.fabric_enabled:
+            return "dual"
+        return self.fabric_write_mode
 
 
 class Settings(BaseSettings):

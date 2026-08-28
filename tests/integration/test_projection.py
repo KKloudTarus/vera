@@ -193,3 +193,33 @@ async def test_rebuild_reproduces_the_active_fact_set(
         assert (await service.verify_group(group)).in_sync
     finally:
         await GraphitiFactProjection(graphiti_client).clear(group_id=group)
+
+
+async def test_incremental_projection_removes_stale_facts_idempotently(
+    sessionmaker: async_sessionmaker[AsyncSession], graphiti_client: object
+) -> None:
+    group = f"p:proj-{uuid7().hex[:12]}"
+    subject = await _seed_tenant(sessionmaker, group)
+    await _add_active_fact(sessionmaker, group, subject, "eks")
+    await _add_active_fact(sessionmaker, group, subject, "ecs")
+    projection = GraphitiFactProjection(graphiti_client)
+    service = FactProjectionService(
+        source=SqlAlchemyProjectionSource(sessionmaker), projection=projection
+    )
+    try:
+        assert await service.rebuild_group(group) == 2
+        async with _tenant(sessionmaker, group) as s:
+            await s.execute(
+                text(
+                    "UPDATE facts SET lifecycle_state = 'retracted' "
+                    "WHERE group_id = :g AND normalized_object = 'scalar:eks'"
+                ),
+                {"g": group},
+            )
+
+        assert await service.project_group(group) == 1
+        assert (await service.verify_group(group)).in_sync
+        assert await service.project_group(group) == 1
+        assert (await service.verify_group(group)).in_sync
+    finally:
+        await projection.clear(group_id=group)

@@ -29,6 +29,7 @@ from vera.bootstrap import Container
 from vera.domain.curation.trust import authority_for_tier
 from vera.domain.ports.curation import ExtractedClaim
 from vera.domain.ports.memory_engine import EpisodeSpec, IngestReceipt
+from vera.domain.ports.projection import ProjectedFact
 from vera.entrypoints.worker.lane_pool import LanePool
 from vera.entrypoints.worker.main import run_until_empty
 from vera.shared.errors import is_err
@@ -114,6 +115,24 @@ class _RecordingMemoryEngine(NullMemoryEngine):
     async def ingest_episode(self, episode: EpisodeSpec) -> IngestReceipt:
         self.episodes.append(episode)
         return await super().ingest_episode(episode)
+
+
+class _RecordingFactProjection:
+    def __init__(self) -> None:
+        self.facts: dict[str, ProjectedFact] = {}
+
+    async def project(self, fact: ProjectedFact) -> None:
+        self.facts[fact.fact_key] = fact
+
+    async def remove(self, *, group_id: str, fact_key: str) -> None:
+        del group_id
+        self.facts.pop(fact_key, None)
+
+    async def projected_fact_keys(self, *, group_id: str) -> set[str]:
+        return {key for key, fact in self.facts.items() if fact.group_id == group_id}
+
+    async def clear(self, *, group_id: str) -> None:
+        self.facts = {key: fact for key, fact in self.facts.items() if fact.group_id != group_id}
 
 
 @pytest.fixture
@@ -406,6 +425,51 @@ async def test_worker_does_not_touch_fabric_when_disabled(
     async with _tenant(container.sessionmaker, group) as s:
         facts = await s.scalar(text("SELECT count(*) FROM facts WHERE group_id = :g"), {"g": group})
     assert facts == 0  # legacy path only
+
+
+async def test_fabric_mode_commits_facts_before_outbox_projection(
+    make_container: Callable[[object], Container],
+) -> None:
+    memory = _RecordingMemoryEngine()
+    projection = _RecordingFactProjection()
+    base = make_container(memory)
+    settings = base.settings.model_copy(
+        update={
+            "memory": base.settings.memory.model_copy(
+                update={"fabric_enabled": False, "fabric_write_mode": "fabric"}
+            )
+        }
+    )
+    container = dataclasses.replace(base, settings=settings, fact_projection=projection)
+    group = f"p:w-{uuid7().hex[:12]}"
+    version_id, _ = await _artifact_versions(container, group)
+    await _enqueue(
+        container,
+        group,
+        f"{group}:{uuid7()}",
+        [{"subject": "paymentapi", "predicate": "RUNS_ON", "object": "eks"}],
+        _fabric_meta(1, version_id),
+    )
+
+    await _drain(container)
+
+    assert memory.episodes == []
+    assert len(projection.facts) == 1
+    assert next(iter(projection.facts.values())).object_name == "eks"
+    async with _tenant(container.sessionmaker, group) as s:
+        fact_count = await s.scalar(
+            text("SELECT count(*) FROM facts WHERE group_id = :g AND lifecycle_state = 'active'"),
+            {"g": group},
+        )
+        projection_jobs = await s.scalar(
+            text(
+                "SELECT count(*) FROM ingestion_jobs WHERE group_id = :g "
+                "AND payload->>'job_kind' = 'project_facts' AND status = 'done'"
+            ),
+            {"g": group},
+        )
+    assert fact_count == 1
+    assert projection_jobs == 1
 
 
 async def _ingest_provenance_claim(
