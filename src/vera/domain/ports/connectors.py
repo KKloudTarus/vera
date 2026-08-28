@@ -27,6 +27,7 @@ class ConnectorRecord:
     source_revision: int | None = None
     source_updated_at: datetime | None = None
     source_version_id: str | None = None
+    tombstone: bool = False
 
 
 @dataclass(frozen=True, slots=True)

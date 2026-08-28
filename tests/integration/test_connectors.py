@@ -177,7 +177,12 @@ async def test_scheduled_confluence_sync_updates_without_duplicates(
         return int(count or 0)
 
     async with httpx.AsyncClient() as client:
-        connector = ConfluenceConnector(client, base_url="https://cf.example", space_key="ENG")
+        connector = ConfluenceConnector(
+            client,
+            base_url="https://cf.example",
+            space_key="ENG",
+            scan_tombstones=False,
+        )
         scheduler = SyncScheduler(
             runner=_runner(sessionmaker),
             state=SqlAlchemySyncStateStore(sessionmaker),
@@ -224,3 +229,102 @@ async def test_sync_drains_all_pages_in_one_run(
     # The persisted cursor is the last page's cursor (the new watermark), not the first page's.
     state = SqlAlchemySyncStateStore(sessionmaker)
     assert await state.get_cursor(source_id) == {"since": "final"}  # type: ignore[arg-type]
+
+
+async def test_sync_checkpoints_each_page_and_resumes_after_a_crash(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    source: tuple[str, object],
+) -> None:
+    group, source_id = source
+
+    class _CrashingConnector:
+        @property
+        def kind(self) -> str:
+            return "crashing"
+
+        async def fetch_changes(self, cursor: JsonDict | None) -> ConnectorBatch:
+            if cursor is None:
+                return ConnectorBatch(
+                    records=(_triple_record("cmdb:p1", "svc1", "eks"),),
+                    next_cursor={"start": 1, "until": "fixed"},
+                    has_more=True,
+                )
+            raise RuntimeError("simulated mid-space crash")
+
+    with pytest.raises(RuntimeError, match="mid-space crash"):
+        await _runner(sessionmaker).sync(
+            source_id=source_id,
+            group_id=group,
+            connector=_CrashingConnector(),  # type: ignore[arg-type]
+        )
+
+    state = SqlAlchemySyncStateStore(sessionmaker)
+    checkpoint = {"start": 1, "until": "fixed"}
+    assert await state.get_cursor(source_id) == checkpoint  # type: ignore[arg-type]
+
+    class _ResumingConnector:
+        @property
+        def kind(self) -> str:
+            return "resuming"
+
+        async def fetch_changes(self, cursor: JsonDict | None) -> ConnectorBatch:
+            assert cursor == checkpoint
+            return ConnectorBatch(
+                records=(_triple_record("cmdb:p2", "svc2", "ecs"),),
+                next_cursor={"since": "final"},
+            )
+
+    outcome = await _runner(sessionmaker).sync(
+        source_id=source_id,
+        group_id=group,
+        connector=_ResumingConnector(),  # type: ignore[arg-type]
+    )
+    assert outcome.processed == 1
+    assert await _episode_count(sessionmaker, group) == 2
+    assert await state.get_cursor(source_id) == {"since": "final"}  # type: ignore[arg-type]
+
+
+async def test_tombstone_creates_an_empty_reconciliation_version(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    source: tuple[str, object],
+) -> None:
+    group, source_id = source
+    live = _triple_record("cmdb:deleted", "paymentapi", "eks")
+    tombstone = ConnectorRecord(
+        external_id=live.external_id,
+        body="",
+        source_updated_at=utc_now(),
+        source_version_id="trashed:1",
+        tombstone=True,
+        metadata={"status": "trashed"},
+    )
+    connector = _FakeConnector(
+        [
+            ConnectorBatch(records=(live,), next_cursor={"since": "1"}),
+            ConnectorBatch(records=(tombstone,), next_cursor={"since": "2"}),
+        ]
+    )
+    runner = _runner(sessionmaker)
+
+    await runner.sync(source_id=source_id, group_id=group, connector=connector)  # type: ignore[arg-type]
+    outcome = await runner.sync(source_id=source_id, group_id=group, connector=connector)  # type: ignore[arg-type]
+
+    assert outcome.processed == 1
+    async with sessionmaker() as session:
+        versions = await session.scalar(
+            text(
+                "SELECT count(*) FROM artifact_versions av "
+                "JOIN artifacts a ON a.id = av.artifact_id "
+                "WHERE a.source_id = :source_id"
+            ),
+            {"source_id": source_id},
+        )
+        finalizers = await session.scalar(
+            text(
+                "SELECT count(*) FROM ingestion_jobs WHERE group_id = :group_id "
+                "AND payload->>'job_kind' = 'fabric_reconcile_version'"
+            ),
+            {"group_id": group},
+        )
+    assert versions == 2
+    assert finalizers == 1

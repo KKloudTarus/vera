@@ -52,6 +52,7 @@ class IngestArtifact:
     source_revision: int | None = None
     source_updated_at: datetime | None = None
     source_version_id: str | None = None
+    tombstone: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -193,7 +194,8 @@ class CurationService:
 
         # Re-ingestion is idempotent by content: an unchanged record is a no-op, changed
         # content appends a version. This keeps a re-run of a sync from duplicating work.
-        content_hash = "sha256:" + hashlib.sha256(cmd.body.encode()).hexdigest()
+        hash_input = (b"tombstone\0" + cmd.body.encode()) if cmd.tombstone else cmd.body.encode()
+        content_hash = "sha256:" + hashlib.sha256(hash_input).hexdigest()
         head = await uow.artifacts.get_head(source_id=cmd.source_id, external_id=cmd.external_id)
         if head is not None and head.content_hash == content_hash:
             return Ok(
@@ -244,6 +246,19 @@ class CurationService:
                 source_updated_at=cmd.source_updated_at,
                 source_version_id=cmd.source_version_id,
                 observed_at=observed_at,
+            )
+
+        if cmd.tombstone:
+            # Source deletion is lifecycle metadata, not a new knowledge assertion. An empty
+            # authoritative version withdraws every assertion from the previous artifact version.
+            await self._queue_fabric_version(ref, source.trust_tier, cmd.group_id)
+            return Ok(
+                IngestResult(
+                    artifact_version_id=str(ref.version_id),
+                    claim_ids=(),
+                    published=0,
+                    action="tombstone",
+                )
             )
 
         # Structure-aware chunking (persisted before extraction) so retrieval has citable

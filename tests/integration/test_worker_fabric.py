@@ -355,7 +355,7 @@ async def test_stale_predecessor_job_cannot_regress_the_current_fact(
     assert await _fact_state(container, group, "eks") is None
 
 
-async def test_empty_new_version_retracts_the_previous_fact(
+async def test_tombstone_version_retracts_the_previous_fact(
     fabric_container: Container,
 ) -> None:
     container = fabric_container
@@ -398,9 +398,9 @@ async def test_empty_new_version_retracts_the_previous_fact(
                 source_id=UUID(str(source_id)),
                 group_id=group,
                 external_id="removable-page",
-                body="fact removed",
-                knowledge_type="text",
+                body="",
                 source_revision=2,
+                tombstone=True,
             )
         )
         await uow.commit()

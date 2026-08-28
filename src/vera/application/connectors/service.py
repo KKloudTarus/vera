@@ -2,8 +2,8 @@
 
 For each changed record the runner ingests an artifact in its own transaction, so one
 bad record does not roll back the batch. Ingestion is content-idempotent, so a record
-seen again unchanged is a no-op. After the batch it persists the connector's next
-cursor, which is what makes the following run incremental.
+seen again unchanged is a no-op. The cursor is checkpointed only after every record in
+an API page commits, so a crash replays at most one page and never skips one.
 """
 
 from __future__ import annotations
@@ -90,6 +90,7 @@ class SyncRunner:
                                 source_revision=record.source_revision,
                                 source_updated_at=record.source_updated_at,
                                 source_version_id=record.source_version_id,
+                                tombstone=record.tombstone,
                             )
                         )
                         await uow.commit()
@@ -98,10 +99,12 @@ class SyncRunner:
                     else:
                         processed += 1
                 cursor = batch.next_cursor
+                # A page is the checkpoint boundary. If the next fetch or process crashes, the
+                # saved cursor resumes here; content/version idempotency makes replays harmless.
+                await self._state.save_cursor(source_id, cursor)
                 pages += 1
                 if not batch.has_more or pages >= _MAX_PAGES_PER_SYNC:
                     break
-            await self._state.save_cursor(source_id, cursor)
             await self._state.finish_job(job_id, processed=processed, unchanged=unchanged)
             return SyncOutcome(processed=processed, unchanged=unchanged, cursor=cursor)
         except Exception as exc:
