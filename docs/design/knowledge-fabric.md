@@ -119,7 +119,13 @@ get_fact, explain_fact, changes, conflicts, snapshots, and propose, all with sco
 server-side and proposals confined to the caller's personal scope; the existing `/memory`
 endpoints and `memory_*` tools remain for backward compatibility). Within Phase 6,
 `knowledge_feedback` reuses the existing `memory_feedback` path and `get_evidence` is served
-by `explain_fact`; migrating them to the new model follows the Phase 8 cutover. Within Phase 3, projecting
+by `explain_fact`; migrating them to the new model follows the Phase 8 cutover. Phase 7 adds
+governance and the production role model: destructive retraction now requires an admin role
+(a `role_for`/`can_administer` resolver, not mere read access); the review queue, fact
+timeline, promote/reject (admin-gated), and ontology-policy endpoints back a future Knowledge
+Workbench; and migration `c9e2f3a4b5d6` creates the non-superuser `vera_trusted` (read) and
+`vera_worker` (read/write) BYPASSRLS roles so the cross-scope read and worker paths need no
+superuser in production, with `vera_app` staying the RLS-enforced tenant path. Within Phase 3, projecting
 Sagas and building derived communities/summaries is deferred: those depend on Graphiti's
 LLM-driven community APIs, whereas the invariant that matters here, a graph rebuildable from
 Postgres, is delivered and verified by `FactProjectionService` and its drift check. Within

@@ -31,9 +31,16 @@ def upgrade() -> None:
         "knowledge_snapshots",
         sa.Column("id", postgresql.UUID(as_uuid=True), server_default=sa.text("uuidv7()")),
         sa.Column("group_id", sa.String(256), nullable=False),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
+        sa.Column(
+            "created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()
+        ),
         sa.Column("as_of_valid_time", sa.DateTime(timezone=True), nullable=True),
-        sa.Column("as_of_system_time", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
+        sa.Column(
+            "as_of_system_time",
+            sa.DateTime(timezone=True),
+            nullable=False,
+            server_default=sa.func.now(),
+        ),
         sa.Column(
             "ontology_version_id",
             postgresql.UUID(as_uuid=True),
@@ -42,7 +49,12 @@ def upgrade() -> None:
         ),
         sa.Column("policy_version", sa.String(64), nullable=False),
         sa.Column("fact_count", sa.Integer, nullable=False, server_default="0"),
-        sa.Column("source_boundaries", postgresql.JSONB, nullable=False, server_default=sa.text("'{}'::jsonb")),
+        sa.Column(
+            "source_boundaries",
+            postgresql.JSONB,
+            nullable=False,
+            server_default=sa.text("'{}'::jsonb"),
+        ),
         sa.PrimaryKeyConstraint("id"),
     )
 
@@ -75,7 +87,9 @@ def upgrade() -> None:
             sa.ForeignKey("knowledge_snapshots.id", ondelete="SET NULL"),
             nullable=True,
         ),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
+        sa.Column(
+            "created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()
+        ),
         sa.Column("query", sa.Text, nullable=False),
         sa.Column("hints", postgresql.JSONB, nullable=False, server_default=sa.text("'{}'::jsonb")),
         sa.Column("token_estimate", sa.Integer, nullable=False, server_default="0"),
@@ -83,7 +97,9 @@ def upgrade() -> None:
         sa.Column("omitted", sa.Integer, nullable=False, server_default="0"),
         sa.Column("conflicts", sa.Integer, nullable=False, server_default="0"),
         sa.Column("freshness_warnings", sa.Integer, nullable=False, server_default="0"),
-        sa.Column("results", postgresql.JSONB, nullable=False, server_default=sa.text("'[]'::jsonb")),
+        sa.Column(
+            "results", postgresql.JSONB, nullable=False, server_default=sa.text("'[]'::jsonb")
+        ),
         sa.PrimaryKeyConstraint("id"),
         sa.Index("ix_context_packs_group", "group_id", "created_at"),
     )

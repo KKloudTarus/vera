@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from uuid import UUID
 
+from vera.domain.identity.models import Role, role_at_least
 from vera.domain.identity.scopes import ScopeKind, scope_kind
 from vera.domain.ports.identity import ResolvedScope, ScopeResolver
 
@@ -26,6 +27,16 @@ class ScopeResolutionService:
 
     async def can_read(self, principal_id: UUID, group_id: str) -> bool:
         return group_id in await self.allowed_group_ids(principal_id)
+
+    async def role_for(self, principal_id: UUID, group_id: str) -> Role | None:
+        return await self._resolver.role_for(principal_id, group_id)
+
+    async def can_administer(self, principal_id: UUID, group_id: str) -> bool:
+        """Whether the principal may perform destructive or governance actions on the group:
+        it requires ADMIN or higher, never mere read access.
+        """
+        role = await self._resolver.role_for(principal_id, group_id)
+        return role is not None and role_at_least(role, Role.ADMIN)
 
     async def shared_group_ids(self, principal_id: UUID) -> tuple[str, ...]:
         """Only the org/workspace/project scopes, excluding the personal scope."""

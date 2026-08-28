@@ -34,6 +34,7 @@ from vera.adapters.persistence.unit_of_work import SqlAlchemyUnitOfWork
 from vera.application.retrieval import ContextAssembler
 from vera.application.snapshot import ContextPackService, SnapshotService
 from vera.bootstrap import Container
+from vera.domain.identity.models import Role, role_at_least
 from vera.domain.identity.scopes import ScopeKind, scope_kind
 from vera.domain.knowledge.fabric import (
     Assertion,
@@ -48,6 +49,8 @@ from vera.domain.knowledge.fabric import (
     normalize_object,
     slot_key,
 )
+from vera.domain.ontology.policy import policy_for
+from vera.domain.ontology.registry import EDGE_TYPES, ONTOLOGY_VERSION
 from vera.domain.ports.identity import ResolvedScope, ScopeResolver
 from vera.shared.ids import uuid7
 from vera.shared.time import utc_now
@@ -317,3 +320,85 @@ class KnowledgeService:
             )
             await uow.commit()
         return {"status": "proposed", "fact_key": fk, "lifecycle": "proposed", "group_id": group}
+
+    # -------------------------------------------------------------- governance ---
+
+    async def _can_admin(self, principal_id: UUID, group_id: str) -> bool:
+        role = await self._scopes.role_for(principal_id, group_id)
+        return role is not None and role_at_least(role, Role.ADMIN)
+
+    async def review_queue(self, principal_id: UUID, *, limit: int = 50) -> list[dict[str, Any]]:
+        scope = await self._resolve(principal_id)
+        return await self._read.review_queue(group_ids=list(scope.group_ids), limit=limit)
+
+    async def fact_timeline(self, principal_id: UUID, *, fact_key: str) -> list[dict[str, Any]]:
+        scope = await self._resolve(principal_id)
+        return await self._read.fact_timeline(group_ids=list(scope.group_ids), fact_key=fact_key)
+
+    async def promote_fact(self, principal_id: UUID, *, fact_key: str) -> JsonDict:
+        return await self._transition_fact(
+            principal_id,
+            fact_key=fact_key,
+            to=FactLifecycle.ACTIVE,
+            event=KnowledgeEventType.FACT_ACTIVATED,
+            reason="promoted by reviewer",
+        )
+
+    async def reject_fact(self, principal_id: UUID, *, fact_key: str) -> JsonDict:
+        return await self._transition_fact(
+            principal_id,
+            fact_key=fact_key,
+            to=FactLifecycle.RETRACTED,
+            event=KnowledgeEventType.FACT_RETRACTED,
+            reason="rejected by reviewer",
+        )
+
+    async def _transition_fact(
+        self,
+        principal_id: UUID,
+        *,
+        fact_key: str,
+        to: FactLifecycle,
+        event: KnowledgeEventType,
+        reason: str,
+    ) -> JsonDict:
+        scope = await self._resolve(principal_id)
+        fact = await self._read.get_fact(group_ids=list(scope.group_ids), fact_key=fact_key)
+        if fact is None:
+            raise ScopeError("fact not found in the caller's scopes")
+        group = fact["group_id"]
+        if not await self._can_admin(principal_id, group):
+            raise ScopeError("this action requires an admin role on the fact's scope")
+        async with SqlAlchemyUnitOfWork(self._c.sessionmaker) as uow:
+            await uow.use_tenant(group)
+            session = uow.session
+            await SqlAlchemyFactRepository(session).set_lifecycle(
+                group_id=group, fact_id=fact["fact_id"], state=to
+            )
+            await SqlAlchemyKnowledgeEventLog(session).append(
+                KnowledgeEvent(
+                    id=uuid7(),
+                    group_id=group,
+                    event_type=event,
+                    occurred_at=utc_now(),
+                    actor=str(principal_id),
+                    fact_id=UUID(fact["fact_id"]),
+                    reason=reason,
+                )
+            )
+            await uow.commit()
+        return {"fact_key": fact_key, "lifecycle": to.value, "group_id": group}
+
+    def ontology(self) -> JsonDict:
+        return {
+            "ontology_version": ONTOLOGY_VERSION,
+            "predicates": [
+                {
+                    "predicate": name,
+                    "cardinality": policy_for(name).cardinality.value,
+                    "absence_semantics": policy_for(name).absence_semantics.value,
+                    "conflict_strategy": policy_for(name).conflict_strategy.value,
+                }
+                for name in sorted(EDGE_TYPES)
+            ],
+        }

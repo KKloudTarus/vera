@@ -53,6 +53,21 @@ _CONFLICTS = text(
     "WHERE f.group_id = ANY(CAST(:gids AS text[])) AND f.lifecycle_state = 'disputed' "
     "ORDER BY f.updated_at DESC LIMIT :lim"
 )
+_REVIEW = text(
+    "SELECT f.fact_key, f.group_id, cs.canonical_name AS subject, f.predicate, "
+    "COALESCE(co.canonical_name, f.object_scalar) AS object, f.authority, f.confidence, "
+    "f.created_at "
+    "FROM facts f JOIN canonical_entities cs ON cs.id = f.subject_entity_id "
+    "LEFT JOIN canonical_entities co ON co.id = f.object_entity_id "
+    "WHERE f.group_id = ANY(CAST(:gids AS text[])) AND f.lifecycle_state = 'proposed' "
+    "ORDER BY f.created_at DESC LIMIT :lim"
+)
+_TIMELINE = text(
+    "SELECT event_type, occurred_at, actor, reason FROM knowledge_events "
+    "WHERE group_id = ANY(CAST(:gids AS text[])) AND fact_id IN ("
+    "  SELECT id FROM facts WHERE group_id = ANY(CAST(:gids AS text[])) AND fact_key = :fk"
+    ") ORDER BY occurred_at ASC LIMIT :lim"
+)
 
 
 class SqlAlchemyKnowledgeReadModel:
@@ -124,6 +139,28 @@ class SqlAlchemyKnowledgeReadModel:
         async with self._session_factory() as session:
             rows = (
                 (await session.execute(_CONFLICTS, {"gids": group_ids, "lim": limit}))
+                .mappings()
+                .all()
+            )
+        return [dict(r) for r in rows]
+
+    async def review_queue(self, *, group_ids: list[str], limit: int = 50) -> list[dict[str, Any]]:
+        async with self._session_factory() as session:
+            rows = (
+                (await session.execute(_REVIEW, {"gids": group_ids, "lim": limit})).mappings().all()
+            )
+        return [dict(r) for r in rows]
+
+    async def fact_timeline(
+        self, *, group_ids: list[str], fact_key: str, limit: int = 200
+    ) -> list[dict[str, Any]]:
+        async with self._session_factory() as session:
+            rows = (
+                (
+                    await session.execute(
+                        _TIMELINE, {"gids": group_ids, "fk": fact_key, "lim": limit}
+                    )
+                )
                 .mappings()
                 .all()
             )

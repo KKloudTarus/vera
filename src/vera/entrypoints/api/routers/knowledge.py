@@ -159,3 +159,47 @@ async def propose(
         )
     except ScopeError as exc:
         raise _forbidden(exc) from exc
+
+
+# --- Governance and administration (backend for a future Knowledge Workbench, section 14) ---
+
+
+@router.get("/facts/{fact_key}/timeline", summary="A fact's semantic history")
+async def fact_timeline(
+    fact_key: str, principal: PrincipalDep, service: KnowledgeServiceDep
+) -> list[dict[str, Any]]:
+    return await service.fact_timeline(principal.id, fact_key=fact_key)
+
+
+@router.get("/ontology", summary="Predicate governance policies and the ontology version")
+async def ontology(principal: PrincipalDep, service: KnowledgeServiceDep) -> dict[str, Any]:
+    return service.ontology()
+
+
+@router.get("/review", summary="The review queue: proposed facts awaiting a decision")
+async def review_queue(
+    principal: PrincipalDep,
+    service: KnowledgeServiceDep,
+    limit: int = Query(default=50, ge=1, le=200),
+) -> list[dict[str, Any]]:
+    return await service.review_queue(principal.id, limit=limit)
+
+
+@router.post("/review/{fact_key}/promote", summary="Promote a proposed fact to active (admin)")
+async def promote_fact(
+    fact_key: str, principal: PrincipalDep, service: KnowledgeServiceDep
+) -> dict[str, Any]:
+    try:
+        return await service.promote_fact(principal.id, fact_key=fact_key)
+    except ScopeError as exc:
+        raise _forbidden(exc) from exc
+
+
+@router.post("/review/{fact_key}/reject", summary="Reject a proposed fact (admin)")
+async def reject_fact(
+    fact_key: str, principal: PrincipalDep, service: KnowledgeServiceDep
+) -> dict[str, Any]:
+    try:
+        return await service.reject_fact(principal.id, fact_key=fact_key)
+    except ScopeError as exc:
+        raise _forbidden(exc) from exc

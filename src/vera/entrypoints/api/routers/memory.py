@@ -131,11 +131,13 @@ async def retract_source(
     container: ContainerDep,
     erase: bool = False,
 ) -> None:
-    # A published source_id is "<group_id>:<claim_uuid>"; the caller must be able to read
-    # that group. `erase` also deletes the episode row and its raw artifact bytes (GDPR).
+    # A published source_id is "<group_id>:<claim_uuid>". Retraction and erasure are
+    # destructive, so they require ADMIN or higher on the group, not mere read access.
     group_id = source_id.rsplit(":", 1)[0]
-    if not await scopes.can_read(principal.id, group_id):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="not in scope")
+    if not await scopes.can_administer(principal.id, group_id):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail="retraction requires an admin role"
+        )
     service = RetractionService(container.sessionmaker, container.memory, container.object_store)
     result = await service.retract_source(
         group_id=group_id,

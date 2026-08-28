@@ -35,6 +35,12 @@ class ScopeResolver(Protocol):
         """The scopes a principal may read, or None if the principal is unknown."""
         ...
 
+    async def role_for(self, principal_id: UUID, group_id: str) -> Role | None:
+        """The principal's highest role over a group (for authorizing destructive and
+        governance actions), or None if the principal has no membership granting it.
+        """
+        ...
+
 
 class Authenticator(Protocol):
     async def authenticate(self, credential: str) -> AuthenticatedPrincipal | None:
