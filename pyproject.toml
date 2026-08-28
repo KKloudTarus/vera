@@ -28,21 +28,21 @@ classifiers = [
 ]
 dependencies = [
     # --- API + MCP surface ---
-    "fastapi>=0.115",
-    "uvicorn[standard]>=0.32",
+    "fastapi>=0.141.1",
+    "uvicorn[standard]>=0.52.4",
     "mcp>=2.1",
     # --- domain / validation / config ---
-    "pydantic>=2.9",
-    "pydantic-settings>=2.6",
+    "pydantic>=2.13.4",
+    "pydantic-settings>=2.15.0",
     # --- persistence (source of truth) ---
-    "sqlalchemy[asyncio]>=2.0.36",
-    "asyncpg>=0.30",
-    "alembic>=1.14",
+    "sqlalchemy[asyncio]>=2.0.52",
+    "asyncpg>=0.31.0",
+    "alembic>=1.19.1",
     # --- observability / logging ---
-    "structlog>=24.4",
+    "structlog>=26.1.0",
     # --- http + resilience ---
-    "httpx>=0.28",
-    "tenacity>=9.0",
+    "httpx>=0.28.1",
+    "tenacity>=9.1.4",
 ]
 
 # Optional stacks are grouped so the base skeleton installs lean and runnable.
@@ -51,53 +51,53 @@ dependencies = [
 # Graphiti is pinned to a tested 0.29.x range: VERA depends on lower-level driver primitives
 # (see the Graphiti compatibility contract tests), so a minor bump must be vetted first.
 memory = [
-    "graphiti-core>=0.29,<0.30",
-    "neo4j>=5.26",
+    "graphiti-core>=0.29.3,<0.30",
+    "neo4j>=6.2.0",
 ]
 # Optional FalkorDB graph backend (VERA_MEMORY__GRAPH_BACKEND=falkordb), a full Neo4j
 # alternative: on FalkorDB VERA runs its own hybrid stage-1 search (fulltext + vector RRF)
 # since Graphiti's search returns nothing there. See docs/architecture.md.
 falkordb = [
-    "graphiti-core[falkordb]>=0.29,<0.30",
+    "graphiti-core[falkordb]>=0.29.3,<0.30",
 ]
 objectstore = [
-    "aioboto3>=13.0",
+    "aioboto3>=15.5.0",
 ]
 observability = [
-    "opentelemetry-sdk>=1.29",
-    "opentelemetry-exporter-otlp-proto-grpc>=1.29",
-    "opentelemetry-instrumentation-fastapi>=0.50b0",
-    "opentelemetry-instrumentation-sqlalchemy>=0.50b0",
-    "opentelemetry-instrumentation-asyncpg>=0.50b0",
-    "opentelemetry-instrumentation-httpx>=0.50b0",
-    "prometheus-client>=0.21",
-    "prometheus-fastapi-instrumentator>=7.0",
+    "opentelemetry-sdk>=1.44.0",
+    "opentelemetry-exporter-otlp-proto-grpc>=1.44.0",
+    "opentelemetry-instrumentation-fastapi>=0.65b0",
+    "opentelemetry-instrumentation-sqlalchemy>=0.65b0",
+    "opentelemetry-instrumentation-asyncpg>=0.65b0",
+    "opentelemetry-instrumentation-httpx>=0.65b0",
+    "prometheus-client>=0.26.0",
+    "prometheus-fastapi-instrumentator>=8.1.0",
 ]
 resilience = [
     # Circuit breaking is in-house (a small async breaker) to avoid a legacy
     # pkg_resources import and keep the dependency surface small; retry uses tenacity.
-    "cachetools>=5.5",
+    "cachetools>=7.1.7",
     # RESP client for the distributed rate limiter. Speaks to Valkey or any
     # redis-compatible server; no cloud lock-in.
-    "redis>=5",
+    "redis>=8.1.0",
 ]
 security = [
     # OAuth 2.1 Resource Server / OIDC JWT verification (API and MCP auth).
-    "pyjwt>=2.9",
+    "pyjwt>=2.13.0",
 ]
 dev = [
-    "ruff>=0.8",
-    "pyright>=1.1.390",
-    "pre-commit>=4.0",
-    "import-linter>=2.1",
-    "pytest>=8.3",
-    "pytest-asyncio>=0.24",
-    "pytest-cov>=6.0",
-    "respx>=0.22",
-    "factory-boy>=3.3",
-    "testcontainers[postgres,neo4j]>=4.9",
+    "ruff>=0.16.4",
+    "pyright>=1.1.411",
+    "pre-commit>=4.6.2",
+    "import-linter>=2.13",
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+    "pytest-cov>=7.1.0",
+    "respx>=0.23.1",
+    "factory-boy>=3.3.3",
+    "testcontainers[postgres,neo4j]>=4.15.0",
     "detect-secrets>=1.5",
-    "pip-audit>=2.7",
+    "pip-audit>=2.10.1",
     # pip-audit pulls CacheControl -> msgpack; pin the patched msgpack (PYSEC-2026-3625).
     "msgpack>=1.2.1",
 ]
