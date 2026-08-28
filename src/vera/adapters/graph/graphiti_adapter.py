@@ -11,11 +11,13 @@ filter, since Graphiti has no ``as_of`` parameter.
 from __future__ import annotations
 
 import asyncio
+import re
 from collections.abc import Sequence
 from datetime import datetime
 from typing import Any, LiteralString, cast
 
 from graphiti_core import Graphiti
+from graphiti_core.driver.driver import GraphProvider
 from graphiti_core.edges import EntityEdge
 from graphiti_core.nodes import EntityNode, EpisodeType
 from graphiti_core.search.search_config_recipes import EDGE_HYBRID_SEARCH_RRF
@@ -43,6 +45,30 @@ _EPISODE_TYPES = {
     "json": EpisodeType.json,
     "text": EpisodeType.text,
 }
+
+# FalkorDB edge fulltext search with the same bi-temporal filter Neo4j uses. ISO-8601
+# timestamps compare correctly as strings because they are all UTC (+00:00).
+_FALKOR_EDGE_SEARCH: LiteralString = (
+    "CALL db.idx.fulltext.queryRelationships('RELATES_TO', $q) YIELD relationship, score "
+    "WITH relationship AS e, score "
+    "WHERE e.group_id = $gid AND (e.valid_at IS NULL OR e.valid_at <= $asof) "
+    "AND (e.invalid_at IS NULL OR e.invalid_at > $asof) "
+    "RETURN e.fact AS fact, e.uuid AS uuid, e.valid_at AS valid_at, "
+    "e.invalid_at AS invalid_at, score ORDER BY score DESC LIMIT $limit"
+)
+# Alphanumeric terms only, so a natural-language query is a safe RediSearch fulltext input.
+_FULLTEXT_TOKEN = re.compile(r"[A-Za-z0-9]+")
+
+
+def _parse_iso(value: object) -> datetime | None:
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, str) and value:
+        try:
+            return datetime.fromisoformat(value)
+        except ValueError:
+            return None
+    return None
 
 
 def _neighbors_query(hops: int) -> str:
@@ -99,6 +125,8 @@ def _as_of_filter(as_of: datetime | None) -> SearchFilters | None:
 class GraphitiMemoryEngine:
     def __init__(self, client: Graphiti) -> None:
         self._client = client
+        driver = getattr(client, "driver", None)
+        self._falkordb = getattr(driver, "provider", None) == GraphProvider.FALKORDB
 
     async def ensure_schema(self) -> None:
         await self._client.build_indices_and_constraints()
@@ -227,12 +255,14 @@ class GraphitiMemoryEngine:
         return merged[: query.limit]
 
     async def _search_one(self, query: GraphQuery, group_id: GroupId) -> list[GraphHit]:
-        config = EDGE_HYBRID_SEARCH_RRF.model_copy(
-            update={"limit": query.limit, "reranker_min_score": 0}
-        )
         # Default to "as of now" so a superseded (invalidated) edge is hidden from the
         # current view; an explicit as_of returns the historical state instead.
         as_of = query.as_of or utc_now()
+        if self._falkordb:
+            return await self._falkordb_search(query, group_id, as_of)
+        config = EDGE_HYBRID_SEARCH_RRF.model_copy(
+            update={"limit": query.limit, "reranker_min_score": 0}
+        )
         with span("graph.search_group"):
             results = await self._client.search_(
                 query.text,
@@ -251,6 +281,40 @@ class GraphitiMemoryEngine:
                     edge_uuid=edge.uuid,
                     valid_at=edge.valid_at,
                     invalid_at=edge.invalid_at,
+                )
+            )
+        return hits
+
+    async def _falkordb_search(
+        self, query: GraphQuery, group_id: GroupId, as_of: datetime
+    ) -> list[GraphHit]:
+        # Graphiti's hybrid search does not return results on FalkorDB (its edge search
+        # orchestration and edge vector population differ from Neo4j). FalkorDB's edge
+        # fulltext index does work, so run it directly with the same bi-temporal filter as
+        # Neo4j. ISO-8601 timestamps compare correctly as strings (all are UTC, +00:00).
+        # Join terms with the RediSearch OR operator so a natural-language query matches any
+        # term (its default is AND, which a full sentence rarely satisfies). VERA's stage-2
+        # blend and stage-3 reranker then order the candidates.
+        terms = "|".join(_FULLTEXT_TOKEN.findall(query.text))
+        if not terms:
+            return []
+        gid = _graphiti_group(str(group_id))
+        with span("graph.search_group.falkordb"):
+            result = cast(
+                "Any",
+                await self._client.driver.execute_query(  # pyright: ignore[reportUnknownMemberType]
+                    _FALKOR_EDGE_SEARCH, q=terms, gid=gid, asof=as_of.isoformat(), limit=query.limit
+                ),
+            )
+        hits: list[GraphHit] = []
+        for row in _records(result):
+            hits.append(
+                GraphHit(
+                    fact=row["fact"],
+                    score=float(row["score"]),
+                    edge_uuid=row["uuid"],
+                    valid_at=_parse_iso(row.get("valid_at")),
+                    invalid_at=_parse_iso(row.get("invalid_at")),
                 )
             )
         return hits

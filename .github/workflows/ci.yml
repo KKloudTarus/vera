@@ -63,11 +63,15 @@ jobs:
         options: >-
           --health-cmd "valkey-cli ping"
           --health-interval 5s --health-timeout 3s --health-retries 20
+      falkordb:
+        image: falkordb/falkordb:latest
+        ports: ["6380:6379"]
     env:
       VERA_NEO4J__URI: bolt://localhost:7687
       VERA_NEO4J__USER: neo4j
       VERA_NEO4J__PASSWORD: vera-local-pass
       VERA_RESILIENCE__VALKEY_URL: redis://localhost:6379/0
+      VERA_FALKOR__PORT: "6380"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

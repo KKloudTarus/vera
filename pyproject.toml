@@ -52,9 +52,9 @@ memory = [
     "graphiti-core>=0.29",
     "neo4j>=5.26",
 ]
-# Optional FalkorDB graph backend (VERA_MEMORY__GRAPH_BACKEND=falkordb). Experimental:
-# ingestion and the custom graph ops work, but Graphiti's hybrid search does not yet
-# return results on FalkorDB in this version combination (see docs/architecture.md).
+# Optional FalkorDB graph backend (VERA_MEMORY__GRAPH_BACKEND=falkordb). The full pipeline
+# works; on FalkorDB, stage-1 search is VERA's own fulltext query (Graphiti's hybrid search
+# returns nothing there), then the usual blend and reranker. See docs/architecture.md.
 falkordb = [
     "graphiti-core[falkordb]>=0.29",
 ]
@@ -100,7 +100,7 @@ dev = [
     "msgpack>=1.2.1",
 ]
 all = [
-    "vera[memory,objectstore,observability,resilience,security,dev]",
+    "vera[memory,objectstore,observability,resilience,security,falkordb,dev]",
 ]
 
 [project.urls]

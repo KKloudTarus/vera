@@ -45,13 +45,17 @@ The graph is reached through the `MemoryEngine` port and Graphiti, which support
 backends. VERA exposes `VERA_MEMORY__GRAPH_BACKEND` = `neo4j` (default) or `falkordb`; no
 backend is privileged, and because the graph is a rebuildable projection, switching is a
 config change plus a `reprocess`. This matters for cost and scale: Neo4j clustering/HA needs
-the paid Enterprise edition, whereas FalkorDB (a Redis-module graph) avoids that. FalkorDB
-support is **experimental** as of this writing: ingestion and the custom graph operations
-(multi-hop traversal, retraction, bi-temporal `as_of`) work, but Graphiti's hybrid *search*
-returns no results on FalkorDB in the current version combination, so it is not yet a drop-in
-replacement for the retrieval path. Neo4j Community remains the recommended backend; its
-usual "need Enterprise for backups" argument is weakened here because a lost graph is rebuilt
-from Postgres and S3 rather than restored.
+the paid Enterprise edition, whereas FalkorDB (a Redis-module graph) avoids that, and its
+usual "need Enterprise for backups" concern is moot here because a lost graph is rebuilt from
+Postgres and S3.
+
+Both backends run the full pipeline end to end: ingestion, multi-hop traversal, retraction,
+bi-temporal `as_of`, supersession, and search. One difference: Graphiti's own hybrid search
+returns nothing on FalkorDB (it does not populate edge vectors there), so on FalkorDB VERA
+runs its own stage-1 edge search over FalkorDB's fulltext index, then applies the same
+stage-2 blend and stage-3 reranker. Stage 1 on FalkorDB is therefore lexical rather than
+vector-hybrid; the semantic lift comes from the reranker. Neo4j uses Graphiti's vector +
+fulltext RRF for stage 1. Choose the backend by your cost, scale, and license constraints.
 
 ### Tenancy
 
