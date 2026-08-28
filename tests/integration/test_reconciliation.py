@@ -21,6 +21,7 @@ from vera.adapters.persistence.models.knowledge import ArtifactRow, ArtifactVers
 from vera.adapters.persistence.repositories import (
     SqlAlchemyAssertionRepository,
     SqlAlchemyCanonicalEntityRepository,
+    SqlAlchemyCommunityLineageRepository,
     SqlAlchemyEvidenceRepository,
     SqlAlchemyFactExpiryRepository,
     SqlAlchemyFactRelationRepository,
@@ -595,3 +596,64 @@ async def test_ttl_freshness_expires_active_fact_and_emits_event(
         )
     assert lifecycle == "expired"
     assert event == "FACT_EXPIRED"
+
+
+async def test_community_fact_lineage_is_scope_safe_and_paginated(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    group = f"p:community-{uuid7().hex[:12]}"
+    source, artifact, version, _ = await _bootstrap(sessionmaker, group)
+    subject = await _subject(sessionmaker, group)
+    async with _tenant(sessionmaker, group) as session:
+        await _service(session).reconcile(
+            _req(
+                group,
+                artifact,
+                version,
+                source,
+                1,
+                [_depends_on(subject, "postgres"), _depends_on(subject, "redis")],
+            )
+        )
+        fact_ids = tuple(
+            await session.scalars(
+                text("SELECT id FROM facts WHERE group_id = :group ORDER BY id"),
+                {"group": group},
+            )
+        )
+
+    community_id = uuid7()
+    run_id = uuid7()
+    repository = SqlAlchemyCommunityLineageRepository(sessionmaker)
+    await repository.record(
+        group_id=group,
+        community_id=community_id,
+        derivation_run_id=run_id,
+        fact_ids=fact_ids,
+    )
+    first = await repository.page(
+        group_ids=(group,),
+        community_id=community_id,
+        derivation_run_id=run_id,
+        cursor=None,
+        limit=1,
+    )
+    assert len(first.items) == 1
+    assert first.next_cursor is not None
+    second = await repository.page(
+        group_ids=(group,),
+        community_id=community_id,
+        derivation_run_id=run_id,
+        cursor=UUID(first.next_cursor),
+        limit=1,
+    )
+    assert len(second.items) == 1
+    assert second.items[0].fact_id != first.items[0].fact_id
+    hidden = await repository.page(
+        group_ids=("p:other",),
+        community_id=community_id,
+        derivation_run_id=run_id,
+        cursor=None,
+        limit=10,
+    )
+    assert hidden.items == ()

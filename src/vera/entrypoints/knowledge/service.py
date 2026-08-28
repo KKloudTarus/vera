@@ -13,7 +13,10 @@ from datetime import datetime
 from typing import Any, Literal
 from uuid import UUID
 
-from vera.adapters.persistence.repositories import SqlAlchemyCanonicalEntityRepository
+from vera.adapters.persistence.repositories import (
+    SqlAlchemyCanonicalEntityRepository,
+    SqlAlchemyCommunityLineageRepository,
+)
 from vera.adapters.persistence.repositories.fabric import (
     SqlAlchemyAssertionRepository,
     SqlAlchemyEvidenceRepository,
@@ -60,7 +63,7 @@ from vera.domain.ports.retrieval_index import CodeIndex, PassageIndex, Retrieval
 from vera.domain.ports.snapshot import ContextPack
 from vera.shared.ids import uuid7
 from vera.shared.time import utc_now
-from vera.shared.types import JsonDict
+from vera.shared.types import GroupId, JsonDict
 
 _PROPOSAL_AUTHORITY = 0.4  # tier 4 (unverified) authority; proposals never outrank real facts
 
@@ -99,6 +102,7 @@ class KnowledgeService:
         self._read = SqlAlchemyKnowledgeReadModel(sm)
         self._snapshots = SqlAlchemySnapshotRepository(sm)
         self._packs = SqlAlchemyContextPackRepository(sm)
+        self._community_lineage = SqlAlchemyCommunityLineageRepository(sm)
         passages: PassageIndex
         code: CodeIndex
         if container.settings.memory.vector_search_enabled and container.embedder is not None:
@@ -256,6 +260,72 @@ class KnowledgeService:
                 }
                 for r in assembled.results
             ],
+        }
+
+    async def communities(
+        self,
+        principal_id: UUID,
+        *,
+        project: str | None = None,
+        query: str | None = None,
+        limit: int = 20,
+    ) -> list[JsonDict]:
+        scope = await self._resolve(principal_id)
+        group = await self._target_group(scope, project)
+        communities = await self._c.memory.search_communities(
+            group_ids=(GroupId(group),), query=query, limit=limit
+        )
+        return [
+            {
+                "kind": "community_summary",
+                "community_id": community.community_id,
+                "name": community.name,
+                "summary": community.summary,
+                "derived": True,
+                "authoritative": False,
+                "evidence": None,
+                "derivation_run_id": community.derivation_run_id,
+                "source_fact_set_hash": community.source_fact_set_hash,
+                "projection_checkpoint": community.projection_checkpoint,
+            }
+            for community in communities
+        ]
+
+    async def community_lineage(
+        self,
+        principal_id: UUID,
+        *,
+        community_id: str,
+        derivation_run_id: str | None = None,
+        cursor: str | None = None,
+        limit: int = 50,
+    ) -> JsonDict | None:
+        scope = await self._resolve(principal_id)
+        page = await self._community_lineage.page(
+            group_ids=tuple(scope.group_ids),
+            community_id=UUID(community_id),
+            derivation_run_id=UUID(derivation_run_id) if derivation_run_id else None,
+            cursor=UUID(cursor) if cursor else None,
+            limit=limit,
+        )
+        if not page.items:
+            return None
+        return {
+            "community_id": community_id,
+            "derivation_run_id": str(page.items[0].derivation_run_id),
+            "derived": True,
+            "items": [
+                {
+                    "fact_id": str(item.fact_id),
+                    "fact_key": item.fact_key,
+                    "subject": item.subject_name,
+                    "predicate": item.predicate,
+                    "object": item.object_name,
+                    "created_at": item.created_at.isoformat(),
+                }
+                for item in page.items
+            ],
+            "next_cursor": page.next_cursor,
         }
 
     # ------------------------------------------------------------------- reads ---

@@ -195,6 +195,23 @@ async def test_ontology_lists_predicate_policies(
     assert "RUNS_ON" in report["predicate_policies_changed"]
 
 
+async def test_community_reads_are_scoped_and_missing_lineage_is_not_found(
+    app_client: AsyncClient,
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    group, admin_key, _ = await _tenancy(sessionmaker)
+    summaries = await app_client.get(
+        f"/v2/knowledge/communities?project={group}", headers=_auth(admin_key)
+    )
+    assert summaries.status_code == 200
+    assert summaries.json() == []
+
+    lineage = await app_client.get(
+        f"/v2/knowledge/communities/{uuid4()}/lineage", headers=_auth(admin_key)
+    )
+    assert lineage.status_code == 404
+
+
 async def test_get_evidence_endpoint(
     sessionmaker: async_sessionmaker[AsyncSession], app_client: AsyncClient
 ) -> None:

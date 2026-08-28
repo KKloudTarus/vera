@@ -8,6 +8,9 @@ from vera.adapters.persistence.repositories.canonical import (
 from vera.adapters.persistence.repositories.chunk_embedding import (
     SqlAlchemyChunkEmbeddingRepository,
 )
+from vera.adapters.persistence.repositories.community import (
+    SqlAlchemyCommunityLineageRepository,
+)
 from vera.adapters.persistence.repositories.curation import (
     SqlAlchemyArtifactRepository,
     SqlAlchemyCandidateClaimRepository,
@@ -42,6 +45,7 @@ __all__ = [
     "SqlAlchemyCanonicalEntityRepository",
     "SqlAlchemyChunkEmbeddingRepository",
     "SqlAlchemyChunkRepository",
+    "SqlAlchemyCommunityLineageRepository",
     "SqlAlchemyEvidenceRepository",
     "SqlAlchemyExtractionRunRepository",
     "SqlAlchemyFactExpiryRepository",

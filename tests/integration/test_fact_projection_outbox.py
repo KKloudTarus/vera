@@ -6,9 +6,12 @@ than writing the graph synchronously.
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import os
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
+from typing import cast
+from uuid import UUID
 
 import pytest
 import pytest_asyncio
@@ -16,17 +19,39 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from vera.adapters.graph.graphiti_adapter import GraphitiMemoryEngine
-from vera.adapters.graph.offline import DeterministicEmbedder, NoCrossEncoder, NoLLMClient
+from vera.adapters.graph.offline import (
+    DeterministicCommunityLLM,
+    DeterministicEmbedder,
+    NoCrossEncoder,
+)
+from vera.adapters.persistence.repositories.community import (
+    SqlAlchemyCommunityLineageRepository,
+)
 from vera.adapters.persistence.repositories.projection import SqlAlchemyProjectionSource
 from vera.adapters.persistence.unit_of_work import SqlAlchemyUnitOfWork
 from vera.application.projection.service import FactProjectionService
 from vera.bootstrap import Container
+from vera.domain.ports.identity import ResolvedScope, ScopeResolver
+from vera.entrypoints.build_communities import build_group
+from vera.entrypoints.knowledge.service import KnowledgeService
 from vera.entrypoints.worker.lane_pool import LanePool
 from vera.entrypoints.worker.main import expire_due_facts, run_until_empty
 from vera.shared.ids import deterministic_id, uuid7
 from vera.shared.types import GroupId, SourceId
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
+
+
+class _Scope:
+    def __init__(self, group_id: str) -> None:
+        self._group_id = group_id
+
+    async def resolve(self, principal_id: UUID) -> ResolvedScope:
+        return ResolvedScope(
+            group_ids=(self._group_id,),
+            personal_group_id=f"u:{principal_id}",
+            primary_workspace_id=None,
+        )
 
 
 @pytest_asyncio.fixture
@@ -40,7 +65,7 @@ async def graphiti_engine() -> AsyncIterator[GraphitiMemoryEngine]:
         user=os.environ.get("VERA_NEO4J__USER", "neo4j"),
         password=os.environ.get("VERA_NEO4J__PASSWORD", "vera-local-pass"),
         embedder=DeterministicEmbedder(1024),
-        llm_client=NoLLMClient(),
+        llm_client=DeterministicCommunityLLM(),
         cross_encoder=NoCrossEncoder(),
     )
     engine = GraphitiMemoryEngine(client)
@@ -137,6 +162,54 @@ async def test_reconcile_enqueues_projection_and_worker_projects_facts(
         source=proj_source, projection=container.fact_projection
     ).verify_group(group)
     assert drift.in_sync, f"missing={drift.missing_in_graph} extra={drift.extra_in_graph}"
+
+    assert await build_group(container, group) >= 1
+    communities = await container.memory.search_communities(
+        group_ids=(GroupId(group),), query=None, limit=10
+    )
+    assert communities
+    community = communities[0]
+    assert community.derived is True
+    assert community.derivation_run_id is not None
+    assert community.source_fact_set_hash is not None
+    assert community.projection_checkpoint is not None
+    lineage = await SqlAlchemyCommunityLineageRepository(container.reads).page(
+        group_ids=(group,),
+        community_id=UUID(community.community_id),
+        derivation_run_id=UUID(community.derivation_run_id),
+        cursor=None,
+        limit=10,
+    )
+    assert lineage.items
+    assert {item.fact_key for item in lineage.items} == active
+    expected_hash = hashlib.sha256(
+        "\n".join(sorted(str(item.fact_id) for item in lineage.items)).encode()
+    ).hexdigest()
+    assert community.source_fact_set_hash == expected_hash
+
+    assert await build_group(container, group) >= 1
+    rebuilt = await container.memory.search_communities(
+        group_ids=(GroupId(group),), query=None, limit=10
+    )
+    assert rebuilt
+    community = rebuilt[0]
+    assert community.source_fact_set_hash == expected_hash
+    assert community.projection_checkpoint == expected_hash
+
+    knowledge = KnowledgeService(container, cast("ScopeResolver", _Scope(group)))
+    derived = await knowledge.communities(uuid7(), project=group)
+    assert derived
+    assert derived[0]["derived"] is True
+    assert derived[0]["authoritative"] is False
+    assert derived[0]["evidence"] is None
+    governed_lineage = await knowledge.community_lineage(
+        uuid7(),
+        community_id=community.community_id,
+        derivation_run_id=community.derivation_run_id,
+    )
+    assert governed_lineage is not None
+    authoritative = await knowledge.search(uuid7(), query="paymentapi", project=group)
+    assert all(result["kind"] != "community_summary" for result in authoritative["results"])
 
     async with container.workers() as session, session.begin():
         await session.execute(

@@ -86,6 +86,46 @@ async def search(
         raise _forbidden(exc) from exc
 
 
+@router.get("/communities", summary="Derived community summaries")
+async def communities(
+    principal: PrincipalDep,
+    service: KnowledgeServiceDep,
+    project: str | None = None,
+    query: str | None = None,
+    limit: int = Query(default=20, ge=1, le=100),
+) -> list[dict[str, Any]]:
+    try:
+        return await service.communities(principal.id, project=project, query=query, limit=limit)
+    except ScopeError as exc:
+        raise _forbidden(exc) from exc
+
+
+@router.get("/communities/{community_id}/lineage", summary="Paginated community fact lineage")
+async def community_lineage(
+    community_id: str,
+    principal: PrincipalDep,
+    service: KnowledgeServiceDep,
+    derivation_run_id: str | None = None,
+    cursor: str | None = None,
+    limit: int = Query(default=50, ge=1, le=200),
+) -> dict[str, Any]:
+    try:
+        result = await service.community_lineage(
+            principal.id,
+            community_id=community_id,
+            derivation_run_id=derivation_run_id,
+            cursor=cursor,
+            limit=limit,
+        )
+    except ScopeError as exc:
+        raise _forbidden(exc) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    if result is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="community not found")
+    return result
+
+
 @router.get("/facts/{fact_key}", summary="A fact and its relations")
 async def get_fact(
     fact_key: str, principal: PrincipalDep, service: KnowledgeServiceDep

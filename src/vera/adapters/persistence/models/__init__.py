@@ -8,6 +8,7 @@ from vera.adapters.persistence.models.canonical import (
     GraphEdgeMapRow,
     GraphNodeMapRow,
 )
+from vera.adapters.persistence.models.community import CommunityFactLineageRow
 from vera.adapters.persistence.models.fabric import (
     AssertionRow,
     ChunkRow,
@@ -54,6 +55,7 @@ __all__ = [
     "CandidateClaimRow",
     "CanonicalEntityRow",
     "ChunkRow",
+    "CommunityFactLineageRow",
     "CredentialRow",
     "EntityAliasRow",
     "EvidenceRow",

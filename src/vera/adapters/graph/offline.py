@@ -67,6 +67,27 @@ class NoLLMClient(LLMClient):
         )
 
 
+class DeterministicCommunityLLM(LLMClient):
+    """Offline LLM stub limited to Graphiti's community summary response shapes."""
+
+    def __init__(self) -> None:
+        super().__init__(config=None)
+
+    async def _generate_response(
+        self,
+        messages: list[Any],
+        response_model: type[Any] | None = None,
+        max_tokens: int = 16384,
+        model_size: Any = None,
+    ) -> dict[str, Any]:
+        fields = getattr(response_model, "model_fields", {})
+        if "summary" in fields:
+            return {"summary": "Derived summary of the projected community facts."}
+        if "description" in fields:
+            return {"description": "Projected fact community"}
+        raise RuntimeError("DeterministicCommunityLLM only supports community summarization")
+
+
 class NoCrossEncoder(CrossEncoderClient):
     """A cross-encoder that is never invoked. RRF search does not rerank with one; this
     stands in so Graphiti does not construct a provider-backed default that needs a key.

@@ -31,6 +31,7 @@ from graphiti_core.search.search_filters import (
 from vera.domain.ontology import EDGE_TYPE_MAP, EDGE_TYPES, ENTITY_TYPES
 from vera.domain.ports.memory_engine import (
     EpisodeSpec,
+    GraphCommunity,
     GraphHit,
     GraphNodeRef,
     GraphQuery,
@@ -71,6 +72,17 @@ _FALKOR_EDGE_VECTOR: LiteralString = (
 # Alphanumeric terms only, so a natural-language query is a safe RediSearch fulltext input.
 _FULLTEXT_TOKEN = re.compile(r"[A-Za-z0-9]+")
 _RRF_K = 1  # reciprocal-rank-fusion constant, matching the Neo4j RRF recipe
+_COMMUNITIES: LiteralString = (
+    "MATCH (c:Community) "
+    "WHERE c.group_id IN $gids AND c.derived = true "
+    "AND ($query = '' OR toLower(c.name) CONTAINS $query "
+    "OR toLower(c.summary) CONTAINS $query) "
+    "RETURN c.uuid AS community_id, c.name AS name, c.summary AS summary, "
+    "c.derivation_run_id AS derivation_run_id, "
+    "c.source_fact_set_hash AS source_fact_set_hash, "
+    "c.projection_checkpoint AS projection_checkpoint, c.derived AS derived "
+    "ORDER BY c.created_at DESC, c.uuid LIMIT $limit"
+)
 
 
 def _rrf_fuse(result_lists: list[list[Any]], limit: int) -> list[GraphHit]:
@@ -467,7 +479,7 @@ class GraphitiMemoryEngine:
             "MATCH (n {group_id: $gid}) DETACH DELETE n", gid=gid
         )
 
-    async def build_communities(self, *, group_id: str) -> int:
+    async def build_communities(self, *, group_id: str) -> tuple[GraphCommunity, ...]:
         # Graphiti clusters the group's entities and writes an LLM summary per community. The
         # community nodes are a rebuildable projection: clear_group plus a re-run reconstructs
         # them, so this is safe to run repeatedly.
@@ -482,24 +494,18 @@ class GraphitiMemoryEngine:
             gid=gid,
             now=utc_now().isoformat(),
         )
+        await self._seed_entity_summaries(gid)
         if self._falkordb:
             # Graphiti's generic clustering issues a per-node neighbor query that returns no
             # rows on FalkorDB, so its native build yields zero communities. Cluster here with a
             # single edge query FalkorDB handles, then reuse Graphiti's LLM community builder.
             return await self._build_communities_falkordb(gid)
-        nodes, _edges = await self._client.build_communities(group_ids=[gid])
-        return len(nodes)
+        nodes, edges = await self._client.build_communities(group_ids=[gid])
+        return await self._community_results(nodes, edges)
 
-    async def _build_communities_falkordb(self, gid: str) -> int:
-        from graphiti_core.nodes import EntityNode
-        from graphiti_core.utils.maintenance.community_operations import (
-            build_community,
-            remove_communities,
-        )
-
-        await remove_communities(self._client.driver, group_ids=[gid])
-        # add_triplet entities carry no summary, so the LLM has nothing to synthesize. Seed each
-        # entity's summary from its own incident edge facts, so the community summary is grounded.
+    async def _seed_entity_summaries(self, gid: str) -> None:
+        # Community summaries must be grounded in the projected active facts, not stale entity
+        # prose. The caller rebuilds that projection from PostgreSQL before this method runs.
         fact_rows = cast(
             "Any",
             await self._client.driver.execute_query(  # pyright: ignore[reportUnknownMemberType]
@@ -509,16 +515,45 @@ class GraphitiMemoryEngine:
                 gid=gid,
             ),
         )
-        for row in cast(
-            "list[dict[str, Any]]",
-            fact_rows[0] if isinstance(fact_rows, tuple) and fact_rows else [],
-        ):
-            facts = [str(f) for f in cast("list[Any]", row["facts"] or []) if f]
+        for row in _records(fact_rows):
+            facts = [str(fact) for fact in cast("list[Any]", row["facts"] or []) if fact]
             name = str(row["name"])
-            summary = f"{name}. {'; '.join(facts)}"[:800] if facts else name
+            summary = f"{name}. {'; '.join(sorted(facts))}"[:800] if facts else name
             await self._client.driver.execute_query(  # pyright: ignore[reportUnknownMemberType]
-                "MATCH (n:Entity {uuid: $u}) SET n.summary = $s", u=str(row["uuid"]), s=summary
+                "MATCH (n:Entity {uuid: $uuid}) SET n.summary = $summary",
+                uuid=str(row["uuid"]),
+                summary=summary,
             )
+
+    async def _community_results(
+        self, nodes: Sequence[Any], edges: Sequence[Any]
+    ) -> tuple[GraphCommunity, ...]:
+        member_ids = sorted({str(edge.target_node_uuid) for edge in edges})
+        members = await EntityNode.get_by_uuids(self._client.driver, member_ids)
+        member_names = {member.uuid: member.name for member in members}
+        by_community: dict[str, list[str]] = {}
+        for edge in edges:
+            name = member_names.get(str(edge.target_node_uuid))
+            if name is not None:
+                by_community.setdefault(str(edge.source_node_uuid), []).append(name)
+        return tuple(
+            GraphCommunity(
+                community_id=str(node.uuid),
+                name=str(node.name),
+                summary=str(node.summary),
+                member_names=tuple(sorted(set(by_community.get(str(node.uuid), [])))),
+            )
+            for node in nodes
+        )
+
+    async def _build_communities_falkordb(self, gid: str) -> tuple[GraphCommunity, ...]:
+        from graphiti_core.nodes import EntityNode
+        from graphiti_core.utils.maintenance.community_operations import (
+            build_community,
+            remove_communities,
+        )
+
+        await remove_communities(self._client.driver, group_ids=[gid])
         result = cast(
             "Any",
             await self._client.driver.execute_query(  # pyright: ignore[reportUnknownMemberType]
@@ -533,7 +568,8 @@ class GraphitiMemoryEngine:
         projection: dict[str, list[tuple[str, int]]] = {}
         for row in rows:
             projection.setdefault(str(row["a"]), []).append((str(row["b"]), int(row["c"])))
-        built = 0
+        communities: list[Any] = []
+        community_edges: list[Any] = []
         for cluster in _label_propagation_capped(projection):
             nodes = await EntityNode.get_by_uuids(self._client.driver, cluster)
             if not nodes:
@@ -543,5 +579,53 @@ class GraphitiMemoryEngine:
             await community.save(self._client.driver)
             for edge in edges:
                 await edge.save(self._client.driver)
-            built += 1
-        return built
+            communities.append(community)
+            community_edges.extend(edges)
+        return await self._community_results(communities, community_edges)
+
+    async def annotate_community(
+        self,
+        *,
+        group_id: str,
+        community_id: str,
+        derivation_run_id: str,
+        source_fact_set_hash: str,
+        projection_checkpoint: str,
+    ) -> None:
+        await self._client.driver.execute_query(  # pyright: ignore[reportUnknownMemberType]
+            "MATCH (c:Community {group_id: $gid, uuid: $community_id}) "
+            "SET c.derivation_run_id = $run_id, c.source_fact_set_hash = $fact_hash, "
+            "c.projection_checkpoint = $checkpoint, c.derived = true",
+            gid=_graphiti_group(group_id),
+            community_id=community_id,
+            run_id=derivation_run_id,
+            fact_hash=source_fact_set_hash,
+            checkpoint=projection_checkpoint,
+        )
+
+    async def search_communities(
+        self, *, group_ids: Sequence[GroupId], query: str | None, limit: int
+    ) -> Sequence[GraphCommunity]:
+        if not group_ids:
+            return []
+        result = cast(
+            "Any",
+            await self._client.driver.execute_query(  # pyright: ignore[reportUnknownMemberType]
+                _COMMUNITIES,
+                gids=[_graphiti_group(str(group_id)) for group_id in group_ids],
+                query=(query or "").lower(),
+                limit=limit,
+            ),
+        )
+        return [
+            GraphCommunity(
+                community_id=str(row["community_id"]),
+                name=str(row["name"]),
+                summary=str(row["summary"]),
+                derivation_run_id=str(row["derivation_run_id"]),
+                source_fact_set_hash=str(row["source_fact_set_hash"]),
+                projection_checkpoint=str(row["projection_checkpoint"]),
+                derived=bool(row["derived"]),
+            )
+            for row in _records(result)
+        ]

@@ -14,7 +14,11 @@ import pytest
 import pytest_asyncio
 
 from vera.adapters.graph.graphiti_adapter import GraphitiMemoryEngine
-from vera.adapters.graph.offline import DeterministicEmbedder, NoCrossEncoder, NoLLMClient
+from vera.adapters.graph.offline import (
+    DeterministicCommunityLLM,
+    DeterministicEmbedder,
+    NoCrossEncoder,
+)
 from vera.domain.ports.memory_engine import EpisodeSpec, GraphQuery
 from vera.shared.ids import uuid7
 from vera.shared.time import utc_now
@@ -30,9 +34,13 @@ async def falkordb_engine() -> AsyncIterator[GraphitiMemoryEngine]:
 
     port = int(os.environ.get("VERA_FALKOR__PORT", "6380"))
     client = Graphiti(
-        graph_driver=FalkorDriver(host="localhost", port=port, database="default_db"),
+        graph_driver=FalkorDriver(
+            host=os.environ.get("VERA_FALKOR__HOST", "localhost"),
+            port=port,
+            database="default_db",
+        ),
         embedder=DeterministicEmbedder(1024),
-        llm_client=NoLLMClient(),
+        llm_client=DeterministicCommunityLLM(),
         cross_encoder=NoCrossEncoder(),
     )
     engine = GraphitiMemoryEngine(client)
@@ -109,3 +117,30 @@ async def test_as_of_past_excludes_the_fact(
         GraphQuery(text="paymentapi", group_ids=(GroupId(group),), limit=10, as_of=before)
     )
     assert all("paymentapi" not in h.fact for h in hits)
+
+
+async def test_build_communities_returns_lineage_tagged_derived_summary(
+    falkordb_engine: GraphitiMemoryEngine,
+) -> None:
+    group = f"p:{uuid7().hex[:12]}"
+    await _ingest(falkordb_engine, group=group, obj="prod-eks")
+
+    communities = await falkordb_engine.build_communities(group_id=group)
+    assert communities
+    community = communities[0]
+    run_id = str(uuid7())
+    await falkordb_engine.annotate_community(
+        group_id=group,
+        community_id=community.community_id,
+        derivation_run_id=run_id,
+        source_fact_set_hash="source-fact-set-hash",
+        projection_checkpoint="projection-checkpoint",
+    )
+
+    results = await falkordb_engine.search_communities(
+        group_ids=(GroupId(group),), query=None, limit=10
+    )
+    assert results
+    assert results[0].derived is True
+    assert results[0].derivation_run_id == run_id
+    assert results[0].source_fact_set_hash == "source-fact-set-hash"

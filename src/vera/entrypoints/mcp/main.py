@@ -265,6 +265,33 @@ def build_server(container: Container, settings: Settings) -> MCPServer:
         )
 
     @server.tool()
+    async def knowledge_search_communities(
+        query: str = "", project: str | None = None, limit: int = 20
+    ) -> list[dict[str, Any]]:
+        """Search LLM-derived community summaries. Results are explicitly non-authoritative;
+        use their PostgreSQL lineage to inspect the supporting facts.
+        """
+        return await get_knowledge().communities(
+            _principal_id(settings), project=project, query=query or None, limit=limit
+        )
+
+    @server.tool()
+    async def knowledge_get_community_lineage(
+        community_id: str,
+        derivation_run_id: str | None = None,
+        cursor: str | None = None,
+        limit: int = 50,
+    ) -> dict[str, Any] | None:
+        """Return a page of authoritative facts behind a derived community summary."""
+        return await get_knowledge().community_lineage(
+            _principal_id(settings),
+            community_id=community_id,
+            derivation_run_id=derivation_run_id,
+            cursor=cursor,
+            limit=limit,
+        )
+
+    @server.tool()
     async def knowledge_get_context_pack(pack_id: str) -> dict[str, Any] | None:
         """Retrieve a previously persisted immutable context pack. This tool never creates or
         recomputes a pack.
