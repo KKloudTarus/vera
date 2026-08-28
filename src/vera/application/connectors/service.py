@@ -14,6 +14,7 @@ from uuid import UUID
 from vera.application.curation.service import CurationService, IngestArtifact
 from vera.domain.ports.connectors import SourceConnector, SyncOutcome, SyncStateStore
 from vera.domain.ports.curation import ClaimExtractor, ContradictionJudge
+from vera.domain.ports.embedder import Embedder
 from vera.domain.ports.object_store import ObjectStore
 from vera.domain.ports.unit_of_work import UnitOfWork
 from vera.shared.errors import is_ok
@@ -33,12 +34,22 @@ class SyncRunner:
         state: SyncStateStore,
         object_store: ObjectStore | None = None,
         judge: ContradictionJudge | None = None,
+        embedder: Embedder | None = None,
+        embedding_provider: str = "unknown",
+        embedding_model: str = "unknown",
+        embedding_model_version: str = "1",
+        embedding_dimension: int | None = None,
     ) -> None:
         self._uow_factory = uow_factory
         self._extractor = extractor
         self._state = state
         self._object_store = object_store
         self._judge = judge
+        self._embedder = embedder
+        self._embedding_provider = embedding_provider
+        self._embedding_model = embedding_model
+        self._embedding_model_version = embedding_model_version
+        self._embedding_dimension = embedding_dimension
 
     async def sync(
         self, *, source_id: UUID, group_id: str, connector: SourceConnector
@@ -57,7 +68,15 @@ class SyncRunner:
                     async with self._uow_factory() as uow:
                         await uow.use_tenant(group_id)
                         result = await CurationService(
-                            uow, self._extractor, self._object_store, self._judge
+                            uow,
+                            self._extractor,
+                            object_store=self._object_store,
+                            judge=self._judge,
+                            embedder=self._embedder,
+                            embedding_provider=self._embedding_provider,
+                            embedding_model=self._embedding_model,
+                            embedding_model_version=self._embedding_model_version,
+                            embedding_dimension=self._embedding_dimension,
                         ).ingest_artifact(
                             IngestArtifact(
                                 source_id=source_id,

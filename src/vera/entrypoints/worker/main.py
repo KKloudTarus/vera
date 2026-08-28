@@ -77,6 +77,11 @@ def _build_scheduler(container: Container) -> SyncScheduler | None:
         state=container.sync_state,
         object_store=container.object_store,
         judge=container.judge,
+        embedder=(container.embedder if container.settings.memory.vector_search_enabled else None),
+        embedding_provider=container.settings.memory.embedder,
+        embedding_model=container.settings.memory.embedding_model,
+        embedding_model_version=container.settings.memory.embedding_model_version,
+        embedding_dimension=container.settings.memory.embedding_dim,
     )
     return SyncScheduler(runner=runner, state=container.sync_state, registrations=registrations)
 

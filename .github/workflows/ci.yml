@@ -40,7 +40,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:18
+        image: pgvector/pgvector:pg18
         env:
           POSTGRES_USER: vera
           POSTGRES_PASSWORD: vera
@@ -82,7 +82,7 @@ jobs:
       - name: Apply migrations
         run: alembic upgrade head
       - name: Integration tests
-        run: pytest -m integration
+        run: pytest -m integration -rA
 
   security:
     name: Dependency audit

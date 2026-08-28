@@ -1,13 +1,4 @@
-"""pgvector passage and code candidate sources.
-
-Approximate nearest-neighbor search over ``chunks.embedding`` (an HNSW cosine index), behind
-the same PassageIndex / CodeIndex ports as the full-text default, so the application layer
-swaps backends without change. The query is embedded once per call through the Embedder port;
-the score is cosine similarity (1 - distance) so it orders the same direction as ts_rank.
-
-The embedding column is optional (see migration e2b3c4d5f6a7): rows without an embedding are
-skipped, so a partial backfill degrades to fewer candidates rather than an error.
-"""
+"""pgvector passage and code candidates for one active embedding model."""
 
 from __future__ import annotations
 
@@ -21,14 +12,17 @@ from vera.domain.ports.embedder import Embedder
 from vera.domain.ports.retrieval_index import PassageHit
 
 _ANN = """
-SELECT id, artifact_version_id, text, heading_path, symbol_name,
-       start_offset, end_offset, page_number, start_line, end_line,
-       1 - (embedding <=> CAST(:qvec AS vector)) AS score
-FROM chunks
-WHERE group_id = :g AND embedding IS NOT NULL
-  AND (CAST(:created_before AS timestamptz) IS NULL OR created_at <= :created_before)
+SELECT c.id, c.artifact_version_id, c.text, c.heading_path, c.symbol_name,
+       c.start_offset, c.end_offset, c.page_number, c.start_line, c.end_line,
+       1 - (ce.embedding::vector({dimension}) <=> CAST(:qvec AS vector({dimension}))) AS score
+FROM chunk_embeddings ce
+JOIN chunks c ON c.id = ce.chunk_id
+WHERE ce.group_id = :g AND c.group_id = :g AND ce.active
+  AND ce.provider = :provider AND ce.model = :model
+  AND ce.model_version = :model_version AND ce.dimension = :dimension
+  AND (CAST(:created_before AS timestamptz) IS NULL OR c.created_at <= :created_before)
 {code_filter}
-ORDER BY embedding <=> CAST(:qvec AS vector)
+ORDER BY ce.embedding::vector({dimension}) <=> CAST(:qvec AS vector({dimension}))
 LIMIT :lim
 """
 
@@ -40,16 +34,37 @@ def vector_literal(vector: list[float]) -> str:
 
 class _PgVectorSearch:
     def __init__(
-        self, session_factory: async_sessionmaker[AsyncSession], embedder: Embedder
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        embedder: Embedder,
+        *,
+        provider: str = "legacy",
+        model: str = "legacy-1024",
+        model_version: str = "1",
+        dimension: int = 1024,
     ) -> None:
+        if dimension <= 0:
+            raise ValueError("embedding dimension must be positive")
         self._session_factory = session_factory
         self._embedder = embedder
+        self._provider = provider
+        self._model = model
+        self._model_version = model_version
+        self._dimension = dimension
 
     async def _search(
         self, *, group_id: str, query: str, limit: int, created_before: datetime | None, code: bool
     ) -> list[PassageHit]:
-        qvec = vector_literal(await self._embedder.embed(query))
-        sql = _ANN.format(code_filter="AND symbol_name IS NOT NULL" if code else "")
+        vector = await self._embedder.embed(query)
+        if len(vector) != self._dimension:
+            raise ValueError(
+                f"embedding dimension mismatch: expected {self._dimension}, got {len(vector)}"
+            )
+        qvec = vector_literal(vector)
+        sql = _ANN.format(
+            code_filter="AND c.symbol_name IS NOT NULL" if code else "",
+            dimension=self._dimension,
+        )
         async with self._session_factory() as session:
             rows = (
                 (
@@ -60,6 +75,10 @@ class _PgVectorSearch:
                             "qvec": qvec,
                             "lim": limit,
                             "created_before": created_before,
+                            "provider": self._provider,
+                            "model": self._model,
+                            "model_version": self._model_version,
+                            "dimension": self._dimension,
                         },
                     )
                 )

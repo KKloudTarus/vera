@@ -26,10 +26,11 @@ from vera.domain.curation.trust import (
     action_for_tier,
     authority_for_tier,
 )
-from vera.domain.knowledge.fabric import Chunk, ExtractionRun
+from vera.domain.knowledge.fabric import Chunk, ChunkEmbedding, ExtractionRun
 from vera.domain.knowledge.models import ReviewDecision, VerificationStatus
 from vera.domain.ontology import CURRENT_PIPELINE_VERSIONS
 from vera.domain.ports.curation import ClaimExtractor, ContradictionJudge, ExtractedClaim
+from vera.domain.ports.embedder import Embedder
 from vera.domain.ports.object_store import ObjectStore
 from vera.domain.ports.unit_of_work import UnitOfWork
 from vera.shared.errors import Conflict, DomainError, Err, NotFound, Ok, PolicyRejected, Result
@@ -149,11 +150,21 @@ class CurationService:
         extractor: ClaimExtractor,
         object_store: ObjectStore | None = None,
         judge: ContradictionJudge | None = None,
+        embedder: Embedder | None = None,
+        embedding_provider: str = "unknown",
+        embedding_model: str = "unknown",
+        embedding_model_version: str = "1",
+        embedding_dimension: int | None = None,
     ) -> None:
         self._uow = uow
         self._extractor = extractor
         self._object_store = object_store
         self._supersede = SupersedePolicy(judge)
+        self._embedder = embedder
+        self._embedding_provider = embedding_provider
+        self._embedding_model = embedding_model
+        self._embedding_model_version = embedding_model_version
+        self._embedding_dimension = embedding_dimension
 
     async def _contradicted(self, claim: ClaimRecord) -> list[ClaimRecord]:
         """Existing verified claims the new claim replaces, per the single supersede
@@ -252,6 +263,28 @@ class CurationService:
             else []
         )
         chunks = [await uow.chunks.upsert(chunk) for chunk in chunks]
+        if self._embedder is not None:
+            for chunk in chunks:
+                vector = await self._embedder.embed(chunk.text)
+                dimension = self._embedding_dimension or len(vector)
+                if len(vector) != dimension:
+                    raise ValueError(
+                        f"embedding dimension mismatch: expected {dimension}, got {len(vector)}"
+                    )
+                await uow.chunk_embeddings.upsert(
+                    ChunkEmbedding(
+                        id=uuid7(),
+                        group_id=cmd.group_id,
+                        chunk_id=chunk.id,
+                        provider=self._embedding_provider,
+                        model=self._embedding_model,
+                        model_version=self._embedding_model_version,
+                        dimension=dimension,
+                        embedding=vector,
+                        content_hash=chunk.content_hash,
+                        created_at=utc_now(),
+                    )
+                )
         extraction_run = await uow.extraction_runs.add(
             ExtractionRun(
                 id=uuid7(),

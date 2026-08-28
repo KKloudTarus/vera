@@ -36,7 +36,7 @@ from vera.adapters.persistence.repositories.snapshot import (
     SqlAlchemySnapshotRepository,
 )
 from vera.adapters.persistence.unit_of_work import SqlAlchemyUnitOfWork
-from vera.application.retrieval import ContextAssembler
+from vera.application.retrieval import ContextAssembler, HybridPassageIndex
 from vera.application.snapshot import ContextPackService, SnapshotService
 from vera.bootstrap import Container
 from vera.domain.identity.models import Role, role_at_least
@@ -81,9 +81,28 @@ class KnowledgeService:
         passages: PassageIndex
         code: CodeIndex
         if container.settings.memory.vector_search_enabled and container.embedder is not None:
-            # ANN over chunk embeddings; the query is embedded per call through the embedder.
-            passages = PgVectorPassageIndex(sm, container.embedder)
-            code = PgVectorCodeIndex(sm, container.embedder)
+            passages = HybridPassageIndex(
+                SqlAlchemyPassageIndex(sm),
+                PgVectorPassageIndex(
+                    sm,
+                    container.embedder,
+                    provider=container.settings.memory.embedder,
+                    model=container.settings.memory.embedding_model,
+                    model_version=container.settings.memory.embedding_model_version,
+                    dimension=container.settings.memory.embedding_dim,
+                ),
+            )
+            code = HybridPassageIndex(
+                SqlAlchemyCodeIndex(sm),
+                PgVectorCodeIndex(
+                    sm,
+                    container.embedder,
+                    provider=container.settings.memory.embedder,
+                    model=container.settings.memory.embedding_model,
+                    model_version=container.settings.memory.embedding_model_version,
+                    dimension=container.settings.memory.embedding_dim,
+                ),
+            )
         else:
             passages = SqlAlchemyPassageIndex(sm)
             code = SqlAlchemyCodeIndex(sm)

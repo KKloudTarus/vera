@@ -5,6 +5,9 @@ the application and domain never see SQLAlchemy.
 from vera.adapters.persistence.repositories.canonical import (
     SqlAlchemyCanonicalEntityRepository,
 )
+from vera.adapters.persistence.repositories.chunk_embedding import (
+    SqlAlchemyChunkEmbeddingRepository,
+)
 from vera.adapters.persistence.repositories.curation import (
     SqlAlchemyArtifactRepository,
     SqlAlchemyCandidateClaimRepository,
@@ -36,6 +39,7 @@ __all__ = [
     "SqlAlchemyAssertionRepository",
     "SqlAlchemyCandidateClaimRepository",
     "SqlAlchemyCanonicalEntityRepository",
+    "SqlAlchemyChunkEmbeddingRepository",
     "SqlAlchemyChunkRepository",
     "SqlAlchemyEvidenceRepository",
     "SqlAlchemyExtractionRunRepository",

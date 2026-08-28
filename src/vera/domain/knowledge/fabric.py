@@ -180,6 +180,21 @@ class Chunk:
 
 
 @dataclass(frozen=True, slots=True)
+class ChunkEmbedding:
+    id: UUID
+    group_id: str
+    chunk_id: UUID
+    provider: str
+    model: str
+    model_version: str
+    dimension: int
+    embedding: list[float]
+    content_hash: str
+    created_at: datetime
+    active: bool = True
+
+
+@dataclass(frozen=True, slots=True)
 class ExtractionRun:
     id: UUID
     group_id: str

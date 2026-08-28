@@ -13,6 +13,7 @@ from typing import Protocol
 from vera.domain.knowledge.fabric import (
     Assertion,
     Chunk,
+    ChunkEmbedding,
     Evidence,
     ExtractionRun,
     Fact,
@@ -32,6 +33,19 @@ class ChunkRepository(Protocol):
     ) -> list[Chunk]: ...
 
     async def get(self, *, group_id: str, chunk_id: str) -> Chunk | None: ...
+
+
+class ChunkEmbeddingRepository(Protocol):
+    async def upsert(self, embedding: ChunkEmbedding) -> None: ...
+
+    async def set_active_model(
+        self,
+        *,
+        group_id: str,
+        provider: str,
+        model: str,
+        model_version: str,
+    ) -> None: ...
 
 
 class ExtractionRunRepository(Protocol):
