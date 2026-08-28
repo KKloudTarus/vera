@@ -12,12 +12,18 @@ from typing import TYPE_CHECKING
 from vera.adapters.graph.null import NullMemoryEngine
 from vera.config.settings import Settings, active_embedding
 from vera.domain.ports.memory_engine import MemoryEngine
+from vera.domain.ports.projection import FactProjection
 from vera.observability.cost import UsageSink
 
 if TYPE_CHECKING:
     from graphiti_core import Graphiti
 
-__all__ = ["NullMemoryEngine", "build_graphiti_client", "build_memory_engine"]
+__all__ = [
+    "NullMemoryEngine",
+    "build_graphiti_client",
+    "build_memory_engine",
+    "maybe_fact_projection",
+]
 
 
 def _embedder(settings: Settings) -> object:
@@ -151,3 +157,15 @@ def build_memory_engine(settings: Settings, usage_sink: UsageSink | None = None)
     from vera.adapters.graph.graphiti_adapter import GraphitiMemoryEngine
 
     return GraphitiMemoryEngine(build_graphiti_client(settings, usage_sink))
+
+
+def maybe_fact_projection(memory: MemoryEngine) -> FactProjection | None:
+    """The fact projection for the active memory engine, or None when the graph is a no-op
+    (no Graphiti configured). Lets the composition root wire outbox-driven projection only
+    when there is a real graph to project into.
+    """
+    from vera.adapters.graph.graphiti_adapter import GraphitiMemoryEngine
+
+    if isinstance(memory, GraphitiMemoryEngine):
+        return memory.fact_projection()
+    return None

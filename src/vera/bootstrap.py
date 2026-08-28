@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
-from vera.adapters.graph import build_memory_engine
+from vera.adapters.graph import build_memory_engine, maybe_fact_projection
 from vera.adapters.identity import (
     ApiKeyAuthenticator,
     CompositeAuthenticator,
@@ -39,6 +39,7 @@ from vera.domain.ports.identity import Authenticator
 from vera.domain.ports.job_queue import JobQueue
 from vera.domain.ports.memory_engine import MemoryEngine
 from vera.domain.ports.object_store import ObjectStore
+from vera.domain.ports.projection import FactProjection
 from vera.domain.ports.reranker import Reranker
 from vera.domain.ports.retrieval import RetrievalReadModel
 from vera.observability.cost import UsageSink
@@ -72,6 +73,9 @@ class Container:
     # enforcement is off (default) these are None and both paths fall back to `sessionmaker`.
     read_sessionmaker: async_sessionmaker[AsyncSession] | None = None
     worker_sessionmaker: async_sessionmaker[AsyncSession] | None = None
+    # The fact-to-graph projection, present only when a real graph is configured. The worker
+    # drives it from the outbox after reconciliation; None means no graph to project into.
+    fact_projection: FactProjection | None = None
 
     @property
     def reads(self) -> async_sessionmaker[AsyncSession]:
@@ -102,6 +106,7 @@ def build_container(settings: Settings) -> Container:
         SqlAlchemyUsageSink(sessionmaker) if settings.observability.cost_tracking_enabled else None
     )
     memory: MemoryEngine = build_memory_engine(settings, usage_sink)
+    fact_projection = maybe_fact_projection(memory)
     embedder: Embedder | None = None
     if settings.memory.semantic_dedup_enabled and settings.memory.provider == "graphiti":
         from vera.adapters.graph import build_embedder
@@ -209,6 +214,7 @@ def build_container(settings: Settings) -> Container:
         rerank_weights=build_rerank_weights(settings),
         read_sessionmaker=read_sessionmaker,
         worker_sessionmaker=worker_sessionmaker,
+        fact_projection=fact_projection,
     )
 
 

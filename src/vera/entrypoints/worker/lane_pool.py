@@ -32,12 +32,15 @@ from vera.adapters.persistence.repositories import (
 from vera.adapters.persistence.repositories.embedding_state import (
     SqlAlchemyEmbeddingStateRepository,
 )
+from vera.adapters.persistence.repositories.outbox import SqlAlchemyOutboxRepository
+from vera.adapters.persistence.repositories.projection import SqlAlchemyProjectionSource
 from vera.application.curation.entity_resolver import SemanticEntityResolver
 from vera.application.curation.reconciliation import (
     ArtifactReconciliation,
     ReconciliationService,
     ResolvedProposition,
 )
+from vera.application.projection.service import FactProjectionService
 from vera.bootstrap import Container
 from vera.config.settings import active_embedding
 from vera.domain.curation.trust import TrustTier, authority_for_tier
@@ -47,6 +50,7 @@ from vera.domain.ports.memory_engine import EpisodeSpec, IngestReceipt
 from vera.observability import bind_log_context, clear_log_context, get_logger, span
 from vera.observability.cost import UsageContext, reset_usage_context, set_usage_context
 from vera.observability.metrics import record_ingestion
+from vera.shared.ids import uuid7
 from vera.shared.time import utc_now
 from vera.shared.types import GroupId, JsonDict, SourceId
 
@@ -139,6 +143,9 @@ class LanePool:
         # is the durable safety net for RetractionService (see persistence/retraction.py).
         if job.payload.get("job_kind") == "retract_cleanup":
             await self._process_retract_cleanup(job)
+            return
+        if job.payload.get("job_kind") == "project_facts":
+            await self._process_project_facts(job)
             return
         bind_log_context(
             group_id=str(job.group_id),
@@ -281,6 +288,52 @@ class LanePool:
                 actor="worker",
             )
         )
+        await self._enqueue_fact_projection(session, group, str(job.source_id))
+
+    async def _enqueue_fact_projection(
+        self, session: AsyncSession, group: str, source_id: str
+    ) -> None:
+        """Enqueue an outbox job to project this group's facts into the graph, so graph mutation
+        is downstream of the fact store (ADR-0003) rather than synchronous with reconciliation.
+        Only when a graph is configured, and coalesced: while a projection job for the group is
+        pending or in flight, no second one is added (project_group is whole-group idempotent).
+        """
+        if self._container.fact_projection is None:
+            return
+        pending = await session.scalar(
+            text(
+                "SELECT 1 FROM ingestion_jobs WHERE group_id = :g "
+                "AND status IN ('pending','inflight') "
+                "AND payload->>'job_kind' = 'project_facts' LIMIT 1"
+            ),
+            {"g": group},
+        )
+        if pending:
+            return
+        await SqlAlchemyOutboxRepository(session).add(
+            group_id=group,
+            source_id=source_id,
+            dedup_uuid=uuid7(),
+            payload={"job_kind": "project_facts", "group_id": group},
+        )
+
+    async def _process_project_facts(self, job: QueuedJob) -> None:
+        """Project the group's active facts into the graph (RELATES_TO edges), then mark done.
+        Idempotent and rebuildable: it upserts the current active fact set, so a retry or a
+        coalesced burst converges to the same projection.
+        """
+        group = str(job.group_id)
+        projection = self._container.fact_projection
+        if projection is not None:
+            # The source reads active facts from Postgres (worker role) and the projection
+            # writes them to the graph; lane routing already serializes the group.
+            service = FactProjectionService(
+                source=SqlAlchemyProjectionSource(self._container.workers), projection=projection
+            )
+            projected = await service.project_group(group)
+            log.info("project_facts.done", group_id=group, projected=projected)
+        async with self._container.workers() as session, session.begin():
+            await session.execute(_MARK_DONE, {"id": job.id})
 
     async def _process_retract_cleanup(self, job: QueuedJob) -> None:
         # Idempotent: removing already-removed edges is a no-op and deleting an absent object

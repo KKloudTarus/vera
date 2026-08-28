@@ -11,12 +11,16 @@ making the fabric the primary production path.
   triples into the fact store (idempotent on replay by the episode's extraction run id), so
   the `/v2` knowledge surface reflects live ingest; the legacy published-episode path is
   unchanged. It is off by default: turning it on in production, validated per group, is the
-  rollout decision. The graph is still projected by the episode path; switching the graph to
-  the fact-based projection is a further step.
-- **The database role split is created but not yet adopted by the app processes.** The roles
-  and grants exist (migration `c9e2f3a4b5d6`) and the deployment model is documented, but the
-  processes do not yet connect as or `SET ROLE` to `vera_trusted` / `vera_worker`. This is a
-  deployment change, not a code change.
+  rollout decision. When fabric is on, reconciliation enqueues an outbox `project_facts` job
+  (coalesced per group) and the worker projects the group's active facts into the graph as
+  RELATES_TO edges downstream of the fact store, so graph mutation is outbox-driven and
+  rebuildable (gap 8), alongside the existing episode projection.
+- **The database role split is adopted by the read and worker paths when enabled.** The roles
+  and grants exist (migration `c9e2f3a4b5d6`); with `VERA_DB__ROLE_ENFORCEMENT=true` the read
+  path assumes `vera_trusted` and the worker path `vera_worker` via a per-transaction
+  SET LOCAL ROLE (gap 16). It is off by default because the login role must be a member of
+  those roles (or a superuser) for the SET to succeed; enabling it in production is a
+  deployment decision.
 
 ## Retrieval
 

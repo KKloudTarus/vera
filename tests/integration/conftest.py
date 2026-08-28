@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import (
 )
 
 from vera.adapters.curation.extractor import StructuredClaimExtractor
+from vera.adapters.graph import maybe_fact_projection
 from vera.adapters.identity import ApiKeyAuthenticator, CompositeAuthenticator
 from vera.adapters.objectstore.s3_adapter import S3ObjectStore
 from vera.adapters.persistence.repositories import SqlAlchemyRetrievalReadModel
@@ -108,6 +109,7 @@ def make_container(
             judge=None,
             entity_judge=None,
             embedder=None,
+            fact_projection=maybe_fact_projection(memory),
         )
 
     return _make

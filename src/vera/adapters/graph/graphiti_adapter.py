@@ -36,6 +36,7 @@ from vera.domain.ports.memory_engine import (
     GraphQuery,
     IngestReceipt,
 )
+from vera.domain.ports.projection import FactProjection
 from vera.observability import span
 from vera.shared.ids import deterministic_id
 from vera.shared.time import utc_now
@@ -164,6 +165,14 @@ class GraphitiMemoryEngine:
         self._client = client
         driver = getattr(client, "driver", None)
         self._falkordb = getattr(driver, "provider", None) == GraphProvider.FALKORDB
+
+    def fact_projection(self) -> FactProjection:
+        """A FactProjection over this engine's client, so the fact projection reuses the one
+        graph connection rather than opening a second (keeps the client encapsulated here).
+        """
+        from vera.adapters.graph.fact_projection import GraphitiFactProjection
+
+        return GraphitiFactProjection(self._client)
 
     async def ensure_schema(self) -> None:
         await self._client.build_indices_and_constraints()
