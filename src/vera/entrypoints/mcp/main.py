@@ -26,7 +26,6 @@ from vera import __version__
 from vera.adapters.mcp.auth import JwtTokenVerifier
 from vera.adapters.persistence.repositories.scope import SqlAlchemyScopeResolver
 from vera.adapters.persistence.unit_of_work import SqlAlchemyUnitOfWork
-from vera.application.knowledge import KnowledgeService
 from vera.bootstrap import (
     Container,
     build_container,
@@ -35,6 +34,7 @@ from vera.bootstrap import (
 )
 from vera.config.settings import Settings, get_settings
 from vera.domain.identity.models import PrincipalKind
+from vera.entrypoints.knowledge import KnowledgeService
 from vera.entrypoints.mcp.service import VeraMcpService
 from vera.observability import configure_logging, get_logger
 

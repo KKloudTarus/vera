@@ -17,10 +17,10 @@ from vera.adapters.persistence.repositories.scope import SqlAlchemyScopeResolver
 from vera.adapters.persistence.unit_of_work import SqlAlchemyUnitOfWork
 from vera.application.commands import IngestSourceHandler
 from vera.application.identity import IdentityService, ScopeResolutionService
-from vera.application.knowledge import KnowledgeService
 from vera.application.queries import SearchMemoryHandler
 from vera.bootstrap import Container
 from vera.domain.identity.models import AuthenticatedPrincipal
+from vera.entrypoints.knowledge import KnowledgeService
 
 
 def get_container(request: Request) -> Container:

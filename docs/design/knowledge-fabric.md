@@ -125,7 +125,13 @@ governance and the production role model: destructive retraction now requires an
 timeline, promote/reject (admin-gated), and ontology-policy endpoints back a future Knowledge
 Workbench; and migration `c9e2f3a4b5d6` creates the non-superuser `vera_trusted` (read) and
 `vera_worker` (read/write) BYPASSRLS roles so the cross-scope read and worker paths need no
-superuser in production, with `vera_app` staying the RLS-enforced tenant path. Within Phase 3, projecting
+superuser in production, with `vera_app` staying the RLS-enforced tenant path. Phase 8 adds
+the cutover tooling: an idempotent backfill (`migrate_to_fabric`) that converts
+`published_episodes` into Facts/Assertions/Evidence while preserving the legacy rows and
+flagging free-text episodes for review, a benchmark harness (`benchmark_fabric`) that reports
+measured context-pack latency percentiles, and the runbook and remaining-risk register
+(`docs/runbooks.md`, `docs/remaining-risks.md`). The live worker cutover and the remaining
+deferrals are tracked in the risk register. Within Phase 3, projecting
 Sagas and building derived communities/summaries is deferred: those depend on Graphiti's
 LLM-driven community APIs, whereas the invariant that matters here, a graph rebuildable from
 Postgres, is delivered and verified by `FactProjectionService` and its drift check. Within

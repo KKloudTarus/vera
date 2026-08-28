@@ -15,8 +15,8 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Query, status
 from pydantic import BaseModel, Field
 
-from vera.application.knowledge import ScopeError
 from vera.entrypoints.api.deps import KnowledgeServiceDep, PrincipalDep
+from vera.entrypoints.knowledge import ScopeError
 
 router = APIRouter(prefix="/v2/knowledge", tags=["knowledge"])
 
