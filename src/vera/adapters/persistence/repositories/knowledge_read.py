@@ -35,6 +35,19 @@ _EVIDENCE = text(
     "FROM evidence e WHERE e.group_id = ANY(CAST(:gids AS text[])) "
     "AND e.assertion_id = CAST(:aid AS uuid)"
 )
+# Evidence for a fact, flattened across its active supporting assertions, for citation. The
+# per-assertion verification and source travel with each evidence row so a caller can weigh it.
+_FACT_EVIDENCE = text(
+    "SELECT e.id::text AS evidence_id, e.excerpt, e.citation_uri, e.chunk_id::text AS chunk_id, "
+    "e.artifact_version_id::text AS artifact_version_id, e.confidentiality, "
+    "a.id::text AS assertion_id, a.polarity, a.verification_state, "
+    "a.knowledge_source_id::text AS source_id "
+    "FROM evidence e "
+    "JOIN assertions a ON a.id = e.assertion_id AND a.state = 'active' "
+    "JOIN facts f ON f.id = a.fact_id "
+    "WHERE f.group_id = ANY(CAST(:gids AS text[])) AND f.fact_key = :fk "
+    "ORDER BY a.recorded_at DESC"
+)
 _RELATIONS = text(
     "SELECT r.relation_type, r.to_fact_id::text AS to_fact_id "
     "FROM fact_relations r WHERE r.group_id = ANY(CAST(:gids AS text[])) "
@@ -123,6 +136,23 @@ class SqlAlchemyKnowledgeReadModel:
                 assertions.append(assertion)
             fact["assertions"] = assertions
             return fact
+
+    async def get_evidence(
+        self, *, group_ids: list[str], fact_key: str
+    ) -> list[dict[str, Any]] | None:
+        """The evidence supporting a fact, flattened across its active assertions. None when
+        the fact does not exist in the caller's scopes; an empty list when it has no evidence.
+        """
+        async with self._session_factory() as session:
+            fact = await session.scalar(_FACT, {"gids": group_ids, "fk": fact_key})
+            if fact is None:
+                return None
+            rows = (
+                (await session.execute(_FACT_EVIDENCE, {"gids": group_ids, "fk": fact_key}))
+                .mappings()
+                .all()
+            )
+        return [dict(r) for r in rows]
 
     async def recent_changes(
         self, *, group_ids: list[str], limit: int = 50

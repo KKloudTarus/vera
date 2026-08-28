@@ -106,6 +106,39 @@ async def explain_fact(
     return fact
 
 
+@router.get("/facts/{fact_key}/evidence", summary="The evidence supporting a fact, for citation")
+async def get_evidence(
+    fact_key: str, principal: PrincipalDep, service: KnowledgeServiceDep
+) -> list[dict[str, Any]]:
+    evidence = await service.get_evidence(principal.id, fact_key=fact_key)
+    if evidence is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="fact not found")
+    return evidence
+
+
+class FeedbackRequest(BaseModel):
+    result_ref: str = Field(min_length=1)  # a fact_key or a context-pack id
+    signal: str = Field(pattern="^(up|down)$")
+    query: str = ""
+    signals: dict[str, float] = Field(default_factory=dict)
+
+
+@router.post("/feedback", summary="Record up/down feedback on a knowledge result")
+async def record_feedback(
+    body: FeedbackRequest, principal: PrincipalDep, service: KnowledgeServiceDep
+) -> dict[str, Any]:
+    try:
+        return await service.record_feedback(
+            principal.id,
+            result_ref=body.result_ref,
+            signal=body.signal,
+            query=body.query,
+            signals=body.signals or None,
+        )
+    except ScopeError as exc:
+        raise _forbidden(exc) from exc
+
+
 @router.get("/changes", summary="The semantic change feed")
 async def get_changes(
     principal: PrincipalDep,

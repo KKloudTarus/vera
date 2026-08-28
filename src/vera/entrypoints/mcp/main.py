@@ -233,6 +233,20 @@ def build_server(container: Container, settings: Settings) -> MCPServer:
         return await get_knowledge().explain_fact(_principal_id(settings), fact_key=fact_key)
 
     @server.tool()
+    async def knowledge_get_evidence(fact_key: str) -> list[dict[str, Any]] | None:
+        """The evidence supporting a fact, flattened across its assertions, for citation."""
+        return await get_knowledge().get_evidence(_principal_id(settings), fact_key=fact_key)
+
+    @server.tool()
+    async def knowledge_feedback(result_ref: str, signal: str, query: str = "") -> dict[str, Any]:
+        """Record up/down feedback on a knowledge result (a fact_key or context-pack id). The
+        feedback is written to the caller's personal scope and never mutates shared truth.
+        """
+        return await get_knowledge().record_feedback(
+            _principal_id(settings), result_ref=result_ref, signal=signal, query=query
+        )
+
+    @server.tool()
     async def knowledge_get_changes(limit: int = 50) -> list[dict[str, Any]]:
         """The semantic change feed across the caller's scopes."""
         return await get_knowledge().get_changes(_principal_id(settings), limit=limit)

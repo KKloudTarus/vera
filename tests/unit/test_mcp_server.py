@@ -24,6 +24,8 @@ _EXPECTED = {
     "knowledge_get_context",
     "knowledge_search",
     "knowledge_explain_fact",
+    "knowledge_get_evidence",
+    "knowledge_feedback",
     "knowledge_get_changes",
     "knowledge_get_conflicts",
     "knowledge_create_snapshot",

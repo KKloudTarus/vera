@@ -46,9 +46,13 @@ making the fabric the primary production path.
 
 ## Contracts
 
-- **`knowledge_feedback` reuses the legacy `memory_feedback` path** and `get_evidence` is
-  served by `explain_fact`; both are slated to move onto the fact model at the same time as
-  the worker cutover.
+- **`knowledge_feedback` and `get_evidence` are first-class on the fact model.** `get_evidence`
+  is a dedicated read (`GET /v2/knowledge/facts/{fact_key}/evidence` and the
+  `knowledge_get_evidence` MCP tool) returning a fact's evidence flattened across its active
+  assertions, distinct from `explain_fact`. `knowledge_feedback`
+  (`POST /v2/knowledge/feedback` and the MCP tool) records up/down feedback keyed to a result
+  ref (a fact_key or context-pack id) into the caller's personal scope, so agent feedback
+  never mutates shared truth.
 
 ## Performance
 

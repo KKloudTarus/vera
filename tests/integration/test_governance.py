@@ -183,3 +183,45 @@ async def test_ontology_lists_predicate_policies(
     assert body["ontology_version"] >= 1
     runs_on = next(p for p in body["predicates"] if p["predicate"] == "RUNS_ON")
     assert runs_on["cardinality"] == "one_per_qualifier_set"
+
+
+async def test_get_evidence_endpoint(
+    sessionmaker: async_sessionmaker[AsyncSession], app_client: AsyncClient
+) -> None:
+    group, admin_key, _ = await _tenancy(sessionmaker)
+    fact_key = await _proposed_fact(sessionmaker, group)
+
+    # A known fact returns its (here empty) evidence list, not a 404.
+    resp = await app_client.get(
+        f"/v2/knowledge/facts/{fact_key}/evidence", headers=_auth(admin_key)
+    )
+    assert resp.status_code == 200
+    assert isinstance(resp.json(), list)
+
+    # An unknown fact is a 404 (distinct from an existing fact with no evidence).
+    missing = await app_client.get(
+        "/v2/knowledge/facts/deadbeef/evidence", headers=_auth(admin_key)
+    )
+    assert missing.status_code == 404
+
+
+async def test_feedback_endpoint_records_and_validates(
+    sessionmaker: async_sessionmaker[AsyncSession], app_client: AsyncClient
+) -> None:
+    _, admin_key, _ = await _tenancy(sessionmaker)
+
+    ok = await app_client.post(
+        "/v2/knowledge/feedback",
+        headers=_auth(admin_key),
+        json={"result_ref": "some-fact-key", "signal": "up"},
+    )
+    assert ok.status_code == 200
+    assert ok.json()["status"] == "recorded"
+
+    # An invalid signal is rejected by request validation.
+    bad = await app_client.post(
+        "/v2/knowledge/feedback",
+        headers=_auth(admin_key),
+        json={"result_ref": "some-fact-key", "signal": "sideways"},
+    )
+    assert bad.status_code == 422

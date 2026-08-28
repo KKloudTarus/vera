@@ -186,6 +186,42 @@ class KnowledgeService:
         scope = await self._resolve(principal_id)
         return await self._read.explain_fact(group_ids=list(scope.group_ids), fact_key=fact_key)
 
+    async def get_evidence(
+        self, principal_id: UUID, *, fact_key: str
+    ) -> list[dict[str, Any]] | None:
+        scope = await self._resolve(principal_id)
+        return await self._read.get_evidence(group_ids=list(scope.group_ids), fact_key=fact_key)
+
+    async def record_feedback(
+        self,
+        principal_id: UUID,
+        *,
+        result_ref: str,
+        signal: str,
+        query: str = "",
+        signals: JsonDict | None = None,
+    ) -> JsonDict:
+        """Record a caller's up/down feedback on a knowledge result (a fact_key or context-pack
+        id). Feedback is a personal signal, so it is written under the caller's personal scope;
+        it never mutates shared truth.
+        """
+        if signal not in {"up", "down"}:
+            raise ScopeError("signal must be 'up' or 'down'")
+        scope = await self._resolve(principal_id)
+        group = scope.personal_group_id
+        async with SqlAlchemyUnitOfWork(self._c.sessionmaker) as uow:
+            await uow.use_tenant(group)
+            await uow.feedback.record(
+                group_id=group,
+                principal_id=principal_id,
+                query=query,
+                result_ref=result_ref,
+                signal=signal,
+                signals=signals,
+            )
+            await uow.commit()
+        return {"status": "recorded", "result_ref": result_ref, "signal": signal}
+
     async def get_changes(self, principal_id: UUID, *, limit: int = 50) -> list[dict[str, Any]]:
         scope = await self._resolve(principal_id)
         return await self._read.recent_changes(group_ids=list(scope.group_ids), limit=limit)
