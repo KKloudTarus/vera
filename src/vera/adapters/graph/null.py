@@ -40,3 +40,6 @@ class NullMemoryEngine:
 
     async def retract_episode(self, *, group_id: str, edge_uuids: Sequence[str]) -> None:
         return None
+
+    async def build_communities(self, *, group_id: str) -> int:
+        return 0

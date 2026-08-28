@@ -42,9 +42,12 @@ making the fabric the primary production path.
 
 ## Graph projection
 
-- **Sagas and derived communities/summaries are not projected.** The rebuildable temporal
-  fact projection and its drift check are delivered; Saga and community construction depend on
-  Graphiti's LLM-driven community APIs and are deferred.
+- **Community construction is wired as an operator-run step; sagas are deferred.** The
+  rebuildable temporal fact projection and its drift check are delivered, and
+  `build_communities` on the MemoryEngine port (the `build_communities` entrypoint, per group
+  or `--all`) clusters a group's entities and writes an LLM summary per community, rebuildable
+  from the graph (gap 13). It is operator-run and off the live path because it costs LLM calls;
+  the null engine is a no-op. Saga construction remains deferred.
 
 ## Migration fidelity
 

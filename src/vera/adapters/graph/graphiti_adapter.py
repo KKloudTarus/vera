@@ -431,3 +431,12 @@ class GraphitiMemoryEngine:
         await self._client.driver.execute_query(  # pyright: ignore[reportUnknownMemberType]
             "MATCH (n {group_id: $gid}) DETACH DELETE n", gid=gid
         )
+
+    async def build_communities(self, *, group_id: str) -> int:
+        # Graphiti clusters the group's entities and writes an LLM summary per community. The
+        # community nodes are a rebuildable projection: clear_group plus a re-run reconstructs
+        # them, so this is safe to run repeatedly.
+        nodes, _edges = await self._client.build_communities(
+            group_ids=[_graphiti_group(str(group_id))]
+        )
+        return len(nodes)

@@ -109,3 +109,10 @@ class MemoryEngine(Protocol):
         """Permanently delete the given edges (and any node left with no edges) from the
         graph, for retraction and erasure."""
         ...
+
+    async def build_communities(self, *, group_id: str) -> int:
+        """Cluster the group's entities into communities and summarize each, returning the
+        number built. Community summaries are LLM-derived and rebuildable from the graph, so
+        this is an operator-run, off-by-default step; an engine with no graph returns 0.
+        """
+        ...
