@@ -14,19 +14,30 @@ import asyncio
 import random
 import time
 import zlib
+from typing import Any, cast
 from uuid import UUID
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from vera.adapters.persistence.repositories import (
+    SqlAlchemyAssertionRepository,
     SqlAlchemyCanonicalEntityRepository,
+    SqlAlchemyEvidenceRepository,
+    SqlAlchemyFactRelationRepository,
+    SqlAlchemyFactRepository,
     SqlAlchemyGraphMapRepository,
+    SqlAlchemyKnowledgeEventLog,
 )
 from vera.adapters.persistence.repositories.embedding_state import (
     SqlAlchemyEmbeddingStateRepository,
 )
 from vera.application.curation.entity_resolver import SemanticEntityResolver
+from vera.application.curation.reconciliation import (
+    ArtifactReconciliation,
+    ReconciliationService,
+    ResolvedProposition,
+)
 from vera.bootstrap import Container
 from vera.config.settings import active_embedding
 from vera.domain.ports.job_queue import QueuedJob
@@ -160,12 +171,75 @@ class LanePool:
                         )
                         receipt = await self._container.memory.ingest_episode(episode)
                         await self._stitch(session, str(job.group_id), str(job.source_id), receipt)
+                        if self._container.settings.memory.fabric_enabled:
+                            await self._reconcile_to_fabric(session, job)
                         await session.execute(_MARK_DONE, {"id": job.id})
             record_ingestion(result="done", duration_s=time.perf_counter() - started)
             log.info("ingest.done", episode_uuid=receipt.episode_uuid)
         finally:
             reset_usage_context(usage_token)
             clear_log_context()
+
+    async def _reconcile_to_fabric(self, session: AsyncSession, job: QueuedJob) -> None:
+        """Populate the authoritative fact store from the same triples, so the /v2 knowledge
+        surface reflects live ingest. Gated by memory.fabric_enabled. Idempotent on replay:
+        an episode already reconciled (by its extraction_run_id) is skipped. Episodes reaching
+        the worker are already curated/published, so they reconcile at authoritative trust.
+        """
+        triples = cast("list[dict[str, Any]]", job.payload.get("triples") or [])
+        if not triples:
+            return
+        group = str(job.group_id)
+        run_id = f"episode:{job.source_id}"
+        already = await session.scalar(
+            text("SELECT 1 FROM assertions WHERE group_id = :g AND extraction_run_id = :r LIMIT 1"),
+            {"g": group, "r": run_id},
+        )
+        if already:
+            return
+
+        canonical = SqlAlchemyCanonicalEntityRepository(session)
+        propositions: list[ResolvedProposition] = []
+        for triple in triples:
+            subject = str(triple.get("subject", "")).strip()
+            predicate = str(triple.get("predicate", "")).strip()
+            obj = str(triple.get("object", "")).strip()
+            if not (subject and predicate and obj):
+                continue
+            entity = await self._resolver.resolve_or_create(
+                canonical,
+                group_id=group,
+                name=subject,
+                entity_type=str(triple.get("entity_type", "Entity")),
+            )
+            propositions.append(
+                ResolvedProposition(
+                    subject_entity_id=entity.id,
+                    predicate=predicate,
+                    object_scalar=obj,
+                    extractor_confidence=0.9,
+                    excerpt=f"{subject} {predicate} {obj}",
+                )
+            )
+        if not propositions:
+            return
+        service = ReconciliationService(
+            facts=SqlAlchemyFactRepository(session),
+            assertions=SqlAlchemyAssertionRepository(session),
+            evidence=SqlAlchemyEvidenceRepository(session),
+            relations=SqlAlchemyFactRelationRepository(session),
+            events=SqlAlchemyKnowledgeEventLog(session),
+        )
+        await service.reconcile(
+            ArtifactReconciliation(
+                group_id=group,
+                source_authority=1.0,
+                trust_tier=1,
+                propositions=propositions,
+                extraction_run_id=run_id,
+                actor="worker",
+            )
+        )
 
     async def _process_retract_cleanup(self, job: QueuedJob) -> None:
         # Idempotent: removing already-removed edges is a no-op and deleting an absent object

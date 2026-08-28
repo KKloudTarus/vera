@@ -76,13 +76,16 @@ class ResolvedProposition:
 @dataclass(frozen=True, slots=True)
 class ArtifactReconciliation:
     group_id: str
-    artifact_version_id: UUID
     source_authority: float
     trust_tier: int
     propositions: list[ResolvedProposition]
+    # Optional: a live episode with no materialized artifact version leaves this None and
+    # dedups its assertions by extraction_run_id instead of the (fact, version) key.
+    artifact_version_id: UUID | None = None
     knowledge_source_id: UUID | None = None
     artifact_id: UUID | None = None
     ontology_version_id: UUID | None = None
+    extraction_run_id: str | None = None
     actor: str | None = None
     trace_id: str | None = None
 
@@ -315,6 +318,7 @@ class ReconciliationService:
                 source_authority=req.source_authority,
                 observed_at=now,
                 recorded_at=now,
+                extraction_run_id=req.extraction_run_id,
             )
         )
         if prior:

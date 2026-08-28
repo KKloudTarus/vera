@@ -219,6 +219,10 @@ class MemorySettings(BaseModel):
     # a key), so it stays inert in offline and unit runs. Run the embedding backfill for
     # pre-existing entities before relying on it, and watch vera_entity_resolution_total.
     semantic_dedup_enabled: bool = True
+    # Phase 8 cutover: when on, the worker also reconciles each ingested episode's triples into
+    # the authoritative fact store (Fact/Assertion/Evidence), so the /v2 knowledge surface
+    # reflects live ingest. Off by default; the legacy published-episode path is unchanged.
+    fabric_enabled: bool = False
     semantic_dedup_threshold: float = 0.86
     # Below the auto-link threshold, names this similar become candidates an LLM judge
     # confirms. Kept low, since embedding cosine over bare names is only a coarse blocker.

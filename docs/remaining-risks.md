@@ -6,11 +6,13 @@ making the fabric the primary production path.
 
 ## Cutover and wiring
 
-- **The live ingestion worker still writes `published_episodes`.** The reconciliation and
-  projection services are implemented and tested but are not yet wired into the worker, so in
-  production the fabric is populated by the backfill and by proposals, not by live ingest.
-  Wiring the worker to reconcile and project on ingest is the remaining cutover step; it
-  should be done behind a flag and validated per group.
+- **The worker fabric cutover is available behind a flag, off by default.** With
+  `VERA_MEMORY__FABRIC_ENABLED=true` the ingestion worker also reconciles each episode's
+  triples into the fact store (idempotent on replay by the episode's extraction run id), so
+  the `/v2` knowledge surface reflects live ingest; the legacy published-episode path is
+  unchanged. It is off by default: turning it on in production, validated per group, is the
+  rollout decision. The graph is still projected by the episode path; switching the graph to
+  the fact-based projection is a further step.
 - **The database role split is created but not yet adopted by the app processes.** The roles
   and grants exist (migration `c9e2f3a4b5d6`) and the deployment model is documented, but the
   processes do not yet connect as or `SET ROLE` to `vera_trusted` / `vera_worker`. This is a
