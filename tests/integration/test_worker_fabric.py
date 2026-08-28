@@ -6,7 +6,7 @@ Uses the null memory engine (the fabric step reads the job payload, not the grap
 from __future__ import annotations
 
 import dataclasses
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 
 import pytest
