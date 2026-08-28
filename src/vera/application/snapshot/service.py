@@ -99,8 +99,15 @@ class ContextPackService:
         actor: str | None = None,
     ) -> ContextPack:
         fact_ids: set[str] | None = None
+        passage_cutoff: datetime | None = None
         if snapshot_id is not None:
             fact_ids = await self._snapshots.fact_ids(group_id=group_id, snapshot_id=snapshot_id)
+            snapshot = await self._snapshots.get(group_id=group_id, snapshot_id=snapshot_id)
+            if snapshot is not None:
+                # Freeze passages to what existed when the snapshot was taken. System time (the
+                # snapshot's transaction time) is the right cutoff: chunks ingested later did not
+                # exist then, so excluding them reproduces the passages retrieval saw at snapshot.
+                passage_cutoff = snapshot.as_of_system_time
         assembled = await self._assembler.assemble(
             query=query,
             group_id=group_id,
@@ -108,6 +115,7 @@ class ContextPackService:
             token_budget=token_budget,
             as_of=as_of,
             snapshot_fact_ids=fact_ids,
+            passage_cutoff=passage_cutoff,
         )
         return await self._packs.save(
             group_id=group_id,

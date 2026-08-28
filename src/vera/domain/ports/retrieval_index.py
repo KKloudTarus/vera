@@ -45,11 +45,30 @@ class FactHit:
 
 
 class PassageIndex(Protocol):
-    async def search(self, *, group_id: str, query: str, limit: int) -> list[PassageHit]: ...
+    async def search(
+        self,
+        *,
+        group_id: str,
+        query: str,
+        limit: int,
+        created_before: datetime | None = None,
+    ) -> list[PassageHit]:
+        """Search passages. When ``created_before`` is given (a snapshot's freeze time), only
+        chunks ingested at or before it are returned, so a pack against a snapshot reproduces
+        the passages that existed when it was taken.
+        """
+        ...
 
 
 class CodeIndex(Protocol):
-    async def search(self, *, group_id: str, query: str, limit: int) -> list[PassageHit]: ...
+    async def search(
+        self,
+        *,
+        group_id: str,
+        query: str,
+        limit: int,
+        created_before: datetime | None = None,
+    ) -> list[PassageHit]: ...
 
 
 class FactCandidateSource(Protocol):

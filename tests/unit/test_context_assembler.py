@@ -84,7 +84,7 @@ class _FakePassages:
     def __init__(self, hits: list[PassageHit]) -> None:
         self._hits = hits
 
-    async def search(self, *, group_id, query, limit):
+    async def search(self, *, group_id, query, limit, created_before=None):
         return self._hits
 
 

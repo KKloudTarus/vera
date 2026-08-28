@@ -28,6 +28,7 @@ SELECT id, artifact_version_id, text, heading_path, symbol_name,
        ts_rank(search_vector, {_ORQ}) AS score
 FROM chunks
 WHERE group_id = :g AND search_vector @@ {_ORQ}
+  AND (CAST(:created_before AS timestamptz) IS NULL OR created_at <= :created_before)
 {{code_filter}}
 ORDER BY score DESC
 LIMIT :lim
@@ -92,13 +93,20 @@ class SqlAlchemyPassageIndex:
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self._session_factory = session_factory
 
-    async def search(self, *, group_id: str, query: str, limit: int) -> list[PassageHit]:
+    async def search(
+        self,
+        *,
+        group_id: str,
+        query: str,
+        limit: int,
+        created_before: datetime | None = None,
+    ) -> list[PassageHit]:
         async with self._session_factory() as session:
             rows = (
                 (
                     await session.execute(
                         text(_PASSAGE.format(code_filter="")),
-                        {"g": group_id, "q": query, "lim": limit},
+                        {"g": group_id, "q": query, "lim": limit, "created_before": created_before},
                     )
                 )
                 .mappings()
@@ -111,13 +119,20 @@ class SqlAlchemyCodeIndex:
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self._session_factory = session_factory
 
-    async def search(self, *, group_id: str, query: str, limit: int) -> list[PassageHit]:
+    async def search(
+        self,
+        *,
+        group_id: str,
+        query: str,
+        limit: int,
+        created_before: datetime | None = None,
+    ) -> list[PassageHit]:
         async with self._session_factory() as session:
             rows = (
                 (
                     await session.execute(
                         text(_PASSAGE.format(code_filter="AND symbol_name IS NOT NULL")),
-                        {"g": group_id, "q": query, "lim": limit},
+                        {"g": group_id, "q": query, "lim": limit, "created_before": created_before},
                     )
                 )
                 .mappings()

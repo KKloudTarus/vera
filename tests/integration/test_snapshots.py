@@ -194,3 +194,87 @@ async def test_context_pack_is_persisted_and_retrievable(
         )
         == 1
     )
+
+
+async def test_context_pack_over_snapshot_excludes_later_ingested_passages(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """gap 12: a pack against a snapshot must reproduce the passages that existed when the
+    snapshot was taken. A chunk ingested after the snapshot must not leak into the pack.
+    """
+    from vera.adapters.persistence.models.knowledge import ArtifactRow, ArtifactVersionRow
+    from vera.adapters.persistence.repositories.fabric import SqlAlchemyChunkRepository
+    from vera.domain.knowledge.fabric import Chunk
+    from vera.shared.time import utc_now
+
+    group = f"p:sp-{uuid7().hex[:12]}"
+    await _setup(sessionmaker, group)
+    async with SqlAlchemyUnitOfWork(sessionmaker) as uow:
+        await uow.use_tenant(group)
+        org = await uow.tenancy.create_organization(
+            slug=f"o2-{group}", name="O", group_id=f"o2:{group}"
+        )
+        ws = await uow.tenancy.create_workspace(
+            org_id=org.id, slug=f"w2-{group}", name="W", group_id=f"w2:{group}"
+        )
+        source_id = await uow.sources.create(
+            workspace_id=ws.id, project_id=None, kind="confluence", name="C", trust_tier=1
+        )
+        await uow.commit()
+    async with _tenant(sessionmaker, group) as s:
+        art = ArtifactRow(
+            source_id=source_id,
+            external_id="a1",
+            content_hash="h",
+            s3_key="k",
+            reference_time=utc_now(),
+        )
+        s.add(art)
+        await s.flush()
+        ver = ArtifactVersionRow(
+            artifact_id=art.id, version=1, content_hash="h", s3_key="k", reference_time=utc_now()
+        )
+        s.add(ver)
+        await s.flush()
+        version_id = ver.id
+
+    async def _chunk(ordinal: int, body: str) -> None:
+        ck = fabric.chunk_key(
+            artifact_version_id=version_id, ordinal=ordinal, content_hash=f"c{ordinal}"
+        )
+        async with _tenant(sessionmaker, group) as s:
+            await SqlAlchemyChunkRepository(s).upsert(
+                Chunk(
+                    id=uuid7(),
+                    artifact_version_id=version_id,
+                    group_id=group,
+                    chunk_key=ck,
+                    ordinal=ordinal,
+                    text=body,
+                    content_hash=f"c{ordinal}",
+                    token_count=len(body) // 4,
+                )
+            )
+
+    await _chunk(1, "deployment runbook alpha describes the rollout")
+    snapshot = await SqlAlchemySnapshotRepository(sessionmaker).create(
+        group_id=group, policy_version="ontology-v1"
+    )
+    await _chunk(2, "deployment runbook bravo describes a later rollout")
+
+    packs = ContextPackService(
+        assembler=_assembler(sessionmaker),
+        snapshots=SqlAlchemySnapshotRepository(sessionmaker),
+        packs=SqlAlchemyContextPackRepository(sessionmaker),
+    )
+    pack = await packs.create(
+        group_id=group, query="deployment runbook rollout", snapshot_id=snapshot.id
+    )
+    texts = " ".join(r["text"] for r in pack.results)
+    assert "alpha" in texts  # existed at snapshot time
+    assert "bravo" not in texts  # ingested after the snapshot: excluded
+
+    # Without a snapshot the live pack sees both, proving the cutoff (not a seeding bug) filters it.
+    live = await packs.create(group_id=group, query="deployment runbook rollout")
+    live_texts = " ".join(r["text"] for r in live.results)
+    assert "alpha" in live_texts and "bravo" in live_texts
