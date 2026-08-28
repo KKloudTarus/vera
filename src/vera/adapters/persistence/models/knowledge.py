@@ -12,11 +12,13 @@ from typing import Any
 from uuid import UUID
 
 from sqlalchemy import (
+    BigInteger,
     Boolean,
     CheckConstraint,
     DateTime,
     Float,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
@@ -92,11 +94,34 @@ class ArtifactVersionRow(Base, UUIDPK):
     content_hash: Mapped[str] = mapped_column(String(128), nullable=False)
     s3_key: Mapped[str] = mapped_column(String(1024), nullable=False)
     reference_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    source_revision: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    source_updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    source_version_id: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    observed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    predecessor_version_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("artifact_versions.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
 
-    __table_args__ = (UniqueConstraint("artifact_id", "version", name="uq_artifact_version"),)
+    __table_args__ = (
+        UniqueConstraint("artifact_id", "version", name="uq_artifact_version"),
+        Index(
+            "uq_artifact_source_revision",
+            "artifact_id",
+            "source_revision",
+            unique=True,
+            postgresql_where=text("source_revision IS NOT NULL"),
+        ),
+        Index("ix_artifact_versions_predecessor", "predecessor_version_id"),
+    )
 
 
 class CandidateClaimRow(Base, UUIDPK, Timestamps):

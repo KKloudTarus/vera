@@ -124,12 +124,27 @@ class ReconciliationService:
     async def reconcile(self, req: ArtifactReconciliation) -> ReconciliationReport:
         report = ReconciliationReport()
         now = utc_now()
+        advances_source = not req.propositions or any(
+            not prop.needs_review for prop in req.propositions
+        )
+        if action_for_tier(req.trust_tier) is TrustAction.AUTO_PUBLISH and advances_source:
+            reaffirmed_fact_ids: set[UUID] = set()
+            for prop in req.propositions:
+                if prop.needs_review or prop.polarity is not Polarity.SUPPORTS:
+                    continue
+                existing = await self._facts.active_by_fact_key(
+                    group_id=req.group_id, fact_key=_fact_key(req.group_id, prop)
+                )
+                if existing is not None:
+                    reaffirmed_fact_ids.add(existing.id)
+            touched = await self._withdraw_dropped(req, now, report)
+            for fact_id in touched - reaffirmed_fact_ids:
+                await self._transition_if_unsupported(req, fact_id, now, report)
         for prop in req.propositions:
             if prop.polarity is Polarity.REFUTES:
                 await self._handle_refute(req, prop, now, report)
             else:
                 await self._handle_support(req, prop, now, report)
-        await self._withdraw_dropped(req, now, report)
         return report
 
     # ---------------------------------------------------------------- support ---
@@ -413,12 +428,10 @@ class ReconciliationService:
 
     async def _withdraw_dropped(
         self, req: ArtifactReconciliation, now: datetime, report: ReconciliationReport
-    ) -> None:
-        """Withdraw this artifact's assertions from earlier versions (a new version supersedes
-        an old one), then transition any fact left with no active support per its policy.
-        """
+    ) -> set[UUID]:
+        """Withdraw prior versions before evaluating the incoming version's propositions."""
         if req.artifact_id is None:
-            return
+            return set()
         stale = [
             a
             for a in await self._assertions.active_for_artifact(
@@ -438,8 +451,7 @@ class ReconciliationService:
             )
             report.assertions_withdrawn += 1
             touched.add(assertion.fact_id)
-        for fact_id in touched:
-            await self._transition_if_unsupported(req, fact_id, now, report)
+        return touched
 
     async def _transition_if_unsupported(
         self,

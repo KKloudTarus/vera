@@ -19,6 +19,7 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from vera.adapters.curation.extractor import StructuredClaimExtractor
 from vera.adapters.graph.null import NullMemoryEngine
 from vera.adapters.persistence.models.knowledge import ArtifactRow, ArtifactVersionRow
 from vera.adapters.persistence.repositories.knowledge_read import SqlAlchemyKnowledgeReadModel
@@ -134,7 +135,7 @@ async def _tenant(
 
 
 async def _artifact_versions(
-    container: Container, group: str, *, tier: int = 1
+    container: Container, group: str, *, tier: int = 1, ordered: bool = False
 ) -> tuple[UUID, UUID]:
     """One artifact with two versions in a real tenancy; returns (v1_id, v2_id)."""
     sm = container.sessionmaker
@@ -166,10 +167,19 @@ async def _artifact_versions(
         v1 = ArtifactVersionRow(
             artifact_id=art.id, version=1, content_hash="h1", s3_key="k1", reference_time=utc_now()
         )
+        s.add(v1)
+        await s.flush()
         v2 = ArtifactVersionRow(
-            artifact_id=art.id, version=2, content_hash="h2", s3_key="k2", reference_time=utc_now()
+            artifact_id=art.id,
+            version=2,
+            content_hash="h2",
+            s3_key="k2",
+            reference_time=utc_now(),
+            predecessor_version_id=v1.id if ordered else None,
         )
-        s.add_all([v1, v2])
+        if ordered:
+            art.current_version = 2
+        s.add(v2)
         await s.flush()
         return v1.id, v2.id
 
@@ -296,6 +306,87 @@ async def test_new_version_withdraws_dropped_proposition_on_live_path(
             {"g": group},
         )
     assert withdrawn >= 1
+
+
+async def test_stale_predecessor_job_cannot_regress_the_current_fact(
+    fabric_container: Container,
+) -> None:
+    container = fabric_container
+    group = f"p:w-{uuid7().hex[:12]}"
+    v1, v2 = await _artifact_versions(container, group, ordered=True)
+
+    await _enqueue(
+        container,
+        group,
+        f"{group}:{uuid7()}",
+        [{"subject": "paymentapi", "predicate": "RUNS_ON", "object": "ecs"}],
+        _fabric_meta(1, v2),
+    )
+    await _drain(container)
+    await _enqueue(
+        container,
+        group,
+        f"{group}:{uuid7()}",
+        [{"subject": "paymentapi", "predicate": "RUNS_ON", "object": "eks"}],
+        _fabric_meta(1, v1),
+    )
+    await _drain(container)
+
+    assert await _fact_state(container, group, "ecs") == "active"
+    assert await _fact_state(container, group, "eks") is None
+
+
+async def test_empty_new_version_retracts_the_previous_fact(
+    fabric_container: Container,
+) -> None:
+    container = fabric_container
+    group = f"p:w-{uuid7().hex[:12]}"
+    seed_version, _ = await _artifact_versions(container, group)
+    async with _tenant(container.sessionmaker, group) as s:
+        source_id = await s.scalar(
+            text(
+                "SELECT a.source_id FROM artifacts a "
+                "JOIN artifact_versions v ON v.artifact_id = a.id WHERE v.id = :v"
+            ),
+            {"v": str(seed_version)},
+        )
+    assert source_id is not None
+
+    async with SqlAlchemyUnitOfWork(container.sessionmaker) as uow:
+        await uow.use_tenant(group)
+        service = CurationService(uow, StructuredClaimExtractor())
+        await service.ingest_artifact(
+            IngestArtifact(
+                source_id=UUID(str(source_id)),
+                group_id=group,
+                external_id="removable-page",
+                body="",
+                knowledge_type="fact_triple",
+                metadata={
+                    "triples": [{"subject": "paymentapi", "predicate": "RUNS_ON", "object": "eks"}]
+                },
+                source_revision=1,
+            )
+        )
+        await uow.commit()
+    await _drain(container)
+    assert await _fact_state(container, group, "eks") == "active"
+
+    async with SqlAlchemyUnitOfWork(container.sessionmaker) as uow:
+        await uow.use_tenant(group)
+        await CurationService(uow, StructuredClaimExtractor()).ingest_artifact(
+            IngestArtifact(
+                source_id=UUID(str(source_id)),
+                group_id=group,
+                external_id="removable-page",
+                body="fact removed",
+                knowledge_type="text",
+                source_revision=2,
+            )
+        )
+        await uow.commit()
+    await _drain(container)
+    assert await _fact_state(container, group, "eks") == "retracted"
 
 
 async def test_worker_does_not_touch_fabric_when_disabled(

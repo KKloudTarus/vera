@@ -67,10 +67,14 @@ class SyncRunner:
                                 knowledge_type=record.knowledge_type,
                                 title=record.title,
                                 metadata=record.metadata,
+                                reference_time=record.reference_time,
+                                source_revision=record.source_revision,
+                                source_updated_at=record.source_updated_at,
+                                source_version_id=record.source_version_id,
                             )
                         )
                         await uow.commit()
-                    if is_ok(result) and result.value.action == "unchanged":
+                    if is_ok(result) and result.value.action in {"unchanged", "stale"}:
                         unchanged += 1
                     else:
                         processed += 1

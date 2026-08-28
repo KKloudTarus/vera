@@ -133,6 +133,27 @@ async def _triple_needs_review(
     )
 
 
+async def _artifact_version_is_superseded(
+    session: AsyncSession, *, group_id: str, version_id: UUID
+) -> bool:
+    return bool(
+        await session.scalar(
+            text(
+                "SELECT EXISTS (SELECT 1 FROM artifact_versions current "
+                "JOIN artifacts a ON a.id = current.artifact_id "
+                "JOIN knowledge_sources s ON s.id = a.source_id "
+                "LEFT JOIN projects p ON p.id = s.project_id "
+                "WHERE current.id = :v "
+                "AND EXISTS (SELECT 1 FROM artifact_versions newer "
+                "WHERE newer.predecessor_version_id = current.id) "
+                "AND (p.group_id = :g OR EXISTS (SELECT 1 FROM candidate_claims c "
+                "WHERE c.artifact_version_id = current.id AND c.group_id = :g)))"
+            ),
+            {"g": group_id, "v": str(version_id)},
+        )
+    )
+
+
 class LanePool:
     def __init__(
         self,
@@ -236,7 +257,8 @@ class LanePool:
                                 meta=fabric_meta,
                                 triple=triple,
                             )
-                        if not needs_review:
+                        reconcile_only = job.payload.get("job_kind") == "fabric_reconcile_version"
+                        if not needs_review and not reconcile_only:
                             # One embedding dimension per group: refuse a write under a changed
                             # model/dim (job dead-letters with a clear message) until reprocess.
                             model_name, dim = active_embedding(self._container.settings)
@@ -273,7 +295,8 @@ class LanePool:
         defaults to the safest (unverified) tier, never to authoritative.
         """
         triples = cast("list[dict[str, Any]]", job.payload.get("triples") or [])
-        if not triples:
+        reconcile_only = job.payload.get("job_kind") == "fabric_reconcile_version"
+        if not triples and not reconcile_only:
             return
         group = str(job.group_id)
         meta = cast("dict[str, Any]", job.payload.get("_fabric") or {})
@@ -297,6 +320,10 @@ class LanePool:
         version_id = (
             UUID(str(meta["artifact_version_id"])) if meta.get("artifact_version_id") else None
         )
+        if version_id is not None and await _artifact_version_is_superseded(
+            session, group_id=group, version_id=version_id
+        ):
+            return
         # The artifact id lets reconciliation withdraw the previous version's assertions when a
         # new version of the same artifact drops a proposition (live update path).
         artifact_id: UUID | None = None
@@ -360,7 +387,7 @@ class LanePool:
                     needs_review=needs_review,
                 )
             )
-        if not propositions:
+        if not propositions and not reconcile_only:
             return
         service = ReconciliationService(
             facts=SqlAlchemyFactRepository(session),

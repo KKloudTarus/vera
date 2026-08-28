@@ -54,6 +54,7 @@ class GitConnector:
             if not line.strip():
                 continue
             sha, author, when, subject = line.split(_UNIT, 3)
+            updated_at = parse_iso(when)
             records.append(
                 ConnectorRecord(
                     external_id=f"git:{self._repo_name}:{sha}",
@@ -61,7 +62,9 @@ class GitConnector:
                     body=f"{subject} (by {author})",
                     knowledge_type="text",
                     metadata={"sha": sha, "author": author, "repo": self._repo_name},
-                    reference_time=parse_iso(when),
+                    reference_time=updated_at,
+                    source_updated_at=updated_at,
+                    source_version_id=sha,
                 )
             )
             if newest == last_sha:

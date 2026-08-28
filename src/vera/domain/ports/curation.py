@@ -97,6 +97,10 @@ class ArtifactRepository(Protocol):
         content_hash: str,
         s3_key: str,
         reference_time: datetime,
+        source_revision: int | None = None,
+        source_updated_at: datetime | None = None,
+        source_version_id: str | None = None,
+        observed_at: datetime | None = None,
     ) -> ArtifactRef: ...
 
     async def get_head(self, *, source_id: UUID, external_id: str) -> ArtifactHead | None:
@@ -110,6 +114,10 @@ class ArtifactRepository(Protocol):
         content_hash: str,
         s3_key: str,
         reference_time: datetime,
+        source_revision: int | None = None,
+        source_updated_at: datetime | None = None,
+        source_version_id: str | None = None,
+        observed_at: datetime | None = None,
     ) -> ArtifactRef:
         """Append a new version to an existing artifact and make it current."""
         ...

@@ -49,6 +49,7 @@ class PdfConnector:
             mtime = path.stat().st_mtime
             if mtime <= since:
                 continue
+            updated_at = datetime.fromtimestamp(mtime, tz=UTC)
             records.append(
                 ConnectorRecord(
                     external_id=f"pdf:{path.name}",
@@ -56,7 +57,9 @@ class PdfConnector:
                     body=self._extract(path),
                     knowledge_type="text",
                     metadata={"filename": path.name},
-                    reference_time=datetime.fromtimestamp(mtime, tz=UTC),
+                    reference_time=updated_at,
+                    source_updated_at=updated_at,
+                    source_version_id=str(mtime),
                 )
             )
             latest = max(latest, mtime)

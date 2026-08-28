@@ -12,11 +12,12 @@ from __future__ import annotations
 import hashlib
 import unicodedata
 from dataclasses import dataclass, replace
+from datetime import datetime
 from uuid import UUID
 
 from vera.application.curation.chunking import chunk_artifact
 from vera.application.curation.supersede import SupersedePolicy
-from vera.domain.curation.models import ClaimRecord
+from vera.domain.curation.models import ArtifactHead, ArtifactRef, ClaimRecord
 from vera.domain.curation.policy import may_publish_to
 from vera.domain.curation.state import can_transition
 from vera.domain.curation.trust import (
@@ -46,6 +47,10 @@ class IngestArtifact:
     knowledge_type: str = "text"
     title: str | None = None
     metadata: JsonDict | None = None
+    reference_time: datetime | None = None
+    source_revision: int | None = None
+    source_updated_at: datetime | None = None
+    source_version_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -127,6 +132,16 @@ def _align_document_quote(
     return claim, None
 
 
+def _is_stale_version(head: ArtifactHead, cmd: IngestArtifact) -> bool:
+    if cmd.source_revision is not None and head.source_revision is not None:
+        return cmd.source_revision <= head.source_revision
+    if cmd.source_updated_at is not None and head.source_updated_at is not None:
+        incoming = (cmd.source_updated_at, cmd.source_version_id or "")
+        current = (head.source_updated_at, head.source_version_id or "")
+        return incoming <= current
+    return False
+
+
 class CurationService:
     def __init__(
         self,
@@ -178,6 +193,17 @@ class CurationService:
                     action="unchanged",
                 )
             )
+        if head is not None and _is_stale_version(head, cmd):
+            return Ok(
+                IngestResult(
+                    artifact_version_id=str(head.version_id),
+                    claim_ids=(),
+                    published=0,
+                    action="stale",
+                )
+            )
+        observed_at = utc_now()
+        reference_time = cmd.reference_time or observed_at
         s3_key = f"artifacts/{cmd.source_id}/{cmd.external_id}/v{(head.version + 1) if head else 1}"
         # Persist the raw artifact bytes so the graph stays rebuildable from Postgres + S3.
         if self._object_store is not None and cmd.body:
@@ -191,14 +217,22 @@ class CurationService:
                 title=cmd.title,
                 content_hash=content_hash,
                 s3_key=s3_key,
-                reference_time=utc_now(),
+                reference_time=reference_time,
+                source_revision=cmd.source_revision,
+                source_updated_at=cmd.source_updated_at,
+                source_version_id=cmd.source_version_id,
+                observed_at=observed_at,
             )
         else:
             ref = await uow.artifacts.add_version(
                 artifact_id=head.artifact_id,
                 content_hash=content_hash,
                 s3_key=s3_key,
-                reference_time=utc_now(),
+                reference_time=reference_time,
+                source_revision=cmd.source_revision,
+                source_updated_at=cmd.source_updated_at,
+                source_version_id=cmd.source_version_id,
+                observed_at=observed_at,
             )
 
         # Structure-aware chunking (persisted before extraction) so retrieval has citable
@@ -294,6 +328,12 @@ class CurationService:
                     expected_version=claim.version_id,
                     to_status=VerificationStatus.PENDING,
                 )
+
+        has_fabric_claim = any(
+            item.subject and item.predicate and item.object for item, _ in extracted_with_chunks
+        )
+        if action is TrustAction.AUTO_PUBLISH and not has_fabric_claim:
+            await self._queue_fabric_version(ref, source.trust_tier, cmd.group_id)
 
         return Ok(
             IngestResult(
@@ -491,4 +531,29 @@ class CurationService:
             source_id=source_id,
             dedup_uuid=deterministic_id(source_id),
             payload=payload,
+        )
+
+    async def _queue_fabric_version(self, ref: ArtifactRef, trust_tier: int, group_id: str) -> None:
+        source_id = f"fabric-version:{group_id}:{ref.version_id}"
+        ontology_id = await self._uow.ontology.get_active_id()
+        await self._uow.outbox.add(
+            group_id=group_id,
+            source_id=source_id,
+            dedup_uuid=deterministic_id(source_id),
+            payload={
+                "job_kind": "fabric_reconcile_version",
+                "triples": [],
+                "_fabric": {
+                    "trust_tier": int(trust_tier),
+                    "authority": authority_for_tier(trust_tier),
+                    "confidence": 1.0,
+                    "verification": "human_verified",
+                    "ontology_version_id": str(ontology_id) if ontology_id is not None else None,
+                    "artifact_version_id": str(ref.version_id),
+                    "extraction_run_id": None,
+                    "chunk_id": None,
+                    "quote_hash": None,
+                    "needs_review": False,
+                },
+            },
         )

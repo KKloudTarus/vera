@@ -35,6 +35,9 @@ class CmdbConnector:
         latest = since
         for item in items:
             updated = str(item.get("updated_at", "")) or None
+            updated_at = parse_iso(updated)
+            revision_value = item.get("source_revision", item.get("revision"))
+            revision = int(revision_value) if revision_value is not None else None
             if since and updated and updated <= since:
                 continue  # unchanged since the last sync
             ci_id = str(item["id"])
@@ -56,7 +59,10 @@ class CmdbConnector:
                     body="",
                     knowledge_type="fact_triple",
                     metadata={"triples": triples},
-                    reference_time=parse_iso(updated),
+                    reference_time=updated_at,
+                    source_revision=revision,
+                    source_updated_at=updated_at,
+                    source_version_id=str(item.get("version_id") or updated or "") or None,
                 )
             )
             if updated and (latest is None or updated > latest):

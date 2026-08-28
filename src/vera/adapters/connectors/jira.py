@@ -62,6 +62,7 @@ class JiraConnector:
             description = str(fields.get("description", "") or "")
             status = str(fields.get("status", {}).get("name", "")) or "unknown"
             updated = str(fields.get("updated", "")) or None
+            updated_at = parse_iso(updated)
             records.append(
                 ConnectorRecord(
                     external_id=f"jira:{key}",
@@ -69,7 +70,9 @@ class JiraConnector:
                     body=f"{summary}\n\n{description}".strip(),
                     knowledge_type="text",
                     metadata={"key": key, "status": status},
-                    reference_time=parse_iso(updated),
+                    reference_time=updated_at,
+                    source_updated_at=updated_at,
+                    source_version_id=updated,
                 )
             )
             if updated and (latest is None or updated > latest):

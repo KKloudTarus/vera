@@ -67,7 +67,11 @@ class ConfluenceConnector:
         records: list[ConnectorRecord] = []
         for page in results:
             page_id = str(page["id"])
-            when = str(page.get("version", {}).get("when", "")) or None
+            version = page.get("version", {})
+            when = str(version.get("when", "")) or None
+            revision_value = version.get("number")
+            revision = int(revision_value) if revision_value is not None else None
+            updated_at = parse_iso(when)
             body = storage_to_markdown(
                 str(page.get("body", {}).get("storage", {}).get("value", ""))
             )
@@ -82,7 +86,10 @@ class ConfluenceConnector:
                         "page_id": page_id,
                         "content_type": "text/markdown",
                     },
-                    reference_time=parse_iso(when),
+                    reference_time=updated_at,
+                    source_revision=revision,
+                    source_updated_at=updated_at,
+                    source_version_id=str(revision) if revision is not None else when,
                 )
             )
             if when and (run_max is None or when > run_max):

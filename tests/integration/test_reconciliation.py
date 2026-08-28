@@ -229,6 +229,27 @@ async def test_new_version_reaffirms_same_fact_and_withdraws_prior_assertion(
     assert (await _fact_states(sessionmaker, group))["scalar:eks"] == "active"
 
 
+async def test_newer_same_artifact_value_replaces_without_equal_authority_dispute(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    group = f"p:b2-{uuid7().hex[:12]}"
+    source, artifact, v1, v2 = await _bootstrap(sessionmaker, group)
+    subject = await _subject(sessionmaker, group)
+    async with _tenant(sessionmaker, group) as s:
+        await _service(s).reconcile(
+            _req(group, artifact, v1, source, 1, [_runs_on(subject, "eks")])
+        )
+    async with _tenant(sessionmaker, group) as s:
+        await _service(s).reconcile(
+            _req(group, artifact, v2, source, 1, [_runs_on(subject, "ecs")])
+        )
+
+    states = await _fact_states(sessionmaker, group)
+    assert states["scalar:ecs"] == "active"
+    assert states["scalar:eks"] == "retracted"
+    assert "disputed" not in states.values()
+
+
 async def test_single_valued_higher_authority_supersedes(
     sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:

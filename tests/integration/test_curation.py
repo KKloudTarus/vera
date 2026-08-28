@@ -443,3 +443,66 @@ async def test_optimistic_transition_rejects_stale_version(
 
     assert good is True
     assert stale is False  # version already advanced
+
+
+async def test_stale_source_revision_does_not_append_or_replace_head(
+    sessionmaker: async_sessionmaker[AsyncSession], tenant: _Fixture
+) -> None:
+    async with SqlAlchemyUnitOfWork(sessionmaker) as uow:
+        await uow.use_tenant(tenant.group)
+        source_id = await _source(uow, tenant, kind="cmdb", tier=3)
+        service = CurationService(uow, StructuredClaimExtractor())
+        current = await service.ingest_artifact(
+            IngestArtifact(
+                source_id=source_id,
+                group_id=tenant.group,
+                external_id="ordered-ci",
+                body="revision two",
+                knowledge_type="fact_triple",
+                metadata=_triple_meta("api", "RUNS_ON", "ecs"),
+                source_revision=2,
+                source_version_id="2",
+            )
+        )
+        stale = await service.ingest_artifact(
+            IngestArtifact(
+                source_id=source_id,
+                group_id=tenant.group,
+                external_id="ordered-ci",
+                body="revision one arrived late",
+                knowledge_type="fact_triple",
+                metadata=_triple_meta("api", "RUNS_ON", "eks"),
+                source_revision=1,
+                source_version_id="1",
+            )
+        )
+        newer = await service.ingest_artifact(
+            IngestArtifact(
+                source_id=source_id,
+                group_id=tenant.group,
+                external_id="ordered-ci",
+                body="revision three",
+                knowledge_type="fact_triple",
+                metadata=_triple_meta("api", "RUNS_ON", "fargate"),
+                source_revision=3,
+                source_version_id="3",
+            )
+        )
+        await uow.commit()
+
+    assert current.value.action == "review_required"
+    assert stale.value.action == "stale"
+    assert stale.value.artifact_version_id == current.value.artifact_version_id
+    assert newer.value.action == "review_required"
+    async with sessionmaker() as s:
+        rows = (
+            await s.execute(
+                text(
+                    "SELECT source_revision, predecessor_version_id FROM artifact_versions "
+                    "ORDER BY version"
+                )
+            )
+        ).all()
+    assert [row.source_revision for row in rows] == [2, 3]
+    assert rows[0].predecessor_version_id is None
+    assert rows[1].predecessor_version_id == UUID(current.value.artifact_version_id)

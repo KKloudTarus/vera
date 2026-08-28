@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from uuid import UUID
 
 from vera.domain.knowledge.models import ClaimType, VerificationStatus
@@ -13,6 +14,11 @@ class ArtifactRef:
     artifact_id: UUID
     version_id: UUID
     version: int
+    source_revision: int | None = None
+    source_updated_at: datetime | None = None
+    source_version_id: str | None = None
+    observed_at: datetime | None = None
+    predecessor_version_id: UUID | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -23,6 +29,10 @@ class ArtifactHead:
     version_id: UUID
     version: int
     content_hash: str
+    source_revision: int | None = None
+    source_updated_at: datetime | None = None
+    source_version_id: str | None = None
+    observed_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
