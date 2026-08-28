@@ -48,15 +48,17 @@ dependencies = [
 # Optional stacks are grouped so the base skeleton installs lean and runnable.
 # Install everything into the active conda env with: pip install -e ".[all]"
 [project.optional-dependencies]
+# Graphiti is pinned to a tested 0.29.x range: VERA depends on lower-level driver primitives
+# (see the Graphiti compatibility contract tests), so a minor bump must be vetted first.
 memory = [
-    "graphiti-core>=0.29",
+    "graphiti-core>=0.29,<0.30",
     "neo4j>=5.26",
 ]
 # Optional FalkorDB graph backend (VERA_MEMORY__GRAPH_BACKEND=falkordb), a full Neo4j
 # alternative: on FalkorDB VERA runs its own hybrid stage-1 search (fulltext + vector RRF)
 # since Graphiti's search returns nothing there. See docs/architecture.md.
 falkordb = [
-    "graphiti-core[falkordb]>=0.29",
+    "graphiti-core[falkordb]>=0.29,<0.30",
 ]
 objectstore = [
     "aioboto3>=13.0",

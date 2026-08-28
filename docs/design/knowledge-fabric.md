@@ -101,6 +101,16 @@ Phases are sequential where they share schema; independent within a phase.
 | 7 | review/conflict/timeline endpoints; DB role split; destructive authz | 1-6 | production role breakage | new roles behind migration; tests under real roles |
 | 8 | data migration, benchmarks, docs, runbooks | 1-7 | data loss | uncertain rows flagged for review; documented rollback |
 
+Delivered so far: Phase 0 (this document, the ADRs, characterization tests), Phase 1 (the
+authoritative model, migration `f3a1b2c4d5e6`), Phase 2 (chunking, ontology-driven
+reconciliation, change events), and Phase 3 (fact projection into Graphiti, the Graphiti
+0.29.x compatibility contract tests, and rebuild verification). Within Phase 3, projecting
+Sagas and building derived communities/summaries is deferred: those depend on Graphiti's
+LLM-driven community APIs, whereas the invariant that matters here, a graph rebuildable from
+Postgres, is delivered and verified by `FactProjectionService` and its drift check. The
+reconciliation and projection services are not yet wired into the live worker; that wiring
+lands with Phase 4 retrieval and the Phase 8 migration.
+
 Cross-cutting risks: (a) Graphiti making itself authoritative is prevented by keeping it a
 projection and adding rebuild-equivalence tests (invariant 10); (b) agents mutating shared
 truth is prevented by keeping `knowledge_propose` proposal-only in personal scope
