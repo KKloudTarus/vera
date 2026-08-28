@@ -7,8 +7,10 @@ and the SNAPSHOT_CREATED / CONTEXT_PACK_CREATED ledger entries.
 
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta
 from uuid import UUID
 
 import pytest
@@ -32,6 +34,7 @@ from vera.application.snapshot import ContextPackService, SnapshotService
 from vera.domain.knowledge import fabric
 from vera.domain.knowledge.fabric import Fact, FactLifecycle, ObjectType
 from vera.shared.ids import uuid7
+from vera.shared.time import utc_now
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 
@@ -66,7 +69,15 @@ async def _setup(sessionmaker: async_sessionmaker[AsyncSession], group: str) -> 
         return entity.id
 
 
-async def _add_fact(sessionmaker, group, subject_id, obj) -> tuple[UUID, str]:
+async def _add_fact(
+    sessionmaker,
+    group,
+    subject_id,
+    obj,
+    *,
+    valid_from: datetime | None = None,
+    valid_to: datetime | None = None,
+) -> tuple[UUID, str]:
     fk = fabric.fact_key(
         scope=group, subject_entity_id=subject_id, predicate="RUNS_ON", object_scalar=obj
     )
@@ -87,6 +98,8 @@ async def _add_fact(sessionmaker, group, subject_id, obj) -> tuple[UUID, str]:
                 lifecycle_state=FactLifecycle.ACTIVE,
                 authority=1.0,
                 confidence=0.9,
+                valid_from=valid_from,
+                valid_to=valid_to,
             )
         )
     return stored.id, fk
@@ -121,11 +134,39 @@ async def test_snapshot_captures_active_facts_and_emits_event(
     await _add_fact(sessionmaker, group, subject, "postgres")
 
     snapshots = SqlAlchemySnapshotRepository(sessionmaker)
-    snap = await SnapshotService(snapshots=snapshots).create(group_id=group)
+    checkpoint = uuid7()
+    async with sessionmaker() as session, session.begin():
+        await session.execute(
+            text(
+                "INSERT INTO ingestion_jobs "
+                "(id, group_id, source_id, dedup_uuid, payload, status) "
+                "VALUES (:id, :g, 'projection', :dedup, CAST(:payload AS jsonb), 'done')"
+            ),
+            {
+                "id": checkpoint,
+                "g": group,
+                "dedup": uuid7(),
+                "payload": json.dumps({"job_kind": "project_facts"}),
+            },
+        )
+    embedding_version = {
+        "provider": "test",
+        "model": "deterministic",
+        "model_version": "2",
+        "dimension": 1024,
+    }
+    snap = await SnapshotService(snapshots=snapshots).create(
+        group_id=group,
+        embedding_version=embedding_version,
+        retrieval_index_version="hybrid-rrf-v1",
+    )
     assert snap.fact_count == 2
-    assert (
-        await SnapshotService(snapshots=snapshots).get(group_id=group, snapshot_id=snap.id)
-    ) is not None
+    assert snap.as_of_valid_time == snap.frozen_at_system_time
+    assert snap.embedding_version == embedding_version
+    assert snap.retrieval_index_version == "hybrid-rrf-v1"
+    assert snap.graph_projection_checkpoint == str(checkpoint)
+    fetched = await SnapshotService(snapshots=snapshots).get(group_id=group, snapshot_id=snap.id)
+    assert fetched == snap
     assert (
         await _count(
             sessionmaker,
@@ -134,6 +175,36 @@ async def test_snapshot_captures_active_facts_and_emits_event(
         )
         == 1
     )
+
+
+async def test_snapshot_excludes_fact_not_valid_at_requested_time(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    group = f"p:sv-{uuid7().hex[:12]}"
+    subject = await _setup(sessionmaker, group)
+    as_of = utc_now()
+    valid_id, _ = await _add_fact(
+        sessionmaker,
+        group,
+        subject,
+        "eks",
+        valid_from=as_of - timedelta(days=1),
+    )
+    future_id, _ = await _add_fact(
+        sessionmaker,
+        group,
+        subject,
+        "ecs",
+        valid_from=as_of + timedelta(days=1),
+    )
+
+    snapshots = SqlAlchemySnapshotRepository(sessionmaker)
+    snap = await SnapshotService(snapshots=snapshots).create(group_id=group, as_of=as_of)
+    fact_ids = await snapshots.fact_ids(group_id=group, snapshot_id=snap.id)
+
+    assert snap.as_of_valid_time == as_of
+    assert str(valid_id) in fact_ids
+    assert str(future_id) not in fact_ids
 
 
 async def test_snapshot_query_is_reproducible_after_supersession(
@@ -205,7 +276,6 @@ async def test_context_pack_over_snapshot_excludes_later_ingested_passages(
     from vera.adapters.persistence.models.knowledge import ArtifactRow, ArtifactVersionRow
     from vera.adapters.persistence.repositories.fabric import SqlAlchemyChunkRepository
     from vera.domain.knowledge.fabric import Chunk
-    from vera.shared.time import utc_now
 
     group = f"p:sp-{uuid7().hex[:12]}"
     await _setup(sessionmaker, group)

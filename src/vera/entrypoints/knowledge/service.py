@@ -268,13 +268,33 @@ class KnowledgeService:
     ) -> JsonDict:
         scope = await self._resolve(principal_id)
         group = self._target_group(scope, project)
+        embedding_version: JsonDict = {}
+        retrieval_index_version = "fts-v1"
+        if self._c.settings.memory.vector_search_enabled and self._c.embedder is not None:
+            memory = self._c.settings.memory
+            embedding_version = {
+                "provider": memory.embedder,
+                "model": memory.embedding_model,
+                "model_version": memory.embedding_model_version,
+                "dimension": memory.embedding_dim,
+            }
+            retrieval_index_version = "hybrid-rrf-v1"
         snap = await SnapshotService(snapshots=self._snapshots).create(
-            group_id=group, as_of=as_of, actor=str(principal_id)
+            group_id=group,
+            as_of=as_of,
+            embedding_version=embedding_version,
+            retrieval_index_version=retrieval_index_version,
+            actor=str(principal_id),
         )
         return {
             "snapshot_id": snap.id,
             "fact_count": snap.fact_count,
             "created_at": snap.created_at.isoformat(),
+            "as_of_valid_time": snap.as_of_valid_time.isoformat(),
+            "frozen_at_system_time": snap.frozen_at_system_time.isoformat(),
+            "embedding_version": snap.embedding_version,
+            "retrieval_index_version": snap.retrieval_index_version,
+            "graph_projection_checkpoint": snap.graph_projection_checkpoint,
             "policy_version": snap.policy_version,
         }
 
@@ -288,6 +308,11 @@ class KnowledgeService:
                     "group_id": snap.group_id,
                     "fact_count": snap.fact_count,
                     "created_at": snap.created_at.isoformat(),
+                    "as_of_valid_time": snap.as_of_valid_time.isoformat(),
+                    "frozen_at_system_time": snap.frozen_at_system_time.isoformat(),
+                    "embedding_version": snap.embedding_version,
+                    "retrieval_index_version": snap.retrieval_index_version,
+                    "graph_projection_checkpoint": snap.graph_projection_checkpoint,
                     "policy_version": snap.policy_version,
                     "source_boundaries": snap.source_boundaries,
                 }

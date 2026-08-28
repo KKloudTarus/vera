@@ -25,12 +25,15 @@ class Snapshot:
     id: str
     group_id: str
     created_at: datetime
-    as_of_system_time: datetime
+    frozen_at_system_time: datetime
+    as_of_valid_time: datetime
     policy_version: str
     fact_count: int
-    as_of_valid_time: datetime | None = None
     ontology_version_id: str | None = None
     source_boundaries: JsonDict = field(default_factory=empty_json)
+    embedding_version: JsonDict = field(default_factory=empty_json)
+    retrieval_index_version: str = "fts-v1"
+    graph_projection_checkpoint: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,6 +59,8 @@ class SnapshotRepository(Protocol):
         policy_version: str,
         as_of: datetime | None = None,
         ontology_version_id: str | None = None,
+        embedding_version: JsonDict | None = None,
+        retrieval_index_version: str = "fts-v1",
         actor: str | None = None,
     ) -> Snapshot:
         """Freeze the active fact set and record the snapshot; append SNAPSHOT_CREATED."""

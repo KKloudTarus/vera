@@ -60,6 +60,8 @@ class SnapshotService:
         group_id: str,
         as_of: datetime | None = None,
         ontology_version_id: str | None = None,
+        embedding_version: JsonDict | None = None,
+        retrieval_index_version: str = "fts-v1",
         actor: str | None = None,
     ) -> Snapshot:
         return await self._snapshots.create(
@@ -67,6 +69,8 @@ class SnapshotService:
             policy_version=_POLICY_VERSION,
             as_of=as_of,
             ontology_version_id=ontology_version_id,
+            embedding_version=embedding_version,
+            retrieval_index_version=retrieval_index_version,
             actor=actor,
         )
 
@@ -107,7 +111,7 @@ class ContextPackService:
                 # Freeze passages to what existed when the snapshot was taken. System time (the
                 # snapshot's transaction time) is the right cutoff: chunks ingested later did not
                 # exist then, so excluding them reproduces the passages retrieval saw at snapshot.
-                passage_cutoff = snapshot.as_of_system_time
+                passage_cutoff = snapshot.frozen_at_system_time
         assembled = await self._assembler.assemble(
             query=query,
             group_id=group_id,

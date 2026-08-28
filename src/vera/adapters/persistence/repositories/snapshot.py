@@ -20,8 +20,10 @@ from vera.shared.types import JsonDict
 
 _INSERT_SNAPSHOT = text(
     "INSERT INTO knowledge_snapshots "
-    "(group_id, policy_version, as_of_valid_time, ontology_version_id) "
-    "VALUES (:g, :pv, :vt, :ov) RETURNING id, created_at, as_of_system_time"
+    "(group_id, policy_version, as_of_valid_time, ontology_version_id, "
+    "embedding_version, retrieval_index_version, graph_projection_checkpoint) "
+    "VALUES (:g, :pv, COALESCE(:vt, now()), :ov, CAST(:ev AS jsonb), :iv, :gc) "
+    "RETURNING id, created_at, frozen_at_system_time, as_of_valid_time"
 )
 _CAPTURE_ACTIVE = text(
     "INSERT INTO snapshot_facts (snapshot_id, fact_id, group_id) "
@@ -45,13 +47,18 @@ _SOURCE_BOUNDARIES = text(
     "  ORDER BY a.knowledge_source_id, a.recorded_at DESC"
     ") t"
 )
+_GRAPH_CHECKPOINT = text(
+    "SELECT id FROM ingestion_jobs WHERE group_id = :g AND status = 'done' "
+    "AND payload->>'job_kind' = 'project_facts' ORDER BY created_at DESC, id DESC LIMIT 1"
+)
 _SET_META = text(
     "UPDATE knowledge_snapshots SET fact_count = :n, source_boundaries = CAST(:sb AS jsonb) "
     "WHERE id = :sid"
 )
 _GET_SNAPSHOT = text(
-    "SELECT id, group_id, created_at, as_of_system_time, as_of_valid_time, policy_version, "
-    "fact_count, ontology_version_id, source_boundaries "
+    "SELECT id, group_id, created_at, frozen_at_system_time, as_of_valid_time, policy_version, "
+    "fact_count, ontology_version_id, source_boundaries, embedding_version, "
+    "retrieval_index_version, graph_projection_checkpoint "
     "FROM knowledge_snapshots WHERE id = :sid AND group_id = :g"
 )
 _SNAPSHOT_FACT_IDS = text(
@@ -87,18 +94,32 @@ class SqlAlchemySnapshotRepository:
         policy_version: str,
         as_of: datetime | None = None,
         ontology_version_id: str | None = None,
+        embedding_version: JsonDict | None = None,
+        retrieval_index_version: str = "fts-v1",
         actor: str | None = None,
     ) -> Snapshot:
         async with self._session_factory() as session, session.begin():
+            graph_checkpoint = await session.scalar(_GRAPH_CHECKPOINT, {"g": group_id})
             row = (
                 await session.execute(
                     _INSERT_SNAPSHOT,
-                    {"g": group_id, "pv": policy_version, "vt": as_of, "ov": ontology_version_id},
+                    {
+                        "g": group_id,
+                        "pv": policy_version,
+                        "vt": as_of,
+                        "ov": ontology_version_id,
+                        "ev": json.dumps(embedding_version or {}),
+                        "iv": retrieval_index_version,
+                        "gc": graph_checkpoint,
+                    },
                 )
             ).one()
             snapshot_id = row.id
             capture = _CAPTURE_AS_OF if as_of is not None else _CAPTURE_ACTIVE
-            await session.execute(capture, {"sid": snapshot_id, "g": group_id, "vt": as_of})
+            await session.execute(
+                capture,
+                {"sid": snapshot_id, "g": group_id, "vt": row.as_of_valid_time},
+            )
             count = await session.scalar(_COUNT_FACTS, {"sid": snapshot_id}) or 0
             boundaries: JsonDict = cast(
                 "JsonDict", await session.scalar(_SOURCE_BOUNDARIES, {"g": group_id}) or {}
@@ -120,12 +141,15 @@ class SqlAlchemySnapshotRepository:
                 id=str(snapshot_id),
                 group_id=group_id,
                 created_at=row.created_at,
-                as_of_system_time=row.as_of_system_time,
-                as_of_valid_time=as_of,
+                frozen_at_system_time=row.frozen_at_system_time,
+                as_of_valid_time=row.as_of_valid_time,
                 policy_version=policy_version,
                 fact_count=count,
                 ontology_version_id=ontology_version_id,
                 source_boundaries=dict(boundaries),
+                embedding_version=dict(embedding_version or {}),
+                retrieval_index_version=retrieval_index_version,
+                graph_projection_checkpoint=str(graph_checkpoint) if graph_checkpoint else None,
             )
 
     async def get(self, *, group_id: str, snapshot_id: str) -> Snapshot | None:
@@ -141,7 +165,7 @@ class SqlAlchemySnapshotRepository:
             id=str(row["id"]),
             group_id=row["group_id"],
             created_at=row["created_at"],
-            as_of_system_time=row["as_of_system_time"],
+            frozen_at_system_time=row["frozen_at_system_time"],
             as_of_valid_time=row["as_of_valid_time"],
             policy_version=row["policy_version"],
             fact_count=row["fact_count"],
@@ -149,6 +173,11 @@ class SqlAlchemySnapshotRepository:
             if row["ontology_version_id"]
             else None,
             source_boundaries=dict(row["source_boundaries"]),
+            embedding_version=dict(row["embedding_version"]),
+            retrieval_index_version=row["retrieval_index_version"],
+            graph_projection_checkpoint=str(row["graph_projection_checkpoint"])
+            if row["graph_projection_checkpoint"]
+            else None,
         )
 
     async def fact_ids(self, *, group_id: str, snapshot_id: str) -> set[str]:
