@@ -15,6 +15,13 @@ guess, no tenancy isolation, and no way to correct or forget a fact later. VERA 
 verification and trust layer on top of a temporal knowledge graph, so a retrieved fact
 carries where it came from, how trusted it is, when it was true, and who may see it.
 
+## Documentation
+
+Step-by-step guides live in [`docs/`](docs/README.md): [getting started](docs/getting-started.md),
+[loading knowledge](docs/loading-knowledge.md) (repositories, Markdown, Confluence),
+[using the API](docs/usage.md), [connecting an AI agent over MCP](docs/mcp.md), and
+[deployment](docs/deployment.md). This README covers the architecture and methodology.
+
 ## Contents
 
 - [Architecture](#architecture)
@@ -327,6 +334,7 @@ in ways a single-fact search misses.
 Operational commands, each a module under `vera.entrypoints`:
 
 ```bash
+python -m vera.entrypoints.create_source ...               # create a knowledge source for a connector to ingest into
 python -m vera.entrypoints.reprocess <group_id>            # rebuild a group's graph from Postgres, then verify
 python -m vera.entrypoints.backfill_embeddings <group_id>  # embed canonical names for pre-existing entities
 python -m vera.entrypoints.calibrate [--apply] [groups...] # calibrate rerank weights from feedback
