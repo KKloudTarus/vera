@@ -82,6 +82,20 @@ async def test_ingest_then_search_returns_the_fact(
     assert any("paymentapi" in h.fact for h in hits)
 
 
+async def test_vector_half_returns_when_fulltext_cannot_match(
+    falkordb_engine: GraphitiMemoryEngine,
+) -> None:
+    # A query whose words are absent from the fact cannot match via fulltext; a hit here
+    # proves the vector half of the hybrid search is wired (edge fact_embedding + cosine).
+    group = f"p:{uuid7().hex[:12]}"
+    await _ingest(falkordb_engine, group=group, obj="prod-eks")
+
+    hits = await falkordb_engine.search(
+        GraphQuery(text="kubernetes deployment location", group_ids=(GroupId(group),), limit=10)
+    )
+    assert any("paymentapi" in h.fact for h in hits)
+
+
 async def test_as_of_past_excludes_the_fact(
     falkordb_engine: GraphitiMemoryEngine,
 ) -> None:

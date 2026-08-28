@@ -49,13 +49,15 @@ the paid Enterprise edition, whereas FalkorDB (a Redis-module graph) avoids that
 usual "need Enterprise for backups" concern is moot here because a lost graph is rebuilt from
 Postgres and S3.
 
-Both backends run the full pipeline end to end: ingestion, multi-hop traversal, retraction,
-bi-temporal `as_of`, supersession, and search. One difference: Graphiti's own hybrid search
-returns nothing on FalkorDB (it does not populate edge vectors there), so on FalkorDB VERA
-runs its own stage-1 edge search over FalkorDB's fulltext index, then applies the same
-stage-2 blend and stage-3 reranker. Stage 1 on FalkorDB is therefore lexical rather than
-vector-hybrid; the semantic lift comes from the reranker. Neo4j uses Graphiti's vector +
-fulltext RRF for stage 1. Choose the backend by your cost, scale, and license constraints.
+Both backends run the full pipeline end to end with the same behavior: ingestion, multi-hop
+traversal, retraction, bi-temporal `as_of`, supersession, and hybrid search. Graphiti's own
+search orchestration returns nothing on FalkorDB, so on that backend VERA runs stage 1
+itself: a fulltext half over FalkorDB's edge fulltext index and a vector half over the edge
+`fact_embedding` (which ingestion does populate on FalkorDB) via `vec.cosineDistance`, fused
+with the same reciprocal rank fusion Neo4j uses, and carrying the same bi-temporal filter.
+So stage 1 is vector + fulltext on both backends; stage 2 (blend) and stage 3 (reranker)
+are identical. Neo4j uses Graphiti's own vector + fulltext RRF. Choose the backend by your
+cost, scale, and license constraints, not by capability.
 
 ### Tenancy
 

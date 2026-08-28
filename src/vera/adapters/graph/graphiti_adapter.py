@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import re
 from collections.abc import Sequence
+from dataclasses import replace
 from datetime import datetime
 from typing import Any, LiteralString, cast
 
@@ -46,9 +47,11 @@ _EPISODE_TYPES = {
     "text": EpisodeType.text,
 }
 
-# FalkorDB edge fulltext search with the same bi-temporal filter Neo4j uses. ISO-8601
-# timestamps compare correctly as strings because they are all UTC (+00:00).
-_FALKOR_EDGE_SEARCH: LiteralString = (
+# FalkorDB edge search, two halves fused with RRF to match Neo4j's hybrid stage 1. Both
+# apply the same bi-temporal filter; ISO-8601 timestamps compare correctly as strings
+# (all UTC, +00:00). Graphiti's own hybrid search returns nothing on FalkorDB, but its edge
+# fulltext index and edge fact_embedding (populated by add_triplet) both work directly.
+_FALKOR_EDGE_FULLTEXT: LiteralString = (
     "CALL db.idx.fulltext.queryRelationships('RELATES_TO', $q) YIELD relationship, score "
     "WITH relationship AS e, score "
     "WHERE e.group_id = $gid AND (e.valid_at IS NULL OR e.valid_at <= $asof) "
@@ -56,8 +59,42 @@ _FALKOR_EDGE_SEARCH: LiteralString = (
     "RETURN e.fact AS fact, e.uuid AS uuid, e.valid_at AS valid_at, "
     "e.invalid_at AS invalid_at, score ORDER BY score DESC LIMIT $limit"
 )
+_FALKOR_EDGE_VECTOR: LiteralString = (
+    "MATCH (n:Entity)-[e:RELATES_TO {group_id: $gid}]->(m:Entity) "
+    "WHERE e.fact_embedding IS NOT NULL AND (e.valid_at IS NULL OR e.valid_at <= $asof) "
+    "AND (e.invalid_at IS NULL OR e.invalid_at > $asof) "
+    "WITH e, (2 - vec.cosineDistance(e.fact_embedding, vecf32($v)))/2 AS score "
+    "RETURN e.fact AS fact, e.uuid AS uuid, e.valid_at AS valid_at, "
+    "e.invalid_at AS invalid_at, score ORDER BY score DESC LIMIT $limit"
+)
 # Alphanumeric terms only, so a natural-language query is a safe RediSearch fulltext input.
 _FULLTEXT_TOKEN = re.compile(r"[A-Za-z0-9]+")
+_RRF_K = 1  # reciprocal-rank-fusion constant, matching the Neo4j RRF recipe
+
+
+def _rrf_fuse(result_lists: list[list[Any]], limit: int) -> list[GraphHit]:
+    """Fuse ranked edge-row lists with reciprocal rank fusion (score = sum 1/(k+rank))."""
+    fused: dict[str, tuple[float, GraphHit]] = {}
+    for rows in result_lists:
+        for rank, row in enumerate(rows, start=1):
+            uuid = row["uuid"]
+            contribution = 1.0 / (_RRF_K + rank)
+            if uuid in fused:
+                accumulated, hit = fused[uuid]
+                fused[uuid] = (accumulated + contribution, hit)
+            else:
+                fused[uuid] = (
+                    contribution,
+                    GraphHit(
+                        fact=row["fact"],
+                        score=0.0,
+                        edge_uuid=uuid,
+                        valid_at=_parse_iso(row.get("valid_at")),
+                        invalid_at=_parse_iso(row.get("invalid_at")),
+                    ),
+                )
+    ranked = sorted(fused.values(), key=lambda pair: pair[0], reverse=True)
+    return [replace(hit, score=round(score, 6)) for score, hit in ranked[:limit]]
 
 
 def _parse_iso(value: object) -> datetime | None:
@@ -288,36 +325,46 @@ class GraphitiMemoryEngine:
     async def _falkordb_search(
         self, query: GraphQuery, group_id: GroupId, as_of: datetime
     ) -> list[GraphHit]:
-        # Graphiti's hybrid search does not return results on FalkorDB (its edge search
-        # orchestration and edge vector population differ from Neo4j). FalkorDB's edge
-        # fulltext index does work, so run it directly with the same bi-temporal filter as
-        # Neo4j. ISO-8601 timestamps compare correctly as strings (all are UTC, +00:00).
-        # Join terms with the RediSearch OR operator so a natural-language query matches any
-        # term (its default is AND, which a full sentence rarely satisfies). VERA's stage-2
-        # blend and stage-3 reranker then order the candidates.
-        terms = "|".join(_FULLTEXT_TOKEN.findall(query.text))
-        if not terms:
-            return []
+        # Graphiti's hybrid search returns nothing on FalkorDB, so VERA runs the two halves
+        # itself and fuses them with RRF, the same shape as Neo4j's stage 1: a fulltext half
+        # over the edge fulltext index and a vector half over the edge fact_embedding (which
+        # add_triplet does populate on FalkorDB). Both apply the bi-temporal filter; ISO-8601
+        # timestamps compare correctly as strings (all UTC, +00:00).
         gid = _graphiti_group(str(group_id))
+        asof = as_of.isoformat()
+        result_lists: list[list[Any]] = []
         with span("graph.search_group.falkordb"):
-            result = cast(
-                "Any",
-                await self._client.driver.execute_query(  # pyright: ignore[reportUnknownMemberType]
-                    _FALKOR_EDGE_SEARCH, q=terms, gid=gid, asof=as_of.isoformat(), limit=query.limit
-                ),
-            )
-        hits: list[GraphHit] = []
-        for row in _records(result):
-            hits.append(
-                GraphHit(
-                    fact=row["fact"],
-                    score=float(row["score"]),
-                    edge_uuid=row["uuid"],
-                    valid_at=_parse_iso(row.get("valid_at")),
-                    invalid_at=_parse_iso(row.get("invalid_at")),
+            # Fulltext half. Terms are OR-joined so a natural-language query matches any term
+            # (RediSearch defaults to AND, which a full sentence rarely satisfies).
+            terms = "|".join(_FULLTEXT_TOKEN.findall(query.text))
+            if terms:
+                ft = cast(
+                    "Any",
+                    await self._client.driver.execute_query(  # pyright: ignore[reportUnknownMemberType]
+                        _FALKOR_EDGE_FULLTEXT, q=terms, gid=gid, asof=asof, limit=query.limit
+                    ),
                 )
-            )
-        return hits
+                result_lists.append(_records(ft))
+            # Vector half, embedding the query with the same embedder used at ingestion.
+            vector = await self._embed_query(query.text)
+            if vector is not None:
+                vec = cast(
+                    "Any",
+                    await self._client.driver.execute_query(  # pyright: ignore[reportUnknownMemberType]
+                        _FALKOR_EDGE_VECTOR, v=vector, gid=gid, asof=asof, limit=query.limit
+                    ),
+                )
+                result_lists.append(_records(vec))
+        return _rrf_fuse(result_lists, query.limit)
+
+    async def _embed_query(self, text: str) -> list[float] | None:
+        embedder = getattr(self._client, "embedder", None)
+        if embedder is None:
+            return None
+        try:
+            return await embedder.create(text)
+        except Exception:  # the vector half is optional; degrade to fulltext-only on failure
+            return None
 
     async def neighbors(
         self, *, group_ids: Sequence[GroupId], center: str, depth: int, limit: int
