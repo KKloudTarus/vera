@@ -136,6 +136,41 @@ def _records(result: Any) -> list[Any]:
     return list(records)
 
 
+def _label_propagation_capped(
+    projection: dict[str, list[tuple[str, int]]], *, max_iterations: int = 50
+) -> list[list[str]]:
+    """Label-propagation clustering with an iteration cap. Graphiti's own version loops until
+    convergence with no bound, and oscillates forever on symmetric graphs; the cap makes it
+    terminate (taking the labeling reached at the cap), so community construction is reliable.
+    """
+    community_map = {uuid: i for i, uuid in enumerate(projection)}
+    for _ in range(max_iterations):
+        changed = False
+        next_map: dict[str, int] = {}
+        for uuid, neighbors in projection.items():
+            tally: dict[int, int] = {}
+            for neighbor_uuid, weight in neighbors:
+                label = community_map.get(neighbor_uuid, community_map[uuid])
+                tally[label] = tally.get(label, 0) + weight
+            ranked = sorted(((count, label) for label, count in tally.items()), reverse=True)
+            top_count, top_label = ranked[0] if ranked else (0, -1)
+            chosen = (
+                top_label
+                if top_label != -1 and top_count > 1
+                else max(top_label, community_map[uuid])
+            )
+            next_map[uuid] = chosen
+            if chosen != community_map[uuid]:
+                changed = True
+        community_map = next_map
+        if not changed:
+            break
+    clusters: dict[int, list[str]] = {}
+    for uuid, label in community_map.items():
+        clusters.setdefault(label, []).append(uuid)
+    return list(clusters.values())
+
+
 def _graphiti_group(group_id: str) -> str:
     # Graphiti allows only [A-Za-z0-9_-]; VERA scopes use a colon (o:, w:, p:, u:).
     # The mapping is deterministic, so ingest and search stay consistent.
@@ -438,14 +473,75 @@ class GraphitiMemoryEngine:
         # them, so this is safe to run repeatedly.
         gid = _graphiti_group(str(group_id))
         # Entities ingested via add_triplet persist only uuid/name/group_id, but the community
-        # clustering reads full EntityNode records (created_at and summary are required). Backfill
-        # those fields (idempotent) so clustering can consume the structured-triple graph.
+        # clustering reads full EntityNode records (created_at and summary are required).
+        # Backfill them via coalesce (unconditional: FalkorDB treats a missing property as
+        # distinct from NULL, so a WHERE ... IS NULL guard would skip them).
         await self._client.driver.execute_query(  # pyright: ignore[reportUnknownMemberType]
             "MATCH (n:Entity {group_id: $gid}) "
-            "WHERE n.created_at IS NULL OR n.summary IS NULL "
             "SET n.created_at = coalesce(n.created_at, $now), n.summary = coalesce(n.summary, '')",
             gid=gid,
             now=utc_now().isoformat(),
         )
+        if self._falkordb:
+            # Graphiti's generic clustering issues a per-node neighbor query that returns no
+            # rows on FalkorDB, so its native build yields zero communities. Cluster here with a
+            # single edge query FalkorDB handles, then reuse Graphiti's LLM community builder.
+            return await self._build_communities_falkordb(gid)
         nodes, _edges = await self._client.build_communities(group_ids=[gid])
         return len(nodes)
+
+    async def _build_communities_falkordb(self, gid: str) -> int:
+        from graphiti_core.nodes import EntityNode
+        from graphiti_core.utils.maintenance.community_operations import (
+            build_community,
+            remove_communities,
+        )
+
+        await remove_communities(self._client.driver, group_ids=[gid])
+        # add_triplet entities carry no summary, so the LLM has nothing to synthesize. Seed each
+        # entity's summary from its own incident edge facts, so the community summary is grounded.
+        fact_rows = cast(
+            "Any",
+            await self._client.driver.execute_query(  # pyright: ignore[reportUnknownMemberType]
+                "MATCH (n:Entity {group_id: $gid}) "
+                "OPTIONAL MATCH (n)-[e:RELATES_TO {group_id: $gid}]-() "
+                "RETURN n.uuid AS uuid, n.name AS name, collect(DISTINCT e.fact) AS facts",
+                gid=gid,
+            ),
+        )
+        for row in cast(
+            "list[dict[str, Any]]",
+            fact_rows[0] if isinstance(fact_rows, tuple) and fact_rows else [],
+        ):
+            facts = [str(f) for f in cast("list[Any]", row["facts"] or []) if f]
+            name = str(row["name"])
+            summary = f"{name}. {'; '.join(facts)}"[:800] if facts else name
+            await self._client.driver.execute_query(  # pyright: ignore[reportUnknownMemberType]
+                "MATCH (n:Entity {uuid: $u}) SET n.summary = $s", u=str(row["uuid"]), s=summary
+            )
+        result = cast(
+            "Any",
+            await self._client.driver.execute_query(  # pyright: ignore[reportUnknownMemberType]
+                "MATCH (n:Entity {group_id: $gid})-[e:RELATES_TO]-(m:Entity {group_id: $gid}) "
+                "RETURN n.uuid AS a, m.uuid AS b, count(e) AS c",
+                gid=gid,
+            ),
+        )
+        rows = cast(
+            "list[dict[str, Any]]", result[0] if isinstance(result, tuple) and result else []
+        )
+        projection: dict[str, list[tuple[str, int]]] = {}
+        for row in rows:
+            projection.setdefault(str(row["a"]), []).append((str(row["b"]), int(row["c"])))
+        built = 0
+        for cluster in _label_propagation_capped(projection):
+            nodes = await EntityNode.get_by_uuids(self._client.driver, cluster)
+            if not nodes:
+                continue
+            community, edges = await build_community(self._client.llm_client, nodes)
+            await community.generate_name_embedding(self._client.embedder)
+            await community.save(self._client.driver)
+            for edge in edges:
+                await edge.save(self._client.driver)
+            built += 1
+        return built
