@@ -28,6 +28,7 @@ from uuid import UUID
 from vera.domain.curation.trust import TrustAction, action_for_tier
 from vera.domain.knowledge.fabric import (
     Assertion,
+    AssertionState,
     Evidence,
     Fact,
     FactLifecycle,
@@ -71,6 +72,9 @@ class ResolvedProposition:
     excerpt: str | None = None
     citation_uri: str | None = None
     evidence_content_hash: str | None = None
+    quote_start: int | None = None
+    quote_end: int | None = None
+    needs_review: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,13 +83,12 @@ class ArtifactReconciliation:
     source_authority: float
     trust_tier: int
     propositions: list[ResolvedProposition]
-    # Optional: a live episode with no materialized artifact version leaves this None and
-    # dedups its assertions by extraction_run_id instead of the (fact, version) key.
     artifact_version_id: UUID | None = None
     knowledge_source_id: UUID | None = None
     artifact_id: UUID | None = None
     ontology_version_id: UUID | None = None
-    extraction_run_id: str | None = None
+    extraction_run_id: UUID | None = None
+    run_key: str | None = None
     actor: str | None = None
     trace_id: str | None = None
 
@@ -156,7 +159,7 @@ class ReconciliationService:
         report: ReconciliationReport,
     ) -> Fact:
         policy = policy_for(prop.predicate)
-        auto = action_for_tier(req.trust_tier) is TrustAction.AUTO_PUBLISH
+        auto = action_for_tier(req.trust_tier) is TrustAction.AUTO_PUBLISH and not prop.needs_review
         sk = _slot_key(req.group_id, prop)
         lifecycle = FactLifecycle.ACTIVE if auto else FactLifecycle.PROPOSED
 
@@ -274,6 +277,8 @@ class ReconciliationService:
         if target is None:
             return  # nothing to refute; a refutation does not fabricate the fact it denies
         await self._attach_assertion(req, target, prop, Polarity.REFUTES, now, report)
+        if prop.needs_review:
+            return
         if req.source_authority >= target.authority:
             await self._facts.set_lifecycle(
                 group_id=req.group_id, fact_id=str(target.id), state=FactLifecycle.DISPUTED
@@ -319,6 +324,8 @@ class ReconciliationService:
                 observed_at=now,
                 recorded_at=now,
                 extraction_run_id=req.extraction_run_id,
+                run_key=req.run_key,
+                state=(AssertionState.NEEDS_REVIEW if prop.needs_review else AssertionState.ACTIVE),
             )
         )
         if prior:
@@ -349,8 +356,14 @@ class ReconciliationService:
         now: datetime,
         report: ReconciliationReport,
     ) -> None:
-        content = prop.excerpt or (str(prop.chunk_id) if prop.chunk_id else None)
+        if prop.needs_review:
+            return
+        content = prop.excerpt
         if content is None:
+            return
+        if prop.chunk_id is not None and (
+            prop.quote_start is None or prop.quote_end is None or prop.evidence_content_hash is None
+        ):
             return
         content_hash = prop.evidence_content_hash or hashlib.sha256(content.encode()).hexdigest()
         before = await self._evidence.for_assertion(
@@ -366,6 +379,11 @@ class ReconciliationService:
                 artifact_version_id=req.artifact_version_id,
                 excerpt=prop.excerpt,
                 citation_uri=prop.citation_uri,
+                quote_start=prop.quote_start,
+                quote_end=prop.quote_end,
+                quote_hash=prop.evidence_content_hash,
+                citation_override=prop.citation_uri,
+                extraction_run_id=req.extraction_run_id,
             )
         )
         if all(e.id != added.id for e in before):

@@ -43,6 +43,7 @@ class FactLifecycle(StrEnum):
 
 class AssertionState(StrEnum):
     ACTIVE = "active"
+    NEEDS_REVIEW = "needs_review"
     WITHDRAWN = "withdrawn"
 
 
@@ -179,6 +180,18 @@ class Chunk:
 
 
 @dataclass(frozen=True, slots=True)
+class ExtractionRun:
+    id: UUID
+    group_id: str
+    artifact_version_id: UUID
+    model: str
+    provider: str
+    prompt_version: str
+    pipeline_version: JsonDict
+    started_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
 class Fact:
     id: UUID
     group_id: str
@@ -217,7 +230,8 @@ class Assertion:
     valid_to: datetime | None = None
     observed_at: datetime | None = None
     recorded_at: datetime | None = None
-    extraction_run_id: str | None = None
+    extraction_run_id: UUID | None = None
+    run_key: str | None = None
     state: AssertionState = AssertionState.ACTIVE
 
 
@@ -232,6 +246,11 @@ class Evidence:
     structured_record: JsonDict | None = None
     excerpt: str | None = None
     citation_uri: str | None = None
+    quote_start: int | None = None
+    quote_end: int | None = None
+    quote_hash: str | None = None
+    citation_override: str | None = None
+    extraction_run_id: UUID | None = None
     source_coordinates: JsonDict = field(default_factory=empty_json)
     confidentiality: str = "internal"
 

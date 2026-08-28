@@ -176,12 +176,20 @@ async def test_knowledge_contracts_end_to_end(
     assert proposed.status_code == 200
     assert proposed.json()["lifecycle"] == "proposed"
     assert proposed.json()["group_id"] == alice_p.personal_group_id
+    replay = await app_client.post(
+        "/v2/knowledge/propose",
+        json={"subject": "newservice", "predicate": "RUNS_ON", "object": "fargate"},
+        headers=alice,
+    )
+    assert replay.status_code == 200
     async with _tenant(sessionmaker, alice_p.personal_group_id) as s:
         active = await s.scalar(text("SELECT count(*) FROM facts WHERE lifecycle_state='active'"))
         proposed_count = await s.scalar(
             text("SELECT count(*) FROM facts WHERE lifecycle_state='proposed'")
         )
+        assertion_count = await s.scalar(text("SELECT count(*) FROM assertions"))
     assert active == 0 and proposed_count == 1  # never published as shared truth
+    assert assertion_count == 1  # replay reaffirms the proposal instead of duplicating it
 
 
 async def test_scope_is_resolved_server_side(

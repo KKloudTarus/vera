@@ -10,7 +10,8 @@ sends it to the graph. All writes share the caller's Unit of Work transaction.
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass
+import unicodedata
+from dataclasses import dataclass, replace
 from uuid import UUID
 
 from vera.application.curation.chunking import chunk_artifact
@@ -24,13 +25,14 @@ from vera.domain.curation.trust import (
     action_for_tier,
     authority_for_tier,
 )
+from vera.domain.knowledge.fabric import Chunk, ExtractionRun
 from vera.domain.knowledge.models import ReviewDecision, VerificationStatus
 from vera.domain.ontology import CURRENT_PIPELINE_VERSIONS
 from vera.domain.ports.curation import ClaimExtractor, ContradictionJudge, ExtractedClaim
 from vera.domain.ports.object_store import ObjectStore
 from vera.domain.ports.unit_of_work import UnitOfWork
 from vera.shared.errors import Conflict, DomainError, Err, NotFound, Ok, PolicyRejected, Result
-from vera.shared.ids import deterministic_id
+from vera.shared.ids import deterministic_id, uuid7
 from vera.shared.time import utc_now
 from vera.shared.types import JsonDict
 
@@ -66,14 +68,63 @@ def _payload_for(
     statement: str,
     *,
     supersede_objects: list[str] | None = None,
+    source_quote: str | None = None,
+    quote_start: int | None = None,
+    quote_end: int | None = None,
 ) -> JsonDict:
     if subject and predicate and obj:
         triple: JsonDict = {"subject": subject, "predicate": predicate, "object": obj}
         if supersede_objects:
             # The worker closes the prior edges' valid time for these specific objects.
             triple["supersede_objects"] = supersede_objects
+        if source_quote is not None and quote_start is not None and quote_end is not None:
+            triple.update(
+                source_quote=source_quote,
+                quote_start=quote_start,
+                quote_end=quote_end,
+            )
         return {"triples": [triple]}
     return {"body": statement}
+
+
+def _exact_quote_hash(claim: ExtractedClaim, chunk: Chunk) -> str | None:
+    start, end, quote = claim.quote_start, claim.quote_end, claim.source_quote
+    if start is None or end is None or not quote or start < 0 or end <= start:
+        return None
+    if end > len(chunk.text) or chunk.text[start:end] != quote:
+        return None
+    return hashlib.sha256(quote.encode("utf-8")).hexdigest()
+
+
+def _align_document_quote(
+    claim: ExtractedClaim, chunks: list[Chunk], body: str
+) -> tuple[ExtractedClaim, Chunk | None]:
+    start, end, quote = claim.quote_start, claim.quote_end, claim.source_quote
+    if (
+        start is None
+        or end is None
+        or not quote
+        or start < 0
+        or end <= start
+        or end > len(body)
+        or body[start:end] != quote
+    ):
+        return claim, None
+    for chunk in chunks:
+        chunk_start = body.find(chunk.text)
+        while chunk_start >= 0:
+            chunk_end = chunk_start + len(chunk.text)
+            if chunk_start <= start and end <= chunk_end:
+                return (
+                    replace(
+                        claim,
+                        quote_start=start - chunk_start,
+                        quote_end=end - chunk_start,
+                    ),
+                    chunk,
+                )
+            chunk_start = body.find(chunk.text, chunk_start + 1)
+    return claim, None
 
 
 class CurationService:
@@ -154,41 +205,80 @@ class CurationService:
         # passages and free-text extraction never sends an unbounded document to the LLM: each
         # chunk is bounded, and extraction runs per chunk. Structured triples come from the
         # metadata, so they are extracted once and need no chunk loop.
+        normalized_body = unicodedata.normalize("NFC", cmd.body)
         content_type = str(metadata.get("content_type") or "text/markdown")
         chunks = (
             chunk_artifact(
-                text=cmd.body,
+                text=normalized_body,
                 content_type=content_type,
                 artifact_version_id=ref.version_id,
                 group_id=cmd.group_id,
             )
-            if cmd.body.strip()
+            if normalized_body.strip()
             else []
         )
-        for chunk in chunks:
-            await uow.chunks.upsert(chunk)
+        chunks = [await uow.chunks.upsert(chunk) for chunk in chunks]
+        extraction_run = await uow.extraction_runs.add(
+            ExtractionRun(
+                id=uuid7(),
+                group_id=cmd.group_id,
+                artifact_version_id=ref.version_id,
+                model=self._extractor.model,
+                provider=self._extractor.provider,
+                prompt_version=CURRENT_PIPELINE_VERSIONS.prompt,
+                pipeline_version=CURRENT_PIPELINE_VERSIONS.as_dict(),
+                started_at=utc_now(),
+            )
+        )
 
         has_structured = bool(metadata.get("triples") or metadata.get("claims"))
         if has_structured or not chunks:
             extracted = await self._extractor.extract(
-                body=cmd.body, knowledge_type=cmd.knowledge_type, metadata=metadata
+                body=normalized_body, knowledge_type=cmd.knowledge_type, metadata=metadata
+            )
+            extracted_with_chunks = (
+                [_align_document_quote(claim, chunks, normalized_body) for claim in extracted]
+                if chunks
+                else [(claim, None) for claim in extracted]
             )
         else:
-            extracted: list[ExtractedClaim] = []
+            extracted_with_chunks: list[tuple[ExtractedClaim, Chunk | None]] = []
             for chunk in chunks:
-                extracted.extend(
-                    await self._extractor.extract(
+                extracted_with_chunks.extend(
+                    (claim, chunk)
+                    for claim in await self._extractor.extract(
                         body=chunk.text, knowledge_type=cmd.knowledge_type, metadata={}
                     )
                 )
         action = action_for_tier(source.trust_tier)
         claim_ids: list[str] = []
         published = 0
-        for item in extracted:
+        for item, chunk in extracted_with_chunks:
+            quote_hash = _exact_quote_hash(item, chunk) if chunk is not None else None
+            has_quote = any(
+                value is not None for value in (item.source_quote, item.quote_start, item.quote_end)
+            )
+            needs_review = (chunk is not None and quote_hash is None) or (
+                chunk is None and has_quote
+            )
             claim = await uow.claims.create(
-                artifact_version_id=ref.version_id, group_id=cmd.group_id, claim=item
+                artifact_version_id=ref.version_id,
+                group_id=cmd.group_id,
+                claim=item,
+                extraction_run_id=extraction_run.id,
+                chunk_id=chunk.id if chunk is not None else None,
+                quote_hash=quote_hash,
+                needs_review=needs_review,
             )
             claim_ids.append(str(claim.id))
+            if needs_review:
+                await uow.claims.transition(
+                    claim_id=claim.id,
+                    expected_version=claim.version_id,
+                    to_status=VerificationStatus.PENDING,
+                )
+                await self._queue_fabric_review(claim, source.trust_tier)
+                continue
             if action == TrustAction.AUTO_PUBLISH:
                 await uow.claims.transition(
                     claim_id=claim.id,
@@ -227,6 +317,8 @@ class CurationService:
         claim = await uow.claims.get(claim_id)
         if claim is None:
             return Err(NotFound(f"claim {claim_id} not found"))
+        if approve and claim.needs_review:
+            return Err(PolicyRejected("claim provenance must be corrected before approval"))
 
         target = VerificationStatus.VERIFIED if approve else VerificationStatus.DISPUTED
         if not can_transition(claim.status, target):
@@ -259,6 +351,8 @@ class CurationService:
             return Err(PolicyRejected("only verified knowledge may enter a shared scope"))
         if claim.status != VerificationStatus.VERIFIED:
             return Err(PolicyRejected("claim must be verified before publishing"))
+        if claim.needs_review:
+            return Err(PolicyRejected("claim provenance must be corrected before publishing"))
 
         durable_source = f"{claim.group_id}:{claim.id}"
         tier = await uow.claims.source_trust_tier(claim.id)
@@ -312,6 +406,9 @@ class CurationService:
             claim.object,
             claim.statement,
             supersede_objects=supersede_objects,
+            source_quote=claim.source_quote,
+            quote_start=claim.quote_start,
+            quote_end=claim.quote_end,
         )
         authority = authority_for_tier(tier) if tier is not None else 0.5
         # Stamp the episode with the ontology and pipeline versions that produced it, so
@@ -343,6 +440,14 @@ class CurationService:
                     "verification": "human_verified",
                     "ontology_version_id": str(ontology_id) if ontology_id is not None else None,
                     "artifact_version_id": str(claim.artifact_version_id),
+                    "extraction_run_id": (
+                        str(claim.extraction_run_id)
+                        if claim.extraction_run_id is not None
+                        else None
+                    ),
+                    "chunk_id": str(claim.chunk_id) if claim.chunk_id is not None else None,
+                    "quote_hash": claim.quote_hash,
+                    "needs_review": False,
                 },
             }
             await uow.outbox.add(
@@ -352,3 +457,38 @@ class CurationService:
                 payload=outbox_payload,
             )
         return Ok(PublishOutcome(status="published"))
+
+    async def _queue_fabric_review(self, claim: ClaimRecord, trust_tier: int) -> None:
+        if not (claim.subject and claim.predicate and claim.object):
+            return
+        source_id = f"review:{claim.group_id}:{claim.id}"
+        ontology_id = await self._uow.ontology.get_active_id()
+        payload = _payload_for(
+            claim.subject,
+            claim.predicate,
+            claim.object,
+            claim.statement,
+            source_quote=claim.source_quote,
+            quote_start=claim.quote_start,
+            quote_end=claim.quote_end,
+        )
+        payload["_fabric"] = {
+            "trust_tier": int(trust_tier),
+            "authority": authority_for_tier(trust_tier),
+            "confidence": claim.confidence if claim.confidence is not None else 0.0,
+            "verification": "pending",
+            "ontology_version_id": str(ontology_id) if ontology_id is not None else None,
+            "artifact_version_id": str(claim.artifact_version_id),
+            "extraction_run_id": (
+                str(claim.extraction_run_id) if claim.extraction_run_id is not None else None
+            ),
+            "chunk_id": str(claim.chunk_id) if claim.chunk_id is not None else None,
+            "quote_hash": None,
+            "needs_review": True,
+        }
+        await self._uow.outbox.add(
+            group_id=claim.group_id,
+            source_id=source_id,
+            dedup_uuid=deterministic_id(source_id),
+            payload=payload,
+        )

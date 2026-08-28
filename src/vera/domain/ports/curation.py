@@ -24,6 +24,9 @@ class ExtractedClaim:
     predicate: str | None = None
     object: str | None = None
     confidence: float | None = None
+    source_quote: str | None = None
+    quote_start: int | None = None
+    quote_end: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,6 +37,12 @@ class SourceRecord:
 
 
 class ClaimExtractor(Protocol):
+    @property
+    def provider(self) -> str: ...
+
+    @property
+    def model(self) -> str: ...
+
     async def extract(
         self, *, body: str, knowledge_type: str, metadata: JsonDict
     ) -> list[ExtractedClaim]:
@@ -108,7 +117,15 @@ class ArtifactRepository(Protocol):
 
 class CandidateClaimRepository(Protocol):
     async def create(
-        self, *, artifact_version_id: UUID, group_id: str, claim: ExtractedClaim
+        self,
+        *,
+        artifact_version_id: UUID,
+        group_id: str,
+        claim: ExtractedClaim,
+        extraction_run_id: UUID | None = None,
+        chunk_id: UUID | None = None,
+        quote_hash: str | None = None,
+        needs_review: bool = False,
     ) -> ClaimRecord: ...
 
     async def get(self, claim_id: UUID) -> ClaimRecord | None: ...

@@ -41,11 +41,15 @@ _SYSTEM = (
     "'Doi nen tang' -> 'platform team'); lower-case service/resource names.\n"
     "- Use UPPER_SNAKE_CASE predicates, preferring: RUNS_ON, DEPENDS_ON, OWNS, "
     "DEPLOYED_TO, MEMBER_OF, CAUSED, DECIDED_BY, HAS_STATUS.\n"
+    "- Copy an exact supporting quote from the supplied text for every triple.\n"
+    "- Return quote_start and quote_end as Python-style character offsets into the supplied "
+    "text, with quote_end exclusive.\n"
     "- Return at most 15 of the most important triples."
 )
 
 _SCHEMA_HINT = (
-    'Respond as JSON: {"facts": [{"subject": str, "predicate": str, "object": str}]}. '
+    'Respond as JSON: {"facts": [{"subject": str, "predicate": str, "object": str, '
+    '"source_quote": str, "quote_start": int, "quote_end": int}]}. '
     "Keep subject and object within 512 characters and predicate within 256 characters. "
     "Return an empty list if there are no clear facts."
 )
@@ -66,6 +70,14 @@ class LlmClaimExtractor:
         )
         self._model = model
         self._structured = StructuredClaimExtractor()
+
+    @property
+    def provider(self) -> str:
+        return "openai-compatible"
+
+    @property
+    def model(self) -> str:
+        return self._model
 
     async def extract(
         self, *, body: str, knowledge_type: str, metadata: JsonDict
@@ -100,6 +112,9 @@ class LlmClaimExtractor:
             subject = str(fact.get("subject", "")).strip()
             predicate = str(fact.get("predicate", "")).strip()
             obj = str(fact.get("object", "")).strip()
+            source_quote = fact.get("source_quote")
+            quote_start = fact.get("quote_start")
+            quote_end = fact.get("quote_end")
             if not (subject and predicate and obj):
                 continue
             if (
@@ -122,6 +137,17 @@ class LlmClaimExtractor:
                     predicate=predicate,
                     object=obj,
                     confidence=0.7,
+                    source_quote=source_quote if isinstance(source_quote, str) else None,
+                    quote_start=(
+                        quote_start
+                        if isinstance(quote_start, int) and not isinstance(quote_start, bool)
+                        else None
+                    ),
+                    quote_end=(
+                        quote_end
+                        if isinstance(quote_end, int) and not isinstance(quote_end, bool)
+                        else None
+                    ),
                 )
             )
         return claims

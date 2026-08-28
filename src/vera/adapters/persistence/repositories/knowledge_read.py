@@ -30,19 +30,31 @@ _ASSERTIONS = text(
     "ORDER BY a.recorded_at DESC"
 )
 _EVIDENCE = text(
-    "SELECT e.id::text AS evidence_id, e.excerpt, e.citation_uri, e.chunk_id::text AS chunk_id, "
-    "e.artifact_version_id::text AS artifact_version_id, e.confidentiality "
-    "FROM evidence e WHERE e.group_id = ANY(CAST(:gids AS text[])) "
+    "SELECT e.id::text AS evidence_id, "
+    "COALESCE(CASE WHEN e.quote_start IS NOT NULL THEN "
+    "substring(c.text FROM e.quote_start + 1 FOR e.quote_end - e.quote_start) END, "
+    "e.excerpt) AS excerpt, COALESCE(e.citation_override, e.citation_uri) AS citation_uri, "
+    "e.chunk_id::text AS chunk_id, e.artifact_version_id::text AS artifact_version_id, "
+    "e.quote_start, e.quote_end, e.quote_hash, "
+    "e.extraction_run_id::text AS extraction_run_id, e.confidentiality "
+    "FROM evidence e LEFT JOIN chunks c ON c.id = e.chunk_id AND c.group_id = e.group_id "
+    "WHERE e.group_id = ANY(CAST(:gids AS text[])) "
     "AND e.assertion_id = CAST(:aid AS uuid)"
 )
 # Evidence for a fact, flattened across its active supporting assertions, for citation. The
 # per-assertion verification and source travel with each evidence row so a caller can weigh it.
 _FACT_EVIDENCE = text(
-    "SELECT e.id::text AS evidence_id, e.excerpt, e.citation_uri, e.chunk_id::text AS chunk_id, "
-    "e.artifact_version_id::text AS artifact_version_id, e.confidentiality, "
+    "SELECT e.id::text AS evidence_id, "
+    "COALESCE(CASE WHEN e.quote_start IS NOT NULL THEN "
+    "substring(c.text FROM e.quote_start + 1 FOR e.quote_end - e.quote_start) END, "
+    "e.excerpt) AS excerpt, COALESCE(e.citation_override, e.citation_uri) AS citation_uri, "
+    "e.chunk_id::text AS chunk_id, e.artifact_version_id::text AS artifact_version_id, "
+    "e.quote_start, e.quote_end, e.quote_hash, "
+    "e.extraction_run_id::text AS extraction_run_id, e.confidentiality, "
     "a.id::text AS assertion_id, a.polarity, a.verification_state, "
     "a.knowledge_source_id::text AS source_id "
     "FROM evidence e "
+    "LEFT JOIN chunks c ON c.id = e.chunk_id AND c.group_id = e.group_id "
     "JOIN assertions a ON a.id = e.assertion_id AND a.state = 'active' "
     "JOIN facts f ON f.id = a.fact_id "
     "WHERE f.group_id = ANY(CAST(:gids AS text[])) AND f.fact_key = :fk "

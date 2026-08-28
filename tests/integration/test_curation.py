@@ -237,6 +237,14 @@ class _TextTripleExtractor:
     object is the body. Lets a text-typed ingest exercise the same publish path.
     """
 
+    @property
+    def provider(self) -> str:
+        return "test"
+
+    @property
+    def model(self) -> str:
+        return "text-triple"
+
     async def extract(
         self, *, body: str, knowledge_type: str, metadata: object
     ) -> list[ExtractedClaim]:
@@ -247,6 +255,9 @@ class _TextTripleExtractor:
                 subject="paymentapi",
                 predicate="DEPENDS_ON",
                 object=obj,
+                source_quote=obj,
+                quote_start=body.index(obj),
+                quote_end=body.index(obj) + len(obj),
             )
         ]
 

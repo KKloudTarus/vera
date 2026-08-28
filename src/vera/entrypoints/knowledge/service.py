@@ -342,7 +342,7 @@ class KnowledgeService:
                     verification_state="pending",
                     observed_at=utc_now(),
                     recorded_at=utc_now(),
-                    extraction_run_id=f"proposal:{principal_id}",
+                    run_key=f"proposal:{principal_id}",
                 )
             )
             if evidence_text:

@@ -11,6 +11,7 @@ same group, and the job is marked done in the same transaction that holds the lo
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import random
 import time
 import zlib
@@ -71,6 +72,65 @@ def lane_for(group_id: str, lanes: int) -> int:
 def _correlation(trace_context: JsonDict) -> dict[str, str]:
     cid = trace_context.get("correlation_id")
     return {"correlation_id": str(cid)} if cid else {}
+
+
+async def _triple_needs_review(
+    session: AsyncSession,
+    *,
+    group_id: str,
+    meta: dict[str, Any],
+    triple: dict[str, Any],
+) -> bool:
+    if bool(meta.get("needs_review")):
+        return True
+    chunk_value = meta.get("chunk_id")
+    version_value = meta.get("artifact_version_id")
+    quote_hash = meta.get("quote_hash")
+    source_quote = triple.get("source_quote")
+    quote_start = triple.get("quote_start")
+    quote_end = triple.get("quote_end")
+    has_provenance = any(
+        value is not None
+        for value in (chunk_value, quote_hash, source_quote, quote_start, quote_end)
+    )
+    if not has_provenance:
+        return False
+    if (
+        chunk_value is None
+        or version_value is None
+        or not isinstance(source_quote, str)
+        or not source_quote
+        or type(quote_start) is not int
+        or type(quote_end) is not int
+        or not isinstance(quote_hash, str)
+        or quote_start < 0
+        or quote_end <= quote_start
+    ):
+        return True
+    try:
+        chunk_id = UUID(str(chunk_value))
+        version_id = UUID(str(version_value))
+    except ValueError:
+        return True
+    chunk = (
+        (
+            await session.execute(
+                text(
+                    "SELECT text, artifact_version_id FROM chunks WHERE group_id = :g AND id = :c"
+                ),
+                {"g": group_id, "c": str(chunk_id)},
+            )
+        )
+        .mappings()
+        .one_or_none()
+    )
+    return not (
+        chunk is not None
+        and UUID(str(chunk["artifact_version_id"])) == version_id
+        and quote_end <= len(str(chunk["text"]))
+        and str(chunk["text"])[quote_start:quote_end] == source_quote
+        and hashlib.sha256(source_quote.encode("utf-8")).hexdigest() == quote_hash
+    )
 
 
 class LanePool:
@@ -158,6 +218,7 @@ class LanePool:
         )
         started = time.perf_counter()
         episode_budget = self._container.settings.resilience.per_episode_timeout_s
+        episode_uuid: str | None = None
         try:
             # A per-episode deadline bounds a hung provider call: on timeout the job
             # errors, the lane is freed, and the queue retries it (not left pinned).
@@ -165,26 +226,40 @@ class LanePool:
                 async with asyncio.timeout(episode_budget):
                     async with self._container.workers() as session, session.begin():
                         await session.execute(_GROUP_LOCK, {"g": str(job.group_id)})
-                        # One embedding dimension per group: refuse a write under a changed
-                        # model/dim (job dead-letters with a clear message) until reprocess.
-                        model_name, dim = active_embedding(self._container.settings)
-                        await SqlAlchemyEmbeddingStateRepository(session).ensure_compatible(
-                            group_id=str(job.group_id), model=model_name, dim=dim
-                        )
-                        episode = EpisodeSpec(
-                            source_id=SourceId(str(job.source_id)),
-                            group_id=GroupId(str(job.group_id)),
-                            body=str(job.payload.get("body", "")),
-                            reference_time=utc_now(),
-                            metadata=job.payload,
-                        )
-                        receipt = await self._container.memory.ingest_episode(episode)
-                        await self._stitch(session, str(job.group_id), str(job.source_id), receipt)
+                        fabric_meta = cast("dict[str, Any]", job.payload.get("_fabric") or {})
+                        triples = cast("list[dict[str, Any]]", job.payload.get("triples") or [])
+                        needs_review = bool(fabric_meta.get("needs_review"))
+                        for triple in triples:
+                            needs_review = needs_review or await _triple_needs_review(
+                                session,
+                                group_id=str(job.group_id),
+                                meta=fabric_meta,
+                                triple=triple,
+                            )
+                        if not needs_review:
+                            # One embedding dimension per group: refuse a write under a changed
+                            # model/dim (job dead-letters with a clear message) until reprocess.
+                            model_name, dim = active_embedding(self._container.settings)
+                            await SqlAlchemyEmbeddingStateRepository(session).ensure_compatible(
+                                group_id=str(job.group_id), model=model_name, dim=dim
+                            )
+                            episode = EpisodeSpec(
+                                source_id=SourceId(str(job.source_id)),
+                                group_id=GroupId(str(job.group_id)),
+                                body=str(job.payload.get("body", "")),
+                                reference_time=utc_now(),
+                                metadata=job.payload,
+                            )
+                            receipt = await self._container.memory.ingest_episode(episode)
+                            episode_uuid = str(receipt.episode_uuid)
+                            await self._stitch(
+                                session, str(job.group_id), str(job.source_id), receipt
+                            )
                         if self._container.settings.memory.fabric_enabled:
                             await self._reconcile_to_fabric(session, job)
                         await session.execute(_MARK_DONE, {"id": job.id})
             record_ingestion(result="done", duration_s=time.perf_counter() - started)
-            log.info("ingest.done", episode_uuid=receipt.episode_uuid)
+            log.info("ingest.done", episode_uuid=episode_uuid)
         finally:
             reset_usage_context(usage_token)
             clear_log_context()
@@ -192,7 +267,7 @@ class LanePool:
     async def _reconcile_to_fabric(self, session: AsyncSession, job: QueuedJob) -> None:
         """Populate the authoritative fact store from the same triples, so the /v2 knowledge
         surface reflects live ingest. Gated by memory.fabric_enabled. Idempotent on replay:
-        an episode already reconciled (by its extraction_run_id) is skipped. The real trust,
+        an episode already reconciled (by its source run key) is skipped. The real trust,
         authority, confidence, ontology version, and artifact/version provenance come from the
         publish path (the ``_fabric`` block); nothing is assumed authoritative. A meta-less job
         defaults to the safest (unverified) tier, never to authoritative.
@@ -201,15 +276,18 @@ class LanePool:
         if not triples:
             return
         group = str(job.group_id)
-        run_id = f"episode:{job.source_id}"
+        meta = cast("dict[str, Any]", job.payload.get("_fabric") or {})
+        extraction_run_id = (
+            UUID(str(meta["extraction_run_id"])) if meta.get("extraction_run_id") else None
+        )
+        run_key = f"episode:{job.source_id}"
         already = await session.scalar(
-            text("SELECT 1 FROM assertions WHERE group_id = :g AND extraction_run_id = :r LIMIT 1"),
-            {"g": group, "r": run_id},
+            text("SELECT 1 FROM assertions WHERE group_id = :g AND run_key = :r LIMIT 1"),
+            {"g": group, "r": run_key},
         )
         if already:
             return
 
-        meta = cast("dict[str, Any]", job.payload.get("_fabric") or {})
         trust_tier = int(meta.get("trust_tier", int(TrustTier.UNVERIFIED)))
         source_authority = float(meta.get("authority", authority_for_tier(trust_tier)))
         confidence = float(meta.get("confidence", 0.5))
@@ -237,6 +315,17 @@ class LanePool:
             obj = str(triple.get("object", "")).strip()
             if not (subject and predicate and obj):
                 continue
+            source_quote = triple.get("source_quote")
+            quote_start = triple.get("quote_start")
+            quote_end = triple.get("quote_end")
+            chunk_id = UUID(str(meta["chunk_id"])) if meta.get("chunk_id") else None
+            quote_hash = str(meta["quote_hash"]) if meta.get("quote_hash") else None
+            needs_review = await _triple_needs_review(
+                session,
+                group_id=group,
+                meta=meta,
+                triple=triple,
+            )
             entity = await self._resolver.resolve_or_create(
                 canonical,
                 group_id=group,
@@ -263,7 +352,12 @@ class LanePool:
                     object_entity_id=object_entity_id,
                     object_scalar=object_scalar,
                     extractor_confidence=confidence,
-                    excerpt=f"{subject} {predicate} {obj}",
+                    chunk_id=chunk_id,
+                    excerpt=source_quote if isinstance(source_quote, str) else None,
+                    quote_start=(quote_start if isinstance(quote_start, int) else None),
+                    quote_end=quote_end if isinstance(quote_end, int) else None,
+                    evidence_content_hash=quote_hash,
+                    needs_review=needs_review,
                 )
             )
         if not propositions:
@@ -284,7 +378,8 @@ class LanePool:
                 artifact_version_id=version_id,
                 artifact_id=artifact_id,
                 ontology_version_id=ontology_version_id,
-                extraction_run_id=run_id,
+                extraction_run_id=extraction_run_id,
+                run_key=run_key,
                 actor="worker",
             )
         )

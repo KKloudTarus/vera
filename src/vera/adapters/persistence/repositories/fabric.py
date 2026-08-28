@@ -17,6 +17,7 @@ from vera.adapters.persistence.models.fabric import (
     AssertionRow,
     ChunkRow,
     EvidenceRow,
+    ExtractionRunRow,
     FactRelationRow,
     FactRow,
     KnowledgeEventRow,
@@ -26,6 +27,7 @@ from vera.domain.knowledge.fabric import (
     AssertionState,
     Chunk,
     Evidence,
+    ExtractionRun,
     Fact,
     FactLifecycle,
     FactRelation,
@@ -102,6 +104,7 @@ def _to_assertion(row: AssertionRow) -> Assertion:
         observed_at=row.observed_at,
         recorded_at=row.recorded_at,
         extraction_run_id=row.extraction_run_id,
+        run_key=row.run_key,
         state=AssertionState(row.state),
     )
 
@@ -117,6 +120,11 @@ def _to_evidence(row: EvidenceRow) -> Evidence:
         structured_record=dict(row.structured_record) if row.structured_record else None,
         excerpt=row.excerpt,
         citation_uri=row.citation_uri,
+        quote_start=row.quote_start,
+        quote_end=row.quote_end,
+        quote_hash=row.quote_hash,
+        citation_override=row.citation_override,
+        extraction_run_id=row.extraction_run_id,
         source_coordinates=dict(row.source_coordinates),
         confidentiality=row.confidentiality,
     )
@@ -129,6 +137,19 @@ def _to_relation(row: FactRelationRow) -> FactRelation:
         from_fact_id=row.from_fact_id,
         to_fact_id=row.to_fact_id,
         relation_type=RelationType(row.relation_type),
+    )
+
+
+def _to_extraction_run(row: ExtractionRunRow) -> ExtractionRun:
+    return ExtractionRun(
+        id=row.id,
+        group_id=row.group_id,
+        artifact_version_id=row.artifact_version_id,
+        model=row.model,
+        provider=row.provider,
+        prompt_version=row.prompt_version,
+        pipeline_version=dict(row.pipeline_version),
+        started_at=row.started_at,
     )
 
 
@@ -207,6 +228,35 @@ class SqlAlchemyChunkRepository:
             select(ChunkRow).where(ChunkRow.group_id == group_id, ChunkRow.id == UUID(chunk_id))
         )
         return _to_chunk(row) if row is not None else None
+
+
+class SqlAlchemyExtractionRunRepository:
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def add(self, run: ExtractionRun) -> ExtractionRun:
+        row = ExtractionRunRow(
+            id=run.id,
+            group_id=run.group_id,
+            artifact_version_id=run.artifact_version_id,
+            model=run.model,
+            provider=run.provider,
+            prompt_version=run.prompt_version,
+            pipeline_version=dict(run.pipeline_version),
+            started_at=run.started_at,
+        )
+        self._session.add(row)
+        await self._session.flush()
+        return _to_extraction_run(row)
+
+    async def get(self, *, group_id: str, run_id: str) -> ExtractionRun | None:
+        row = await self._session.scalar(
+            select(ExtractionRunRow).where(
+                ExtractionRunRow.group_id == group_id,
+                ExtractionRunRow.id == UUID(run_id),
+            )
+        )
+        return _to_extraction_run(row) if row is not None else None
 
 
 class SqlAlchemyFactRepository:
@@ -299,39 +349,47 @@ class SqlAlchemyAssertionRepository:
 
     async def upsert(self, assertion: Assertion) -> Assertion:
         now = utc_now()
-        stmt = (
-            pg_insert(AssertionRow)
-            .values(
-                id=assertion.id,
-                group_id=assertion.group_id,
-                fact_id=assertion.fact_id,
-                polarity=assertion.polarity.value,
-                knowledge_source_id=assertion.knowledge_source_id,
-                artifact_id=assertion.artifact_id,
-                artifact_version_id=assertion.artifact_version_id,
-                extractor_confidence=assertion.extractor_confidence,
-                source_authority=assertion.source_authority,
-                verification_state=assertion.verification_state,
-                valid_from=assertion.valid_from,
-                valid_to=assertion.valid_to,
-                observed_at=assertion.observed_at,
-                recorded_at=assertion.recorded_at or now,
-                extraction_run_id=assertion.extraction_run_id,
-                state=AssertionState.ACTIVE.value,
-            )
-            .on_conflict_do_update(
-                constraint="uq_assertion_source",
-                set_={
-                    "recorded_at": now,
-                    "state": AssertionState.ACTIVE.value,
-                    "withdrawn_at": None,
-                    "extractor_confidence": assertion.extractor_confidence,
-                    "source_authority": assertion.source_authority,
-                    "verification_state": assertion.verification_state,
-                },
-            )
-            .returning(AssertionRow.id)
+        insert = pg_insert(AssertionRow).values(
+            id=assertion.id,
+            group_id=assertion.group_id,
+            fact_id=assertion.fact_id,
+            polarity=assertion.polarity.value,
+            knowledge_source_id=assertion.knowledge_source_id,
+            artifact_id=assertion.artifact_id,
+            artifact_version_id=assertion.artifact_version_id,
+            extractor_confidence=assertion.extractor_confidence,
+            source_authority=assertion.source_authority,
+            verification_state=assertion.verification_state,
+            valid_from=assertion.valid_from,
+            valid_to=assertion.valid_to,
+            observed_at=assertion.observed_at,
+            recorded_at=assertion.recorded_at or now,
+            extraction_run_id=assertion.extraction_run_id,
+            run_key=assertion.run_key,
+            state=assertion.state.value,
         )
+        updates = {
+            "recorded_at": now,
+            "state": assertion.state.value,
+            "withdrawn_at": None,
+            "extractor_confidence": assertion.extractor_confidence,
+            "source_authority": assertion.source_authority,
+            "verification_state": assertion.verification_state,
+            "extraction_run_id": assertion.extraction_run_id,
+            "run_key": assertion.run_key,
+        }
+        if assertion.artifact_version_id is None and assertion.run_key is not None:
+            stmt = insert.on_conflict_do_update(
+                index_elements=[AssertionRow.fact_id, AssertionRow.run_key, AssertionRow.polarity],
+                index_where=AssertionRow.run_key.is_not(None),
+                set_=updates,
+            )
+        else:
+            stmt = insert.on_conflict_do_update(
+                constraint="uq_assertion_source",
+                set_=updates,
+            )
+        stmt = stmt.returning(AssertionRow.id)
         new_id = await self._session.scalar(stmt)
         row = await self._session.scalar(select(AssertionRow).where(AssertionRow.id == new_id))
         assert row is not None  # noqa: S101  present after insert-or-update
@@ -381,6 +439,11 @@ class SqlAlchemyEvidenceRepository:
                 structured_record=evidence.structured_record,
                 excerpt=evidence.excerpt,
                 citation_uri=evidence.citation_uri,
+                quote_start=evidence.quote_start,
+                quote_end=evidence.quote_end,
+                quote_hash=evidence.quote_hash,
+                citation_override=evidence.citation_override,
+                extraction_run_id=evidence.extraction_run_id,
                 content_hash=evidence.content_hash,
                 source_coordinates=dict(evidence.source_coordinates),
                 confidentiality=evidence.confidentiality,

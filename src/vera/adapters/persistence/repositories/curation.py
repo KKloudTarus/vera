@@ -39,6 +39,13 @@ def _to_claim(row: CandidateClaimRow) -> ClaimRecord:
         predicate=row.predicate,
         object=row.object,
         confidence=row.confidence,
+        extraction_run_id=row.extraction_run_id,
+        chunk_id=row.chunk_id,
+        source_quote=row.source_quote,
+        quote_start=row.quote_start,
+        quote_end=row.quote_end,
+        quote_hash=row.quote_hash,
+        needs_review=row.needs_review,
     )
 
 
@@ -185,7 +192,15 @@ class SqlAlchemyCandidateClaimRepository:
         self._session = session
 
     async def create(
-        self, *, artifact_version_id: UUID, group_id: str, claim: ExtractedClaim
+        self,
+        *,
+        artifact_version_id: UUID,
+        group_id: str,
+        claim: ExtractedClaim,
+        extraction_run_id: UUID | None = None,
+        chunk_id: UUID | None = None,
+        quote_hash: str | None = None,
+        needs_review: bool = False,
     ) -> ClaimRecord:
         row = CandidateClaimRow(
             artifact_version_id=artifact_version_id,
@@ -197,6 +212,13 @@ class SqlAlchemyCandidateClaimRepository:
             predicate=claim.predicate,
             object=claim.object,
             confidence=claim.confidence,
+            extraction_run_id=extraction_run_id,
+            chunk_id=chunk_id,
+            source_quote=claim.source_quote,
+            quote_start=claim.quote_start,
+            quote_end=claim.quote_end,
+            quote_hash=quote_hash,
+            needs_review=needs_review,
         )
         self._session.add(row)
         await self._session.flush()

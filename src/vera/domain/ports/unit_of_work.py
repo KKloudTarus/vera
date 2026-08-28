@@ -18,7 +18,7 @@ from vera.domain.ports.curation import (
     PublishedEpisodeRepository,
     ReviewRepository,
 )
-from vera.domain.ports.fabric import ChunkRepository
+from vera.domain.ports.fabric import ChunkRepository, ExtractionRunRepository
 from vera.domain.ports.identity import IdentityRepository
 from vera.domain.ports.ontology import OntologyRepository
 from vera.domain.ports.repositories import (
@@ -43,6 +43,7 @@ class UnitOfWork(Protocol):
     feedback: RetrievalFeedbackRepository
     ontology: OntologyRepository
     chunks: ChunkRepository
+    extraction_runs: ExtractionRunRepository
 
     async def __aenter__(self) -> UnitOfWork: ...
 

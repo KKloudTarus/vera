@@ -60,7 +60,8 @@ async def test_structured_metadata_skips_the_llm() -> None:
 @pytest.mark.asyncio
 async def test_free_text_is_extracted_into_triples() -> None:
     content = (
-        '{"facts": [{"subject": "paymentapi", "predicate": "RUNS_ON", "object": "prod-eks"},'
+        '{"facts": [{"subject": "paymentapi", "predicate": "RUNS_ON", "object": "prod-eks",'
+        '"source_quote": "some prose", "quote_start": 0, "quote_end": 10},'
         '{"subject": "platform team", "predicate": "OWNS", "object": "cacheapi"}]}'
     )
     extractor, client = _extractor(content)
@@ -71,6 +72,10 @@ async def test_free_text_is_extracted_into_triples() -> None:
         ("platform team", "OWNS", "cacheapi"),
     ]
     assert claims[0].statement == "paymentapi RUNS_ON prod-eks"
+    assert claims[0].source_quote == "some prose"
+    assert (claims[0].quote_start, claims[0].quote_end) == (0, 10)
+    assert extractor.provider == "openai-compatible"
+    assert extractor.model == "gpt-4.1-nano"
 
 
 @pytest.mark.asyncio

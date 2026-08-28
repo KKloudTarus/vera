@@ -14,6 +14,7 @@ from vera.domain.knowledge.fabric import (
     Assertion,
     Chunk,
     Evidence,
+    ExtractionRun,
     Fact,
     FactLifecycle,
     FactRelation,
@@ -31,6 +32,12 @@ class ChunkRepository(Protocol):
     ) -> list[Chunk]: ...
 
     async def get(self, *, group_id: str, chunk_id: str) -> Chunk | None: ...
+
+
+class ExtractionRunRepository(Protocol):
+    async def add(self, run: ExtractionRun) -> ExtractionRun: ...
+
+    async def get(self, *, group_id: str, run_id: str) -> ExtractionRun | None: ...
 
 
 class FactRepository(Protocol):

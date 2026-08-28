@@ -416,6 +416,35 @@ async def test_refutation_disputes_the_fact_and_is_not_a_supporting_edge(
     )
 
 
+async def test_unverified_refutation_does_not_dispute_an_active_fact(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    group = f"p:k-{uuid7().hex[:12]}"
+    source_a, art_a, va, _ = await _bootstrap(sessionmaker, group, external_id="A")
+    source_b, art_b, vb, _ = await _bootstrap_second_artifact(sessionmaker, group)
+    subject = await _subject(sessionmaker, group)
+    async with _tenant(sessionmaker, group) as s:
+        await _service(s).reconcile(_req(group, art_a, va, source_a, 1, [_runs_on(subject, "eks")]))
+    refute = ResolvedProposition(
+        subject_entity_id=subject,
+        predicate="RUNS_ON",
+        object_scalar="eks",
+        qualifiers={"environment": "prod"},
+        polarity=Polarity.REFUTES,
+        needs_review=True,
+    )
+    async with _tenant(sessionmaker, group) as s:
+        await _service(s).reconcile(_req(group, art_b, vb, source_b, 1, [refute]))
+
+    assert (await _fact_states(sessionmaker, group))["scalar:eks"] == "active"
+    assert (
+        await _count(
+            sessionmaker, group, "SELECT count(*) FROM assertions WHERE state='needs_review'"
+        )
+        == 1
+    )
+
+
 async def _bootstrap_second_artifact(
     sessionmaker: async_sessionmaker[AsyncSession], group: str
 ) -> tuple[UUID, UUID, UUID, UUID]:

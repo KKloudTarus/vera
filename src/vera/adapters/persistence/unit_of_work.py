@@ -17,6 +17,7 @@ from vera.adapters.persistence.repositories import (
     SqlAlchemyCandidateClaimRepository,
     SqlAlchemyCanonicalEntityRepository,
     SqlAlchemyChunkRepository,
+    SqlAlchemyExtractionRunRepository,
     SqlAlchemyIdentityRepository,
     SqlAlchemyKnowledgeSourceRepository,
     SqlAlchemyOntologyRepository,
@@ -33,7 +34,7 @@ from vera.domain.ports.curation import (
     PublishedEpisodeRepository,
     ReviewRepository,
 )
-from vera.domain.ports.fabric import ChunkRepository
+from vera.domain.ports.fabric import ChunkRepository, ExtractionRunRepository
 from vera.domain.ports.identity import IdentityRepository
 from vera.domain.ports.ontology import OntologyRepository
 from vera.domain.ports.repositories import (
@@ -64,6 +65,7 @@ class SqlAlchemyUnitOfWork:
     feedback: RetrievalFeedbackRepository
     ontology: OntologyRepository
     chunks: ChunkRepository
+    extraction_runs: ExtractionRunRepository
 
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self._session_factory = session_factory
@@ -82,6 +84,7 @@ class SqlAlchemyUnitOfWork:
         self.feedback = SqlAlchemyRetrievalFeedbackRepository(self.session)
         self.ontology = SqlAlchemyOntologyRepository(self.session)
         self.chunks = SqlAlchemyChunkRepository(self.session)
+        self.extraction_runs = SqlAlchemyExtractionRunRepository(self.session)
         return self
 
     async def __aexit__(

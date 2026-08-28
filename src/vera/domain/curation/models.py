@@ -38,3 +38,10 @@ class ClaimRecord:
     predicate: str | None
     object: str | None
     confidence: float | None = None
+    extraction_run_id: UUID | None = None
+    chunk_id: UUID | None = None
+    source_quote: str | None = None
+    quote_start: int | None = None
+    quote_end: int | None = None
+    quote_hash: str | None = None
+    needs_review: bool = False

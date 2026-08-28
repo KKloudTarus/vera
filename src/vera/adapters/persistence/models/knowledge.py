@@ -117,6 +117,17 @@ class CandidateClaimRow(Base, UUIDPK, Timestamps):
     predicate: Mapped[str | None] = mapped_column(String(256), nullable=True)
     object: Mapped[str | None] = mapped_column(String(512), nullable=True)
     confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    extraction_run_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("extraction_runs.id", ondelete="SET NULL"), nullable=True
+    )
+    chunk_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("chunks.id", ondelete="SET NULL"), nullable=True
+    )
+    source_quote: Mapped[str | None] = mapped_column(Text, nullable=True)
+    quote_start: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    quote_end: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    quote_hash: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    needs_review: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
     version_id: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1")
 
     __mapper_args__ = {"version_id_col": version_id}  # noqa: RUF012  SQLAlchemy config dict
