@@ -50,7 +50,11 @@ async def _run(path: str) -> None:
     key = settings.memory.openai_api_key.get_secret_value()
     from vera.adapters.curation.entity_judge import LlmEntityResolutionJudge
 
-    judge = LlmEntityResolutionJudge(api_key=key, model=settings.memory.llm_model)
+    judge = LlmEntityResolutionJudge(
+        api_key=key,
+        base_url=settings.memory.openai_base_url,
+        model=settings.memory.llm_model,
+    )
     correct = 0
     for left, right, same in pairs:
         verdict = await judge.same_entity(name=left, entity_type="Entity", candidates=[right])

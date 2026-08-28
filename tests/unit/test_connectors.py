@@ -16,7 +16,10 @@ from vera.adapters.connectors.jira import JiraConnector
 from vera.adapters.connectors.pdf import PdfConnector
 from vera.adapters.connectors.registry import build_connector
 from vera.adapters.connectors.slack import SlackConnector
+from vera.application.connectors import SyncRegistration, SyncScheduler
+from vera.domain.ports.connectors import SyncOutcome
 from vera.shared.errors import VeraError
+from vera.shared.ids import uuid7
 from vera.shared.types import JsonDict
 
 
@@ -196,6 +199,47 @@ async def test_filesystem_reads_markdown_recursively_and_incrementally(tmp_path:
     # Re-run with the watermark: nothing new.
     batch2 = await connector.fetch_changes(batch.next_cursor)
     assert batch2.records == ()
+
+
+@pytest.mark.asyncio
+async def test_scheduler_isolates_a_failed_connector() -> None:
+    source_ids = [uuid7(), uuid7()]
+
+    class _State:
+        async def last_synced_at(self, _source_id):
+            return None
+
+    class _Runner:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def sync(self, **_kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("broken source")
+            return SyncOutcome(processed=1, unchanged=0, cursor={})
+
+    runner = _Runner()
+    connector = FilesystemConnector(".")
+    scheduler = SyncScheduler(
+        runner=runner,  # type: ignore[arg-type]
+        state=_State(),  # type: ignore[arg-type]
+        registrations=[
+            SyncRegistration(
+                source_id=source_id,
+                group_id="p:test",
+                connector=connector,
+                interval_s=0,
+            )
+            for source_id in source_ids
+        ],
+    )
+
+    outcomes = await scheduler.run_due()
+
+    assert runner.calls == 2
+    assert len(outcomes) == 1
+    assert outcomes[0].processed == 1
 
 
 @pytest.mark.asyncio

@@ -65,10 +65,41 @@ def build_metered_llm_client(
     sink: UsageSink | None,
     policy: ResiliencePolicy | None = None,
 ) -> LLMClient:
-    """A Graphiti OpenAI LLM client that is rate-limited, retried, breaker-guarded, and
-    metered. Graphiti's ``_generate_response`` returns ``(response, input_tokens,
-    output_tokens)``, so usage is exact and attributed to the current request context.
-    """
+    """Build a resilient, metered Graphiti client for OpenAI or a compatible endpoint."""
+    if config.base_url:
+        from graphiti_core.llm_client.openai_generic_client import OpenAIGenericClient
+
+        class _MeteredOpenAIGenericClient(OpenAIGenericClient):
+            async def _generate_response(
+                self,
+                messages: list[Any],
+                response_model: type[Any] | None = None,
+                max_tokens: int = 16384,
+                model_size: Any = None,
+            ) -> dict[str, Any]:
+                async def _raw() -> dict[str, Any]:
+                    return await OpenAIGenericClient._generate_response(
+                        self, messages, response_model, max_tokens, model_size
+                    )
+
+                prompt_estimate = sum(
+                    estimate_tokens(str(getattr(m, "content", "") or "")) for m in messages
+                )
+                if policy is not None:
+                    response = await policy.call(_raw, tokens=prompt_estimate)
+                else:
+                    response = await _raw()
+                event = build_usage_event(
+                    model=llm_model,
+                    operation="llm",
+                    prompt_tokens=prompt_estimate,
+                    completion_tokens=estimate_tokens(str(response)),
+                )
+                await emit_usage(sink, event)
+                return response
+
+        return _MeteredOpenAIGenericClient(config=config, structured_output_mode="json_object")
+
     from graphiti_core.llm_client.openai_client import OpenAIClient
 
     class _MeteredOpenAIClient(OpenAIClient):

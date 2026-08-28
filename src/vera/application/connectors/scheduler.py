@@ -13,7 +13,10 @@ from uuid import UUID
 
 from vera.application.connectors.service import SyncRunner
 from vera.domain.ports.connectors import SourceConnector, SyncOutcome, SyncStateStore
+from vera.observability import get_logger
 from vera.shared.time import utc_now
+
+log = get_logger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,11 +50,18 @@ class SyncScheduler:
         outcomes: list[SyncOutcome] = []
         for registration in self._registrations:
             if await self._is_due(registration, moment):
-                outcomes.append(
-                    await self._runner.sync(
+                try:
+                    outcome = await self._runner.sync(
                         source_id=registration.source_id,
                         group_id=registration.group_id,
                         connector=registration.connector,
                     )
-                )
+                except Exception:
+                    log.exception(
+                        "connector.sync_failed",
+                        source_id=str(registration.source_id),
+                        kind=registration.connector.kind,
+                    )
+                    continue
+                outcomes.append(outcome)
         return outcomes

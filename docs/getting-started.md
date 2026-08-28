@@ -17,6 +17,19 @@ cp .env.example .env
 make install          # editable install with all extras, plus pre-commit
 ```
 
+If upgrading a checkout that previously stored Postgres in `.data/postgres`, move it once
+into an empty Docker named volume before starting the new stack. Keep `.data/postgres` as a
+backup until the migrated database is verified:
+
+```bash
+docker compose stop postgres
+docker compose rm -f postgres
+docker compose create postgres
+docker run --rm -v "$PWD/.data/postgres:/source:ro" -v vera_postgres-data:/target \
+  alpine:3.22 sh -c 'cp -a /source/. /target/'
+docker compose start postgres
+```
+
 ## 3. Start the infrastructure
 
 ```bash
@@ -28,7 +41,7 @@ make migrate          # apply database migrations
 
 | Service | Purpose                    | Local port |
 |---------|----------------------------|------------|
-| postgres| source of truth + queue    | 55432      |
+| postgres| source of truth + queue    | 5432       |
 | neo4j   | knowledge graph projection | 7687 / 7474|
 | valkey  | cache + rate limiter       | 6379       |
 | minio   | S3-compatible object store | 9000 / 9001|
@@ -49,6 +62,11 @@ VERA_NEO4J__PASSWORD=vera-local-pass
 VERA_MEMORY__EMBEDDER=openai
 VERA_MEMORY__OPENAI_API_KEY=sk-...
 ```
+
+For an OpenAI-compatible server running on the Docker host, also set
+`VERA_MEMORY__OPENAI_BASE_URL=http://host.docker.internal:<port>/v1` and select its model
+IDs with `VERA_MEMORY__LLM_MODEL` and `VERA_MEMORY__SMALL_LLM_MODEL`. For a no-auth
+endpoint, set `VERA_MEMORY__OPENAI_API_KEY=local`; key presence enables LLM features.
 
 Every setting is namespaced `VERA_<SECTION>__<FIELD>`; see `src/vera/config/settings.py`
 for the full list. Secrets load from the environment as `SecretStr`; never commit `.env`.

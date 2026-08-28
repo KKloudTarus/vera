@@ -14,7 +14,7 @@ services:
       POSTGRES_DB: vera
     ports: ["${VERA_POSTGRES_HOST_PORT:-5432}:5432"]
     # postgres:18+ stores data in a versioned subdir; mount the parent per the image guidance.
-    volumes: ["./.data/postgres:/var/lib/postgresql"]
+    volumes: ["postgres-data:/var/lib/postgresql"]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U vera"]
       interval: 5s
@@ -38,6 +38,7 @@ services:
   # Host port 6380 avoids the Valkey 6379 clash; container speaks Redis on 6379.
   falkordb:
     image: falkordb/falkordb:latest
+    profiles: ["falkordb"]
     ports: ["6380:6379"]
     volumes: ["./.data/falkordb:/data"]
 
@@ -57,12 +58,17 @@ services:
     build: .
     profiles: ["app"]
     command: ["alembic", "upgrade", "head"]
+    env_file:
+      - path: .env
+        required: false
     environment: &app_env
       VERA_DB__DSN: postgresql+asyncpg://vera:vera@postgres:5432/vera
       VERA_NEO4J__URI: bolt://neo4j:7687
       VERA_NEO4J__USER: neo4j
       VERA_NEO4J__PASSWORD: vera-local-pass
       VERA_MEMORY__PROVIDER: graphiti
+      VERA_FALKOR__HOST: falkordb
+      VERA_FALKOR__PORT: 6379
       VERA_RESILIENCE__VALKEY_URL: redis://valkey:6379/0
       VERA_OBJECTSTORE__ENDPOINT_URL: http://minio:9000
       VERA_OBJECTSTORE__ACCESS_KEY: minioadmin
@@ -74,6 +80,9 @@ services:
   api:
     build: .
     profiles: ["app"]
+    env_file:
+      - path: .env
+        required: false
     environment: *app_env
     ports: ["8000:8000"]
     depends_on:
@@ -84,6 +93,9 @@ services:
     build: .
     profiles: ["app"]
     command: ["python", "-m", "vera.entrypoints.worker.main"]
+    env_file:
+      - path: .env
+        required: false
     environment: *app_env
     depends_on:
       migrate:
@@ -93,8 +105,14 @@ services:
     build: .
     profiles: ["app"]
     command: ["python", "-m", "vera.entrypoints.mcp.main"]
+    env_file:
+      - path: .env
+        required: false
     environment: *app_env
     ports: ["8080:8080"]
     depends_on:
       migrate:
         condition: service_completed_successfully
+
+volumes:
+  postgres-data:
