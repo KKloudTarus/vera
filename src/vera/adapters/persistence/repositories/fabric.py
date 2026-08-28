@@ -251,6 +251,15 @@ class SqlAlchemyFactRepository:
         )
         return _to_fact(row) if row is not None else None
 
+    async def by_fact_key(self, *, group_id: str, fact_key: str) -> Fact | None:
+        row = await self._session.scalar(
+            select(FactRow)
+            .where(FactRow.group_id == group_id, FactRow.fact_key == fact_key)
+            .order_by(FactRow.system_from.desc())
+            .limit(1)
+        )
+        return _to_fact(row) if row is not None else None
+
     async def active_by_slot_key(self, *, group_id: str, slot_key: str) -> list[Fact]:
         rows = await self._session.scalars(
             select(FactRow).where(
@@ -272,6 +281,15 @@ class SqlAlchemyFactRepository:
             update(FactRow)
             .where(FactRow.group_id == group_id, FactRow.id == UUID(fact_id))
             .values(lifecycle_state=state.value, updated_at=utc_now())
+        )
+
+    async def set_aggregates(
+        self, *, group_id: str, fact_id: str, authority: float, confidence: float
+    ) -> None:
+        await self._session.execute(
+            update(FactRow)
+            .where(FactRow.group_id == group_id, FactRow.id == UUID(fact_id))
+            .values(authority=authority, confidence=confidence, updated_at=utc_now())
         )
 
 
@@ -324,6 +342,16 @@ class SqlAlchemyAssertionRepository:
             select(AssertionRow).where(
                 AssertionRow.group_id == group_id,
                 AssertionRow.fact_id == UUID(fact_id),
+                AssertionRow.state == AssertionState.ACTIVE.value,
+            )
+        )
+        return [_to_assertion(r) for r in rows]
+
+    async def active_for_artifact(self, *, group_id: str, artifact_id: str) -> list[Assertion]:
+        rows = await self._session.scalars(
+            select(AssertionRow).where(
+                AssertionRow.group_id == group_id,
+                AssertionRow.artifact_id == UUID(artifact_id),
                 AssertionRow.state == AssertionState.ACTIVE.value,
             )
         )
