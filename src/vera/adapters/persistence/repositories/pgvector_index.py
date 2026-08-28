@@ -7,9 +7,12 @@ from datetime import datetime
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from vera.adapters.persistence.repositories.passage_index import passage_hit
+from vera.adapters.persistence.repositories.passage_index import (
+    passage_hit,
+    retrieval_filter_params,
+)
 from vera.domain.ports.embedder import Embedder
-from vera.domain.ports.retrieval_index import PassageHit
+from vera.domain.ports.retrieval_index import PassageHit, RetrievalFilters
 
 _ANN = """
 SELECT c.id, c.artifact_version_id, c.text, c.heading_path, c.symbol_name,
@@ -17,10 +20,20 @@ SELECT c.id, c.artifact_version_id, c.text, c.heading_path, c.symbol_name,
        1 - (ce.embedding::vector({dimension}) <=> CAST(:qvec AS vector({dimension}))) AS score
 FROM chunk_embeddings ce
 JOIN chunks c ON c.id = ce.chunk_id
+JOIN artifact_versions av ON av.id = c.artifact_version_id
+JOIN artifacts a ON a.id = av.artifact_id
+JOIN knowledge_sources s ON s.id = a.source_id
 WHERE ce.group_id = :g AND c.group_id = :g AND ce.active
   AND ce.provider = :provider AND ce.model = :model
   AND ce.model_version = :model_version AND ce.dimension = :dimension
   AND (CAST(:created_before AS timestamptz) IS NULL OR c.created_at <= :created_before)
+  AND (CAST(:repository AS text) IS NULL OR s.config->>'repository' = :repository)
+  AND (CAST(:branch AS text) IS NULL OR s.config->>'branch' = :branch)
+  AND (CAST(:code_path AS text) IS NULL
+       OR coalesce(c.heading_path, '') LIKE '%' || :code_path || '%')
+  AND (CAST(:document_type AS text) IS NULL OR s.config->>'document_type' = :document_type)
+  AND (CAST(:source_type AS text) IS NULL OR s.kind = :source_type)
+  AND (CAST(:max_trust_tier AS integer) IS NULL OR s.trust_tier <= :max_trust_tier)
 {code_filter}
 ORDER BY ce.embedding::vector({dimension}) <=> CAST(:qvec AS vector({dimension}))
 LIMIT :lim
@@ -53,7 +66,14 @@ class _PgVectorSearch:
         self._dimension = dimension
 
     async def _search(
-        self, *, group_id: str, query: str, limit: int, created_before: datetime | None, code: bool
+        self,
+        *,
+        group_id: str,
+        query: str,
+        limit: int,
+        created_before: datetime | None,
+        code: bool,
+        filters: RetrievalFilters | None,
     ) -> list[PassageHit]:
         vector = await self._embedder.embed(query)
         if len(vector) != self._dimension:
@@ -79,6 +99,7 @@ class _PgVectorSearch:
                             "model": self._model,
                             "model_version": self._model_version,
                             "dimension": self._dimension,
+                            **retrieval_filter_params(filters),
                         },
                     )
                 )
@@ -90,17 +111,39 @@ class _PgVectorSearch:
 
 class PgVectorPassageIndex(_PgVectorSearch):
     async def search(
-        self, *, group_id: str, query: str, limit: int, created_before: datetime | None = None
+        self,
+        *,
+        group_id: str,
+        query: str,
+        limit: int,
+        created_before: datetime | None = None,
+        filters: RetrievalFilters | None = None,
     ) -> list[PassageHit]:
         return await self._search(
-            group_id=group_id, query=query, limit=limit, created_before=created_before, code=False
+            group_id=group_id,
+            query=query,
+            limit=limit,
+            created_before=created_before,
+            code=False,
+            filters=filters,
         )
 
 
 class PgVectorCodeIndex(_PgVectorSearch):
     async def search(
-        self, *, group_id: str, query: str, limit: int, created_before: datetime | None = None
+        self,
+        *,
+        group_id: str,
+        query: str,
+        limit: int,
+        created_before: datetime | None = None,
+        filters: RetrievalFilters | None = None,
     ) -> list[PassageHit]:
         return await self._search(
-            group_id=group_id, query=query, limit=limit, created_before=created_before, code=True
+            group_id=group_id,
+            query=query,
+            limit=limit,
+            created_before=created_before,
+            code=True,
+            filters=filters,
         )

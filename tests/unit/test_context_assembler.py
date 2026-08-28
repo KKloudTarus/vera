@@ -76,7 +76,9 @@ class _FakeFacts:
     def __init__(self, hits: list[FactHit]) -> None:
         self._hits = hits
 
-    async def search(self, *, group_id, query, limit, as_of=None, restrict_fact_ids=None):
+    async def search(
+        self, *, group_id, query, limit, as_of=None, restrict_fact_ids=None, filters=None
+    ):
         return self._hits
 
 
@@ -84,7 +86,7 @@ class _FakePassages:
     def __init__(self, hits: list[PassageHit]) -> None:
         self._hits = hits
 
-    async def search(self, *, group_id, query, limit, created_before=None):
+    async def search(self, *, group_id, query, limit, created_before=None, filters=None):
         return self._hits
 
 

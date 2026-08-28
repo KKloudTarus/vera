@@ -21,6 +21,7 @@ from vera.domain.ports.retrieval_index import (
     FactHit,
     PassageHit,
     PassageIndex,
+    RetrievalFilters,
 )
 from vera.shared.time import utc_now
 
@@ -278,28 +279,57 @@ class ContextAssembler:
         as_of: datetime | None = None,
         snapshot_fact_ids: set[str] | None = None,
         passage_cutoff: datetime | None = None,
+        filters: RetrievalFilters | None = None,
     ) -> AssembledContext:
         k = max(limit * 4, 20)
-        fact_hits, passage_hits, code_hits = await asyncio.gather(
-            self._facts.search(
-                group_id=group_id,
-                query=query,
-                limit=k,
-                as_of=as_of,
-                restrict_fact_ids=snapshot_fact_ids,
-            ),
-            self._passages.search(
-                group_id=group_id, query=query, limit=k, created_before=passage_cutoff
-            ),
-            self._code.search(
-                group_id=group_id, query=query, limit=k, created_before=passage_cutoff
-            ),
-        )
+        async with asyncio.TaskGroup() as group:
+            facts_task = group.create_task(
+                self._facts.search(
+                    group_id=group_id,
+                    query=query,
+                    limit=k,
+                    as_of=as_of,
+                    restrict_fact_ids=snapshot_fact_ids,
+                    filters=filters,
+                )
+            )
+            passages_task = group.create_task(
+                self._passages.search(
+                    group_id=group_id,
+                    query=query,
+                    limit=k,
+                    created_before=passage_cutoff,
+                    filters=filters,
+                )
+            )
+            code_task = group.create_task(
+                self._code.search(
+                    group_id=group_id,
+                    query=query,
+                    limit=k,
+                    created_before=passage_cutoff,
+                    filters=filters,
+                )
+            )
+        fact_hits = facts_task.result()
+        passage_hits = passages_task.result()
+        code_hits = code_task.result()
         candidates = [
             *(_from_fact(h) for h in fact_hits),
             *(_from_passage(h, "passage") for h in passage_hits),
             *(_from_passage(h, "code") for h in code_hits),
         ]
+        if filters is not None:
+            if filters.min_authority is not None:
+                candidates = [
+                    candidate
+                    for candidate in candidates
+                    if candidate.authority >= filters.min_authority
+                ]
+            if filters.conflict_handling == "exclude":
+                candidates = [candidate for candidate in candidates if not candidate.conflict]
+            elif filters.conflict_handling == "only":
+                candidates = [candidate for candidate in candidates if candidate.conflict]
         candidates = _dedup(candidates)
         now = utc_now()
         scored = _diversify(

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import hashlib
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
 from vera.adapters.persistence.repositories import SqlAlchemyCanonicalEntityRepository
@@ -56,7 +56,8 @@ from vera.domain.knowledge.fabric import (
 )
 from vera.domain.ontology import current_descriptor
 from vera.domain.ports.identity import ResolvedScope, ScopeResolver
-from vera.domain.ports.retrieval_index import CodeIndex, PassageIndex
+from vera.domain.ports.retrieval_index import CodeIndex, PassageIndex, RetrievalFilters
+from vera.domain.ports.snapshot import ContextPack
 from vera.shared.ids import uuid7
 from vera.shared.time import utc_now
 from vera.shared.types import JsonDict
@@ -66,6 +67,26 @@ _PROPOSAL_AUTHORITY = 0.4  # tier 4 (unverified) authority; proposals never outr
 
 class ScopeError(Exception):
     """The principal has no resolvable scope, or requested a scope it may not access."""
+
+
+def _context_pack_payload(pack: ContextPack) -> JsonDict:
+    return {
+        "pack_id": pack.id,
+        "scope_id": pack.group_id,
+        "snapshot_id": pack.snapshot_id,
+        "query": pack.query,
+        "created_at": pack.created_at.isoformat(),
+        "expires_at": pack.expires_at.isoformat(),
+        "request_hash": pack.request_hash,
+        "result_references": pack.result_references,
+        "assembler_version": pack.assembler_version,
+        "token_estimate": pack.token_estimate,
+        "result_count": pack.result_count,
+        "omitted": pack.omitted,
+        "conflicts": pack.conflicts,
+        "freshness_warnings": pack.freshness_warnings,
+        "results": pack.results,
+    }
 
 
 class KnowledgeService:
@@ -116,12 +137,16 @@ class KnowledgeService:
             raise ScopeError(f"principal {principal_id} has no scope")
         return scope
 
-    @staticmethod
-    def _target_group(scope: ResolvedScope, project: str | None) -> str:
+    async def _target_group(self, scope: ResolvedScope, project: str | None) -> str:
         if project is not None:
-            if project not in scope.group_ids:
-                raise ScopeError("project is outside the caller's resolved scopes")
-            return project
+            if project in scope.group_ids:
+                return project
+            resolved = await self._read.resolve_project(
+                group_ids=list(scope.group_ids), project=project
+            )
+            if resolved is not None:
+                return resolved
+            raise ScopeError("project is outside the caller's resolved scopes")
         shared = [g for g in scope.group_ids if scope_kind(g) is not ScopeKind.PERSONAL]
         if len(shared) == 1:
             return shared[0]
@@ -142,11 +167,34 @@ class KnowledgeService:
         token_budget: int = 2000,
         as_of: datetime | None = None,
         hints: JsonDict | None = None,
+        repository: str | None = None,
+        branch: str | None = None,
+        code_path: str | None = None,
+        document_type: str | None = None,
+        source_type: str | None = None,
+        include_predicates: tuple[str, ...] = (),
+        exclude_predicates: tuple[str, ...] = (),
+        min_authority: float | None = None,
+        max_trust_tier: int | None = None,
+        citation_mode: Literal["full", "compact"] = "full",
+        conflict_handling: Literal["include", "exclude", "only"] = "include",
     ) -> JsonDict:
         scope = await self._resolve(principal_id)
-        group = self._target_group(scope, project)
+        group = await self._target_group(scope, project)
         service = ContextPackService(
             assembler=self._assembler, snapshots=self._snapshots, packs=self._packs
+        )
+        filters = RetrievalFilters(
+            repository=repository,
+            branch=branch,
+            code_path=code_path,
+            document_type=document_type,
+            source_type=source_type,
+            include_predicates=tuple(predicate.upper() for predicate in include_predicates),
+            exclude_predicates=tuple(predicate.upper() for predicate in exclude_predicates),
+            min_authority=min_authority,
+            max_trust_tier=max_trust_tier,
+            conflict_handling=conflict_handling,
         )
         pack = await service.create(
             group_id=group,
@@ -156,19 +204,22 @@ class KnowledgeService:
             limit=limit,
             token_budget=token_budget,
             as_of=as_of,
+            filters=filters,
+            citation_mode=citation_mode,
             actor=str(principal_id),
         )
-        return {
-            "pack_id": pack.id,
-            "snapshot_id": pack.snapshot_id,
-            "query": pack.query,
-            "token_estimate": pack.token_estimate,
-            "result_count": pack.result_count,
-            "omitted": pack.omitted,
-            "conflicts": pack.conflicts,
-            "freshness_warnings": pack.freshness_warnings,
-            "results": pack.results,
-        }
+        return _context_pack_payload(pack)
+
+    async def get_context_pack(self, principal_id: UUID, *, pack_id: str) -> JsonDict | None:
+        scope = await self._resolve(principal_id)
+        service = ContextPackService(
+            assembler=self._assembler, snapshots=self._snapshots, packs=self._packs
+        )
+        for group_id in scope.group_ids:
+            pack = await service.get(group_id=group_id, pack_id=pack_id)
+            if pack is not None:
+                return _context_pack_payload(pack)
+        return None
 
     async def search(
         self,
@@ -180,7 +231,7 @@ class KnowledgeService:
         as_of: datetime | None = None,
     ) -> JsonDict:
         scope = await self._resolve(principal_id)
-        group = self._target_group(scope, project)
+        group = await self._target_group(scope, project)
         assembled = await self._assembler.assemble(
             query=query, group_id=group, limit=limit, as_of=as_of
         )
@@ -212,6 +263,18 @@ class KnowledgeService:
     async def get_fact(self, principal_id: UUID, *, fact_key: str) -> dict[str, Any] | None:
         scope = await self._resolve(principal_id)
         return await self._read.get_fact(group_ids=list(scope.group_ids), fact_key=fact_key)
+
+    async def get_entity(
+        self, principal_id: UUID, *, entity_id: str, limit: int = 100
+    ) -> dict[str, Any] | None:
+        scope = await self._resolve(principal_id)
+        return await self._read.get_entity(
+            group_ids=list(scope.group_ids), entity_id=entity_id, limit=limit
+        )
+
+    async def get_source(self, principal_id: UUID, *, source_id: str) -> dict[str, Any] | None:
+        scope = await self._resolve(principal_id)
+        return await self._read.get_source(group_ids=list(scope.group_ids), source_id=source_id)
 
     async def explain_fact(self, principal_id: UUID, *, fact_key: str) -> dict[str, Any] | None:
         scope = await self._resolve(principal_id)
@@ -267,7 +330,7 @@ class KnowledgeService:
         self, principal_id: UUID, *, project: str | None = None, as_of: datetime | None = None
     ) -> JsonDict:
         scope = await self._resolve(principal_id)
-        group = self._target_group(scope, project)
+        group = await self._target_group(scope, project)
         embedding_version: JsonDict = {}
         retrieval_index_version = "fts-v1"
         if self._c.settings.memory.vector_search_enabled and self._c.embedder is not None:

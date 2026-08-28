@@ -71,14 +71,16 @@ _EVENT = text(
 
 _INSERT_PACK = text(
     "INSERT INTO context_packs (group_id, snapshot_id, query, hints, token_estimate, "
-    "result_count, omitted, conflicts, freshness_warnings, results) "
+    "result_count, omitted, conflicts, freshness_warnings, results, request_hash, "
+    "result_references, expires_at, assembler_version) "
     "VALUES (:g, :sid, :q, CAST(:hints AS jsonb), :tokens, :rc, :om, :cf, :fw, "
-    "CAST(:res AS jsonb)) "
+    "CAST(:res AS jsonb), :rh, CAST(:refs AS jsonb), :expires, :av) "
     "RETURNING id, created_at"
 )
 _GET_PACK = text(
     "SELECT id, group_id, snapshot_id, created_at, query, token_estimate, result_count, "
-    "omitted, conflicts, freshness_warnings, results "
+    "omitted, conflicts, freshness_warnings, results, request_hash, result_references, "
+    "expires_at, assembler_version "
     "FROM context_packs WHERE id = :pid AND group_id = :g"
 )
 
@@ -201,6 +203,10 @@ class SqlAlchemyContextPackRepository:
         conflicts: int,
         freshness_warnings: int,
         results: list[JsonDict],
+        request_hash: str,
+        result_references: list[str],
+        expires_at: datetime,
+        assembler_version: str,
         snapshot_id: str | None = None,
         hints: JsonDict | None = None,
         actor: str | None = None,
@@ -220,6 +226,10 @@ class SqlAlchemyContextPackRepository:
                         "cf": conflicts,
                         "fw": freshness_warnings,
                         "res": json.dumps(results),
+                        "rh": request_hash,
+                        "refs": json.dumps(result_references),
+                        "expires": expires_at,
+                        "av": assembler_version,
                     },
                 )
             ).one()
@@ -243,6 +253,10 @@ class SqlAlchemyContextPackRepository:
                 omitted=omitted,
                 conflicts=conflicts,
                 freshness_warnings=freshness_warnings,
+                request_hash=request_hash,
+                result_references=result_references,
+                expires_at=expires_at,
+                assembler_version=assembler_version,
                 snapshot_id=snapshot_id,
                 results=results,
             )
@@ -267,5 +281,9 @@ class SqlAlchemyContextPackRepository:
             omitted=row["omitted"],
             conflicts=row["conflicts"],
             freshness_warnings=row["freshness_warnings"],
+            request_hash=row["request_hash"],
+            result_references=[str(ref) for ref in row["result_references"]],
+            expires_at=row["expires_at"],
+            assembler_version=row["assembler_version"],
             results=list(row["results"]),
         )

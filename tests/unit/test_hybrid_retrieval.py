@@ -5,7 +5,7 @@ from datetime import datetime
 import pytest
 
 from vera.application.retrieval import HybridPassageIndex
-from vera.domain.ports.retrieval_index import PassageHit
+from vera.domain.ports.retrieval_index import PassageHit, RetrievalFilters
 
 
 class _Index:
@@ -19,8 +19,9 @@ class _Index:
         query: str,
         limit: int,
         created_before: datetime | None = None,
+        filters: RetrievalFilters | None = None,
     ) -> list[PassageHit]:
-        del group_id, query, created_before
+        del group_id, query, created_before, filters
         return self._hits[:limit]
 
 

@@ -14,7 +14,7 @@ from datetime import datetime, timedelta
 from uuid import UUID
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import exc, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from vera.adapters.persistence.repositories import SqlAlchemyCanonicalEntityRepository
@@ -30,7 +30,11 @@ from vera.adapters.persistence.repositories.snapshot import (
 )
 from vera.adapters.persistence.unit_of_work import SqlAlchemyUnitOfWork
 from vera.application.retrieval import ContextAssembler
-from vera.application.snapshot import ContextPackService, SnapshotService
+from vera.application.snapshot import (
+    ContextPackExpiredError,
+    ContextPackService,
+    SnapshotService,
+)
 from vera.domain.knowledge import fabric
 from vera.domain.knowledge.fabric import Fact, FactLifecycle, ObjectType
 from vera.shared.ids import uuid7
@@ -253,10 +257,22 @@ async def test_context_pack_is_persisted_and_retrievable(
     assert created.token_estimate > 0
 
     fetched = await service.get(group_id=group, pack_id=created.id)
-    assert fetched is not None
-    assert fetched.query == "eks"
-    assert len(fetched.results) == created.result_count
-    assert all(r["citation"]["ref"] for r in fetched.results)  # citations survive the round trip
+    assert fetched == created
+    assert len(created.request_hash) == 64
+    assert created.result_references == [str(result["ref"]) for result in created.results]
+    assert created.expires_at > created.created_at
+    assert created.assembler_version == "context-assembler-v1"
+    assert all(r["citation"]["ref"] for r in created.results)  # citations survive the round trip
+    assert await service.get(group_id=f"p:other-{uuid7().hex[:12]}", pack_id=created.id) is None
+    before = await _count(sessionmaker, group, "SELECT count(*) FROM context_packs")
+    assert await service.get(group_id=group, pack_id=created.id) == created
+    assert await _count(sessionmaker, group, "SELECT count(*) FROM context_packs") == before
+    with pytest.raises(exc.DBAPIError, match="context packs are immutable"):
+        async with _tenant(sessionmaker, group) as session:
+            await session.execute(
+                text("UPDATE context_packs SET query = 'changed' WHERE id = :id"),
+                {"id": created.id},
+            )
     assert (
         await _count(
             sessionmaker,
@@ -265,6 +281,23 @@ async def test_context_pack_is_persisted_and_retrievable(
         )
         == 1
     )
+
+    expired = await packs.save(
+        group_id=group,
+        query="expired",
+        token_estimate=0,
+        result_count=0,
+        omitted=0,
+        conflicts=0,
+        freshness_warnings=0,
+        results=[],
+        request_hash="0" * 64,
+        result_references=[],
+        expires_at=utc_now() - timedelta(seconds=1),
+        assembler_version="context-assembler-v1",
+    )
+    with pytest.raises(ContextPackExpiredError, match="expired"):
+        await service.get(group_id=group, pack_id=expired.id)
 
 
 async def test_context_pack_over_snapshot_excludes_later_ingested_passages(

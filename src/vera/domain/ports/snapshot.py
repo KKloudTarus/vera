@@ -47,6 +47,10 @@ class ContextPack:
     omitted: int
     conflicts: int
     freshness_warnings: int
+    request_hash: str
+    result_references: list[str]
+    expires_at: datetime
+    assembler_version: str
     snapshot_id: str | None = None
     results: list[JsonDict] = field(default_factory=_empty_results)
 
@@ -83,6 +87,10 @@ class ContextPackRepository(Protocol):
         conflicts: int,
         freshness_warnings: int,
         results: list[JsonDict],
+        request_hash: str,
+        result_references: list[str],
+        expires_at: datetime,
+        assembler_version: str,
         snapshot_id: str | None = None,
         hints: JsonDict | None = None,
         actor: str | None = None,

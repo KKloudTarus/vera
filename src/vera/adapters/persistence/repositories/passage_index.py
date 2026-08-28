@@ -15,7 +15,7 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from vera.domain.ports.retrieval_index import FactHit, PassageHit
+from vera.domain.ports.retrieval_index import FactHit, PassageHit, RetrievalFilters
 
 # Candidate generation favors recall: OR the query lexemes (plainto_tsquery ANDs them, so a
 # multi-word natural query would never match a terse fact doc). ts_rank still orders by how
@@ -23,12 +23,22 @@ from vera.domain.ports.retrieval_index import FactHit, PassageHit
 _ORQ = "CAST(replace(CAST(plainto_tsquery('english', :q) AS text), ' & ', ' | ') AS tsquery)"
 
 _PASSAGE = f"""
-SELECT id, artifact_version_id, text, heading_path, symbol_name,
-       start_offset, end_offset, page_number, start_line, end_line,
-       ts_rank(search_vector, {_ORQ}) AS score
-FROM chunks
-WHERE group_id = :g AND search_vector @@ {_ORQ}
-  AND (CAST(:created_before AS timestamptz) IS NULL OR created_at <= :created_before)
+SELECT c.id, c.artifact_version_id, c.text, c.heading_path, c.symbol_name,
+       c.start_offset, c.end_offset, c.page_number, c.start_line, c.end_line,
+       ts_rank(c.search_vector, {_ORQ}) AS score
+FROM chunks c
+JOIN artifact_versions av ON av.id = c.artifact_version_id
+JOIN artifacts a ON a.id = av.artifact_id
+JOIN knowledge_sources s ON s.id = a.source_id
+WHERE c.group_id = :g AND c.search_vector @@ {_ORQ}
+  AND (CAST(:created_before AS timestamptz) IS NULL OR c.created_at <= :created_before)
+  AND (CAST(:repository AS text) IS NULL OR s.config->>'repository' = :repository)
+  AND (CAST(:branch AS text) IS NULL OR s.config->>'branch' = :branch)
+  AND (CAST(:code_path AS text) IS NULL
+       OR coalesce(c.heading_path, '') LIKE '%' || :code_path || '%')
+  AND (CAST(:document_type AS text) IS NULL OR s.config->>'document_type' = :document_type)
+  AND (CAST(:source_type AS text) IS NULL OR s.kind = :source_type)
+  AND (CAST(:max_trust_tier AS integer) IS NULL OR s.trust_tier <= :max_trust_tier)
 {{code_filter}}
 ORDER BY score DESC
 LIMIT :lim
@@ -58,6 +68,33 @@ WHERE f.group_id = :g
        OR to_tsvector('english', cs.canonical_name) @@ q.q
        OR to_tsvector('english', coalesce(co.canonical_name, '')) @@ q.q)
   AND {{membership}}
+  AND (CAST(:min_authority AS double precision) IS NULL OR f.authority >= :min_authority)
+  AND (cardinality(CAST(:include_predicates AS text[])) = 0
+       OR f.predicate = ANY(CAST(:include_predicates AS text[])))
+  AND NOT (f.predicate = ANY(CAST(:exclude_predicates AS text[])))
+  AND (:conflict_handling = 'include'
+       OR (:conflict_handling = 'exclude' AND f.lifecycle_state <> 'disputed')
+       OR (:conflict_handling = 'only' AND f.lifecycle_state = 'disputed'))
+  AND ((CAST(:repository AS text) IS NULL AND CAST(:branch AS text) IS NULL
+        AND CAST(:code_path AS text) IS NULL AND CAST(:document_type AS text) IS NULL
+        AND CAST(:source_type AS text) IS NULL
+        AND CAST(:max_trust_tier AS integer) IS NULL)
+       OR EXISTS (
+           SELECT 1 FROM assertions af
+           LEFT JOIN knowledge_sources src ON src.id = af.knowledge_source_id
+           LEFT JOIN artifact_versions fav ON fav.id = af.artifact_version_id
+           LEFT JOIN chunks fc ON fc.artifact_version_id = fav.id
+           WHERE af.fact_id = f.id AND af.state = 'active'
+             AND (CAST(:repository AS text) IS NULL OR src.config->>'repository' = :repository)
+             AND (CAST(:branch AS text) IS NULL OR src.config->>'branch' = :branch)
+             AND (CAST(:code_path AS text) IS NULL
+                  OR coalesce(fc.heading_path, '') LIKE '%' || :code_path || '%')
+             AND (CAST(:document_type AS text) IS NULL
+                  OR src.config->>'document_type' = :document_type)
+             AND (CAST(:source_type AS text) IS NULL OR src.kind = :source_type)
+             AND (CAST(:max_trust_tier AS integer) IS NULL
+                  OR src.trust_tier <= :max_trust_tier)
+       ))
 ORDER BY score DESC
 LIMIT :lim
 """
@@ -92,6 +129,22 @@ def passage_hit(row: Any) -> PassageHit:
     )
 
 
+def retrieval_filter_params(filters: RetrievalFilters | None) -> dict[str, object]:
+    selected = filters or RetrievalFilters()
+    return {
+        "repository": selected.repository,
+        "branch": selected.branch,
+        "code_path": selected.code_path,
+        "document_type": selected.document_type,
+        "source_type": selected.source_type,
+        "include_predicates": list(selected.include_predicates),
+        "exclude_predicates": list(selected.exclude_predicates),
+        "min_authority": selected.min_authority,
+        "max_trust_tier": selected.max_trust_tier,
+        "conflict_handling": selected.conflict_handling,
+    }
+
+
 class SqlAlchemyPassageIndex:
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self._session_factory = session_factory
@@ -103,13 +156,20 @@ class SqlAlchemyPassageIndex:
         query: str,
         limit: int,
         created_before: datetime | None = None,
+        filters: RetrievalFilters | None = None,
     ) -> list[PassageHit]:
         async with self._session_factory() as session:
             rows = (
                 (
                     await session.execute(
                         text(_PASSAGE.format(code_filter="")),
-                        {"g": group_id, "q": query, "lim": limit, "created_before": created_before},
+                        {
+                            "g": group_id,
+                            "q": query,
+                            "lim": limit,
+                            "created_before": created_before,
+                            **retrieval_filter_params(filters),
+                        },
                     )
                 )
                 .mappings()
@@ -129,13 +189,20 @@ class SqlAlchemyCodeIndex:
         query: str,
         limit: int,
         created_before: datetime | None = None,
+        filters: RetrievalFilters | None = None,
     ) -> list[PassageHit]:
         async with self._session_factory() as session:
             rows = (
                 (
                     await session.execute(
                         text(_PASSAGE.format(code_filter="AND symbol_name IS NOT NULL")),
-                        {"g": group_id, "q": query, "lim": limit, "created_before": created_before},
+                        {
+                            "g": group_id,
+                            "q": query,
+                            "lim": limit,
+                            "created_before": created_before,
+                            **retrieval_filter_params(filters),
+                        },
                     )
                 )
                 .mappings()
@@ -156,6 +223,7 @@ class SqlAlchemyFactCandidateSource:
         limit: int,
         as_of: datetime | None = None,
         restrict_fact_ids: set[str] | None = None,
+        filters: RetrievalFilters | None = None,
     ) -> list[FactHit]:
         if restrict_fact_ids is not None:
             if not restrict_fact_ids:
@@ -166,10 +234,17 @@ class SqlAlchemyFactCandidateSource:
                 "q": query,
                 "lim": limit,
                 "ids": list(restrict_fact_ids),
+                **retrieval_filter_params(filters),
             }
         else:
             sql = text(_FACTS_LATEST)
-            params = {"g": group_id, "q": query, "lim": limit, "as_of": as_of}
+            params = {
+                "g": group_id,
+                "q": query,
+                "lim": limit,
+                "as_of": as_of,
+                **retrieval_filter_params(filters),
+            }
         async with self._session_factory() as session:
             rows = (await session.execute(sql, params)).mappings().all()
         hits: list[FactHit] = []

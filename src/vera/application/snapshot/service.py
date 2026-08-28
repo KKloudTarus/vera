@@ -8,22 +8,50 @@ conflict and freshness counts the assembler reports.
 
 from __future__ import annotations
 
-from datetime import datetime
+import hashlib
+import json
+from dataclasses import asdict
+from datetime import datetime, timedelta
+from typing import Literal
 
 from vera.application.retrieval.context_assembler import ContextAssembler, ScoredCandidate
+from vera.domain.ports.retrieval_index import RetrievalFilters
 from vera.domain.ports.snapshot import (
     ContextPack,
     ContextPackRepository,
     Snapshot,
     SnapshotRepository,
 )
+from vera.shared.time import utc_now
 from vera.shared.types import JsonDict
 
 _POLICY_VERSION = "ontology-v1"
+_ASSEMBLER_VERSION = "context-assembler-v1"
+_PACK_TTL = timedelta(days=30)
 
 
-def _serialize(candidate: ScoredCandidate) -> JsonDict:
+class ContextPackExpiredError(Exception):
+    pass
+
+
+def _serialize(
+    candidate: ScoredCandidate, *, citation_mode: Literal["full", "compact"]
+) -> JsonDict:
     citation = candidate.citation
+    citation_payload: JsonDict = {
+        "kind": citation.kind,
+        "ref": citation.ref,
+        "artifact_version_id": citation.artifact_version_id,
+    }
+    if citation_mode == "full":
+        citation_payload.update(
+            {
+                "excerpt": citation.excerpt,
+                "heading_path": citation.heading_path,
+                "start_offset": citation.start_offset,
+                "end_offset": citation.end_offset,
+            }
+        )
     return {
         "kind": candidate.kind,
         "ref": candidate.ref,
@@ -38,15 +66,7 @@ def _serialize(candidate: ScoredCandidate) -> JsonDict:
             "recency": candidate.signals.recency,
             "confidence": candidate.signals.confidence,
         },
-        "citation": {
-            "kind": citation.kind,
-            "ref": citation.ref,
-            "excerpt": citation.excerpt,
-            "heading_path": citation.heading_path,
-            "artifact_version_id": citation.artifact_version_id,
-            "start_offset": citation.start_offset,
-            "end_offset": citation.end_offset,
-        },
+        "citation": citation_payload,
     }
 
 
@@ -100,6 +120,8 @@ class ContextPackService:
         limit: int = 10,
         token_budget: int = 2000,
         as_of: datetime | None = None,
+        filters: RetrievalFilters | None = None,
+        citation_mode: Literal["full", "compact"] = "full",
         actor: str | None = None,
     ) -> ContextPack:
         fact_ids: set[str] | None = None
@@ -120,7 +142,25 @@ class ContextPackService:
             as_of=as_of,
             snapshot_fact_ids=fact_ids,
             passage_cutoff=passage_cutoff,
+            filters=filters,
         )
+        results = [
+            _serialize(candidate, citation_mode=citation_mode) for candidate in assembled.results
+        ]
+        request = {
+            "group_id": group_id,
+            "query": query,
+            "snapshot_id": snapshot_id,
+            "hints": hints or {},
+            "limit": limit,
+            "token_budget": token_budget,
+            "as_of": as_of.isoformat() if as_of else None,
+            "filters": asdict(filters) if filters else {},
+            "citation_mode": citation_mode,
+        }
+        request_hash = hashlib.sha256(
+            json.dumps(request, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
         return await self._packs.save(
             group_id=group_id,
             query=query,
@@ -131,9 +171,16 @@ class ContextPackService:
             omitted=assembled.omitted,
             conflicts=assembled.conflicts,
             freshness_warnings=assembled.freshness_warnings,
-            results=[_serialize(c) for c in assembled.results],
+            results=results,
+            request_hash=request_hash,
+            result_references=[str(result["ref"]) for result in results],
+            expires_at=utc_now() + _PACK_TTL,
+            assembler_version=_ASSEMBLER_VERSION,
             actor=actor,
         )
 
     async def get(self, *, group_id: str, pack_id: str) -> ContextPack | None:
-        return await self._packs.get(group_id=group_id, pack_id=pack_id)
+        pack = await self._packs.get(group_id=group_id, pack_id=pack_id)
+        if pack is not None and pack.expires_at <= utc_now():
+            raise ContextPackExpiredError(f"context pack {pack_id} expired")
+        return pack

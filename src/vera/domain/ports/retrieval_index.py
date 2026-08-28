@@ -10,7 +10,21 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Protocol
+from typing import Literal, Protocol
+
+
+@dataclass(frozen=True, slots=True)
+class RetrievalFilters:
+    repository: str | None = None
+    branch: str | None = None
+    code_path: str | None = None
+    document_type: str | None = None
+    source_type: str | None = None
+    include_predicates: tuple[str, ...] = field(default_factory=tuple)
+    exclude_predicates: tuple[str, ...] = field(default_factory=tuple)
+    min_authority: float | None = None
+    max_trust_tier: int | None = None
+    conflict_handling: Literal["include", "exclude", "only"] = "include"
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,6 +66,7 @@ class PassageIndex(Protocol):
         query: str,
         limit: int,
         created_before: datetime | None = None,
+        filters: RetrievalFilters | None = None,
     ) -> list[PassageHit]:
         """Search passages. When ``created_before`` is given (a snapshot's freeze time), only
         chunks ingested at or before it are returned, so a pack against a snapshot reproduces
@@ -68,6 +83,7 @@ class CodeIndex(Protocol):
         query: str,
         limit: int,
         created_before: datetime | None = None,
+        filters: RetrievalFilters | None = None,
     ) -> list[PassageHit]: ...
 
 
@@ -80,6 +96,7 @@ class FactCandidateSource(Protocol):
         limit: int,
         as_of: datetime | None = None,
         restrict_fact_ids: set[str] | None = None,
+        filters: RetrievalFilters | None = None,
     ) -> list[FactHit]:
         """Search active facts, or, when ``restrict_fact_ids`` is given (a snapshot's frozen
         membership), only those facts regardless of their current lifecycle, for reproducible

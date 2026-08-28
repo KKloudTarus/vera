@@ -6,7 +6,7 @@ import asyncio
 from dataclasses import replace
 from datetime import datetime
 
-from vera.domain.ports.retrieval_index import PassageHit, PassageIndex
+from vera.domain.ports.retrieval_index import PassageHit, PassageIndex, RetrievalFilters
 
 
 class HybridPassageIndex:
@@ -23,6 +23,7 @@ class HybridPassageIndex:
         query: str,
         limit: int,
         created_before: datetime | None = None,
+        filters: RetrievalFilters | None = None,
     ) -> list[PassageHit]:
         async with asyncio.TaskGroup() as group:
             tasks = [
@@ -32,6 +33,7 @@ class HybridPassageIndex:
                         query=query,
                         limit=limit,
                         created_before=created_before,
+                        filters=filters,
                     )
                 )
                 for index in self._indexes

@@ -22,7 +22,12 @@ _EXPECTED = {
     "memory_feedback",
     # Generic knowledge_* contracts (Phase 6).
     "knowledge_get_context",
+    "knowledge_get_context_pack",
     "knowledge_search",
+    "knowledge_get_fact",
+    "knowledge_get_entity",
+    "knowledge_get_source",
+    "knowledge_explore",
     "knowledge_explain_fact",
     "knowledge_get_evidence",
     "knowledge_feedback",
