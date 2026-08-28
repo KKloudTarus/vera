@@ -63,7 +63,8 @@ async def test_confluence_incremental_uses_the_cursor() -> None:
         await connector.fetch_changes({"since": "2026-01-01T00:00:00.000Z"})
 
     cql = route.calls.last.request.url.params["cql"]
-    assert 'lastmodified > "2026-01-01T00:00:00.000Z"' in cql
+    # >= (not >) so pages sharing the boundary lastmodified are not skipped across runs.
+    assert 'lastmodified >= "2026-01-01T00:00:00.000Z"' in cql
 
 
 @pytest.mark.asyncio
@@ -286,3 +287,67 @@ def test_registry_missing_token_env_is_an_error(monkeypatch: pytest.MonkeyPatch)
                 "token_env": "VERA_TEST_ABSENT_TOKEN",
             }
         )
+
+
+def test_storage_to_markdown_preserves_headings_lists_and_links() -> None:
+    from vera.adapters.connectors.base import storage_to_markdown
+
+    xhtml = (
+        "<h1>Guide</h1><p>Intro prose.</p>"
+        "<h2>Setup</h2><ul><li>Install it</li><li>Run it</li></ul>"
+        "<p>See <a href='https://x/docs'>the docs</a>.</p>"
+    )
+    md = storage_to_markdown(xhtml)
+    assert "# Guide" in md
+    assert "## Setup" in md
+    assert "- Install it" in md
+    assert "the docs (https://x/docs)" in md
+
+
+def _confluence_page(page_id: str, when: str, storage: str) -> dict:
+    return {
+        "id": page_id,
+        "title": f"Page {page_id}",
+        "version": {"when": when},
+        "body": {"storage": {"value": storage}},
+    }
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_confluence_paginates_and_converts_to_markdown() -> None:
+    route = respx.get("https://c/rest/api/content/search")
+    route.side_effect = [
+        httpx.Response(
+            200,
+            json={
+                "results": [
+                    _confluence_page("1", "2026-01-01T00:00:00.000Z", "<h1>A</h1><p>alpha</p>"),
+                    _confluence_page("2", "2026-01-02T00:00:00.000Z", "<h1>B</h1><p>bravo</p>"),
+                ]
+            },
+        ),
+        httpx.Response(
+            200,
+            json={
+                "results": [
+                    _confluence_page("3", "2026-01-03T00:00:00.000Z", "<h1>C</h1><p>charlie</p>"),
+                ]
+            },
+        ),
+    ]
+    conn = ConfluenceConnector(
+        httpx.AsyncClient(), base_url="https://c", space_key="ENG", page_size=2
+    )
+
+    first = await conn.fetch_changes(None)
+    assert first.has_more is True  # a full page => more to drain
+    assert first.next_cursor["start"] == 2
+    assert first.records[0].metadata["content_type"] == "text/markdown"
+    assert "# A" in first.records[0].body  # headings survive for structural chunking
+
+    second = await conn.fetch_changes(first.next_cursor)
+    assert second.has_more is False  # partial page => drained
+    assert second.next_cursor == {
+        "since": "2026-01-03T00:00:00.000Z"
+    }  # watermark = max lastmodified

@@ -196,3 +196,31 @@ async def test_scheduled_confluence_sync_updates_without_duplicates(
         # Second run is due again but the source reports no changes: no duplicate.
         await scheduler.run_due()
         assert await _artifact_count() == 1
+
+
+async def test_sync_drains_all_pages_in_one_run(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    source: tuple[str, object],
+) -> None:
+    # gap 9: a run must follow the connector's pagination until exhausted, not stop after the
+    # first API page. Two pages (has_more then done) must both be ingested in a single sync.
+    group, source_id = source
+    page1 = ConnectorBatch(
+        records=(_triple_record("cmdb:p1", "svc1", "eks"),),
+        next_cursor={"start": 1},
+        has_more=True,
+    )
+    page2 = ConnectorBatch(
+        records=(_triple_record("cmdb:p2", "svc2", "ecs"),),
+        next_cursor={"since": "final"},
+        has_more=False,
+    )
+    connector = _FakeConnector([page1, page2])
+
+    out = await _runner(sessionmaker).sync(source_id=source_id, group_id=group, connector=connector)  # type: ignore[arg-type]
+    assert out.processed == 2  # both pages drained in one run
+    assert await _episode_count(sessionmaker, group) == 2
+
+    # The persisted cursor is the last page's cursor (the new watermark), not the first page's.
+    state = SqlAlchemySyncStateStore(sessionmaker)
+    assert await state.get_cursor(source_id) == {"since": "final"}  # type: ignore[arg-type]

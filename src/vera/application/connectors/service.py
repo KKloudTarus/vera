@@ -20,6 +20,9 @@ from vera.shared.errors import is_ok
 
 UnitOfWorkFactory = Callable[[], UnitOfWork]
 
+# A safety bound so a misbehaving connector that always reports has_more cannot loop forever.
+_MAX_PAGES_PER_SYNC = 10_000
+
 
 class SyncRunner:
     def __init__(
@@ -43,33 +46,41 @@ class SyncRunner:
         cursor = await self._state.get_cursor(source_id)
         job_id = await self._state.start_job(source_id)
         try:
-            batch = await connector.fetch_changes(cursor)
             processed = 0
             unchanged = 0
-            for record in batch.records:
-                async with self._uow_factory() as uow:
-                    await uow.use_tenant(group_id)
-                    result = await CurationService(
-                        uow, self._extractor, self._object_store, self._judge
-                    ).ingest_artifact(
-                        IngestArtifact(
-                            source_id=source_id,
-                            group_id=group_id,
-                            external_id=record.external_id,
-                            body=record.body,
-                            knowledge_type=record.knowledge_type,
-                            title=record.title,
-                            metadata=record.metadata,
+            pages = 0
+            # Drain the connector's pagination: keep fetching while it reports more, following
+            # the cursor it returns each time, so a run that spans many API pages loses nothing.
+            while True:
+                batch = await connector.fetch_changes(cursor)
+                for record in batch.records:
+                    async with self._uow_factory() as uow:
+                        await uow.use_tenant(group_id)
+                        result = await CurationService(
+                            uow, self._extractor, self._object_store, self._judge
+                        ).ingest_artifact(
+                            IngestArtifact(
+                                source_id=source_id,
+                                group_id=group_id,
+                                external_id=record.external_id,
+                                body=record.body,
+                                knowledge_type=record.knowledge_type,
+                                title=record.title,
+                                metadata=record.metadata,
+                            )
                         )
-                    )
-                    await uow.commit()
-                if is_ok(result) and result.value.action == "unchanged":
-                    unchanged += 1
-                else:
-                    processed += 1
-            await self._state.save_cursor(source_id, batch.next_cursor)
+                        await uow.commit()
+                    if is_ok(result) and result.value.action == "unchanged":
+                        unchanged += 1
+                    else:
+                        processed += 1
+                cursor = batch.next_cursor
+                pages += 1
+                if not batch.has_more or pages >= _MAX_PAGES_PER_SYNC:
+                    break
+            await self._state.save_cursor(source_id, cursor)
             await self._state.finish_job(job_id, processed=processed, unchanged=unchanged)
-            return SyncOutcome(processed=processed, unchanged=unchanged, cursor=batch.next_cursor)
+            return SyncOutcome(processed=processed, unchanged=unchanged, cursor=cursor)
         except Exception as exc:
             await self._state.fail_job(job_id, error=str(exc))
             raise
