@@ -120,9 +120,13 @@ It runs only on the top candidates (bounded cost) and catches head cases the ble
 
 ## Embeddings and entity resolution
 
-**Model.** OpenAI `text-embedding-3-small` at 1536 dimensions by default. Embeddings are
-cached in-process (LRU + TTL) and optionally in Valkey, keyed by `model:dim` plus a content
-hash. Every provider call is metered for cost, inside the cache, so hits cost nothing.
+**Model.** OpenAI `text-embedding-3-small` at 1536 dimensions by default; the provider is a
+configuration choice (`deterministic`, `openai`, or `voyage`) reached through the `Embedder`
+port, so Voyage AI (e.g. `voyage-3.5`) can back embeddings without any code change.
+Embeddings are cached in-process (LRU + TTL) and optionally in Valkey, keyed by `model:dim`
+plus a content hash. Every provider call is metered for cost, inside the cache, so hits cost
+nothing. The stage-3 reranker is likewise swappable (`llm` or a Voyage reranker such as
+`rerank-2.5`) through the `Reranker` port.
 
 **One dimension per group.** A group records the model and dimension it was first built with
 and refuses a later write under a different one, so dimensions never silently mix. A model

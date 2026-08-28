@@ -26,6 +26,28 @@ It depends on the source shape:
 To build the graph at all you also need `VERA_MEMORY__PROVIDER=graphiti` and a reachable
 Neo4j (see [getting-started](getting-started.md)).
 
+## Choosing the embedding and reranking provider
+
+Embeddings and reranking are reached through ports, so the provider is a configuration
+choice, not a rewrite. Extraction (turning text into claims) always uses an LLM; only the
+embedding and reranker backends are swappable here.
+
+- **Embeddings** (`VERA_MEMORY__EMBEDDER`): `deterministic` (offline, tests), `openai`
+  (`text-embedding-3-small`, default), or `voyage` (Voyage AI). For Voyage, set
+  `VERA_VOYAGE__API_KEY`, pick `VERA_VOYAGE__EMBEDDING_MODEL` (e.g. `voyage-3.5`,
+  `voyage-4-lite`, `voyage-code-4`), and set `VERA_MEMORY__EMBEDDING_DIM` to match
+  (256/512/1024/2048). A group is pinned to one embedding dimension; changing it means
+  reprocessing that group (`python -m vera.entrypoints.reprocess <group>`).
+- **Reranking** (stage 3): off by default. Enable with
+  `VERA_RERANK__CROSS_ENCODER_ENABLED=true` and choose
+  `VERA_RERANK__CROSS_ENCODER_PROVIDER` = `llm` (an LLM scores relevance) or `voyage`
+  (a purpose-built reranker, `VERA_VOYAGE__RERANK_MODEL` e.g. `rerank-2.5`), which is
+  cheaper and faster than the LLM path.
+
+You can mix providers, for example OpenAI for extraction and Voyage for embeddings and
+reranking. To compare quality before switching, use `python -m vera.entrypoints.dedup_eval`
+and `python -m vera.entrypoints.retrieval_eval` on a labeled set.
+
 ## Step 1: create the tenancy
 
 Knowledge lives in a scope. Create an organization, a workspace, and a project; the

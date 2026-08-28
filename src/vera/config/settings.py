@@ -140,6 +140,9 @@ class RerankSettings(BaseModel):
     cross_encoder_enabled: bool = False
     cross_encoder_weight: float = 0.5
     cross_encoder_top_n: int = 20
+    # Which reranker backs stage 3: "llm" (an LLM scores relevance) or "voyage" (a
+    # purpose-built reranker, cheaper and faster). Needs the matching provider's key.
+    cross_encoder_provider: Literal["llm", "voyage"] = "llm"
 
 
 class ConnectorsSettings(BaseModel):
@@ -162,6 +165,22 @@ class Neo4jSettings(BaseModel):
     password: SecretStr | None = None
 
 
+class VoyageSettings(BaseModel):
+    """Voyage AI (embeddings and reranking), reached over HTTP through a port.
+
+    Used only when ``memory.embedder`` is ``voyage`` (embeddings) or
+    ``rerank.cross_encoder_provider`` is ``voyage`` (reranking); inert otherwise. Choose
+    the models freely (e.g. voyage-3.5 / voyage-4-lite / voyage-code-4; rerank-2.5 /
+    rerank-2.5-lite). Set ``embedding_dim`` to a value the model supports (256/512/1024/2048).
+    """
+
+    api_key: SecretStr | None = None
+    base_url: str = "https://api.voyageai.com/v1"
+    embedding_model: str = "voyage-3.5"
+    embedding_dim: int = 1024
+    rerank_model: str = "rerank-2.5"
+
+
 class MemorySettings(BaseModel):
     """Memory-engine selection and its LLM/embedder wiring.
 
@@ -170,7 +189,7 @@ class MemorySettings(BaseModel):
     """
 
     provider: Literal["null", "graphiti"] = "null"
-    embedder: Literal["deterministic", "openai"] = "deterministic"
+    embedder: Literal["deterministic", "openai", "voyage"] = "deterministic"
     embedding_model: str = "text-embedding-3-small"
     embedding_dim: int = 1536
     openai_api_key: SecretStr | None = None
@@ -211,6 +230,7 @@ class Settings(BaseSettings):
     mcp: McpSettings = Field(default_factory=McpSettings)
     neo4j: Neo4jSettings = Field(default_factory=Neo4jSettings)
     memory: MemorySettings = Field(default_factory=MemorySettings)
+    voyage: VoyageSettings = Field(default_factory=VoyageSettings)
     observability: ObservabilitySettings = Field(default_factory=ObservabilitySettings)
     resilience: ResilienceSettings = Field(default_factory=ResilienceSettings)
     connectors: ConnectorsSettings = Field(default_factory=ConnectorsSettings)
@@ -225,3 +245,22 @@ class Settings(BaseSettings):
 def get_settings() -> Settings:
     """Return the process-wide settings singleton (built once, cached)."""
     return Settings()  # type: ignore[call-arg]  # values come from the environment
+
+
+def active_embedding(settings: Settings) -> tuple[str, int]:
+    """The embedding model name and dimension actually in use, honoring the provider.
+
+    A group's vectors must share one dimension (the ingestion guard enforces it), so the
+    graph namespace and the dimension check read from here rather than assuming OpenAI's.
+    """
+    if settings.memory.embedder == "voyage":
+        return settings.voyage.embedding_model, settings.voyage.embedding_dim
+    return settings.memory.embedding_model, settings.memory.embedding_dim
+
+
+def voyage_api_key(settings: Settings) -> str | None:
+    """The Voyage key if set and non-empty (an empty env var reads as no key)."""
+    if settings.voyage.api_key is None:
+        return None
+    key = settings.voyage.api_key.get_secret_value()
+    return key or None

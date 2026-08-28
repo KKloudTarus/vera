@@ -68,6 +68,8 @@ Every setting is an environment variable `VERA_<SECTION>__<FIELD>` (see
 | `VERA_MEMORY__PROVIDER` | `graphiti` to enable the graph |
 | `VERA_NEO4J__URI` / `USER` / `PASSWORD` | graph backend |
 | `VERA_MEMORY__OPENAI_API_KEY`, `VERA_MEMORY__EMBEDDER` | LLM extraction and embeddings |
+| `VERA_VOYAGE__API_KEY`, `VERA_VOYAGE__EMBEDDING_MODEL`, `VERA_VOYAGE__RERANK_MODEL` | Voyage AI embeddings/reranking (optional) |
+| `VERA_RERANK__CROSS_ENCODER_ENABLED`, `VERA_RERANK__CROSS_ENCODER_PROVIDER` | stage-3 reranker (`llm` or `voyage`) |
 | `VERA_OBJECTSTORE__*` | S3-compatible object store |
 | `VERA_RESILIENCE__VALKEY_URL` | shared cache and rate limiter |
 | `VERA_MCP__JWT_SECRET`, `VERA_MCP__AUTH_ISSUER`, `VERA_MCP__AUTH_AUDIENCE` | MCP auth |

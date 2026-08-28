@@ -27,7 +27,7 @@ from vera.adapters.persistence.repositories.usage import SqlAlchemyUsageSink
 from vera.adapters.queue.postgres_queue import PostgresJobQueue
 from vera.application.identity import ScopeResolutionService
 from vera.application.queries.search_memory import RerankWeights
-from vera.config.settings import Settings
+from vera.config.settings import Settings, voyage_api_key
 from vera.domain.ports.connectors import SyncStateStore
 from vera.domain.ports.curation import (
     ClaimExtractor,
@@ -126,14 +126,32 @@ def build_container(settings: Settings) -> Container:
         # Entity equivalence is a subtle call where a false merge corrupts the graph; the
         # small model is measurably unstable on sibling-vs-same, so use the larger model.
         entity_judge = LlmEntityResolutionJudge(api_key=key, model=settings.memory.llm_model)
-        if settings.rerank.cross_encoder_enabled:
-            from vera.adapters.curation.reranker import LlmReranker
-
-            reranker = LlmReranker(api_key=key, model=settings.memory.small_llm_model)
     else:
         from vera.adapters.curation.extractor import StructuredClaimExtractor
 
         extractor = StructuredClaimExtractor()
+
+    # Stage-3 reranker: an LLM scorer or a Voyage reranker, per configuration. Independent
+    # of the extractor (Voyage reranking needs no OpenAI key).
+    if settings.rerank.cross_encoder_enabled:
+        vkey = voyage_api_key(settings)
+        if settings.rerank.cross_encoder_provider == "voyage" and vkey:
+            from vera.adapters.embedding.voyage import VoyageClient, VoyageReranker
+
+            reranker = VoyageReranker(
+                VoyageClient(api_key=vkey, base_url=settings.voyage.base_url),
+                model=settings.voyage.rerank_model,
+            )
+        elif (
+            settings.rerank.cross_encoder_provider == "llm"
+            and settings.memory.openai_api_key is not None
+        ):
+            from vera.adapters.curation.reranker import LlmReranker
+
+            reranker = LlmReranker(
+                api_key=settings.memory.openai_api_key.get_secret_value(),
+                model=settings.memory.small_llm_model,
+            )
 
     return Container(
         settings=settings,
