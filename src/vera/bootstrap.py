@@ -115,17 +115,31 @@ def build_container(settings: Settings) -> Container:
     judge: ContradictionJudge | None = None
     entity_judge: EntityResolutionJudge | None = None
     reranker: Reranker | None = None
+    # One resilient, metered OpenAI client shared by every curation LLM adapter, so their
+    # calls are breaker-guarded, rate-limited, retried, and cost-tracked like the graph path.
+    curation_client: object | None = None
     if settings.memory.openai_api_key is not None:
+        from openai import AsyncOpenAI
+
         from vera.adapters.curation.entity_judge import LlmEntityResolutionJudge
         from vera.adapters.curation.judge import LlmContradictionJudge
         from vera.adapters.curation.llm_extractor import LlmClaimExtractor
+        from vera.adapters.curation.metered_client import MeteredChatClient
+        from vera.adapters.resilience.policy import build_resilience_policy
 
         key = settings.memory.openai_api_key.get_secret_value()
-        extractor = LlmClaimExtractor(api_key=key, model=settings.memory.small_llm_model)
-        judge = LlmContradictionJudge(api_key=key, model=settings.memory.small_llm_model)
+        curation_client = MeteredChatClient(
+            AsyncOpenAI(api_key=key),
+            policy=build_resilience_policy(settings.resilience, name="openai-curation"),
+            sink=usage_sink,
+        )
+        extractor = LlmClaimExtractor(client=curation_client, model=settings.memory.small_llm_model)
+        judge = LlmContradictionJudge(client=curation_client, model=settings.memory.small_llm_model)
         # Entity equivalence is a subtle call where a false merge corrupts the graph; the
         # small model is measurably unstable on sibling-vs-same, so use the larger model.
-        entity_judge = LlmEntityResolutionJudge(api_key=key, model=settings.memory.llm_model)
+        entity_judge = LlmEntityResolutionJudge(
+            client=curation_client, model=settings.memory.llm_model
+        )
     else:
         from vera.adapters.curation.extractor import StructuredClaimExtractor
 
@@ -148,10 +162,8 @@ def build_container(settings: Settings) -> Container:
         ):
             from vera.adapters.curation.reranker import LlmReranker
 
-            reranker = LlmReranker(
-                api_key=settings.memory.openai_api_key.get_secret_value(),
-                model=settings.memory.small_llm_model,
-            )
+            # openai_api_key is set here, so the shared metered client was built above.
+            reranker = LlmReranker(client=curation_client, model=settings.memory.small_llm_model)
 
     return Container(
         settings=settings,

@@ -170,3 +170,28 @@ async def test_no_judge_below_threshold_does_not_merge() -> None:
     )
     b = await resolver.resolve_or_create(repo, group_id="g", name="billing", entity_type="Service")
     assert b.id != a.id  # a mid-similarity name is not merged without a judge
+
+
+def test_enabled_without_embedder_warns_instead_of_degrading_silently() -> None:
+    from structlog.testing import capture_logs
+
+    with capture_logs() as logs:
+        resolver = SemanticEntityResolver(None, enabled=True, judge=None)
+    assert resolver._enabled is False  # inert without an embedder, but not silent
+    assert any(e["event"] == "entity_resolver.semantic_enabled_without_embedder" for e in logs)
+
+
+def test_enabled_without_judge_warns() -> None:
+    from structlog.testing import capture_logs
+
+    with capture_logs() as logs:
+        SemanticEntityResolver(_FakeEmbedder(_MID), enabled=True, judge=None)
+    assert any(e["event"] == "entity_resolver.semantic_enabled_without_judge" for e in logs)
+
+
+def test_fully_wired_does_not_warn() -> None:
+    from structlog.testing import capture_logs
+
+    with capture_logs() as logs:
+        SemanticEntityResolver(_FakeEmbedder(_MID), enabled=True, judge=_FakeJudge(None))
+    assert not any("semantic_enabled_without" in e["event"] for e in logs)

@@ -181,6 +181,13 @@ cleared, episode marked retracted and skipped by a rebuild). Erasure additionall
 episode row and its raw artifact bytes for data-subject requests. Every retraction is
 audited; Postgres commits first, then the graph and object store.
 
+That post-commit cleanup is made durable so a crash cannot strand a graph edge or, worse,
+leave erased bytes behind. The same transaction that commits the retraction also enqueues a
+`retract_cleanup` job carrying the edge uuids and object keys, scheduled a short while ahead.
+The request still cleans up in-process immediately and then retires that job; if the process
+dies first, the worker runs the identical, idempotent cleanup once the job is visible, so
+erasure is guaranteed to complete rather than merely attempted.
+
 ## Feedback calibration
 
 Each returned hit's signal vector is logged with the thumbs up/down a caller later gives it.

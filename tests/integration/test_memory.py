@@ -343,6 +343,65 @@ async def test_retract_source_removes_it_from_memory(
     assert retracted == 1
 
 
+async def test_retract_cleanup_job_removes_edges_durably(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    make_container: Callable[[object], Container],
+    graphiti_engine: GraphitiMemoryEngine,
+) -> None:
+    # Simulate a crash after the retraction commit but before in-process cleanup: the durable
+    # retract_cleanup job alone must still remove the fact from the graph when the worker runs.
+    group = f"p:{uuid7().hex[:12]}"
+    container = await _publish_and_ingest(
+        sessionmaker, make_container, graphiti_engine, group=group
+    )
+    handler = SearchMemoryHandler(container.memory, container.retrieval_read)
+    hits = await handler.handle(
+        SearchMemory(text="paymentapi", group_ids=(GroupId(group),), limit=5)
+    )
+    assert any("paymentapi" in h.fact for h in hits)
+
+    async with sessionmaker() as session:
+        rows = await session.execute(
+            text("SELECT edge_uuid FROM graph_edge_map WHERE group_id = :g"), {"g": group}
+        )
+        edge_uuids = [str(r) for (r,) in rows]
+    assert edge_uuids
+
+    await container.queue.enqueue(
+        group_id=GroupId(group),
+        source_id=SourceId(f"{group}:cleanup"),
+        dedup_uuid=uuid7(),
+        payload={
+            "job_kind": "retract_cleanup",
+            "edge_uuids": edge_uuids,
+            "s3_keys": [],
+            "erase": False,
+        },
+    )
+    pool = LanePool(container, lanes=2, queue_maxsize=8)
+    pool.start()
+    try:
+        await run_until_empty(container, pool, batch_size=10)
+    finally:
+        await pool.stop()
+
+    after = await handler.handle(
+        SearchMemory(text="paymentapi", group_ids=(GroupId(group),), limit=5)
+    )
+    assert all("paymentapi" not in h.fact for h in after)
+    # The graph projection no longer has the edge, though its PG map row remains: cleanup of
+    # graph_edge_map is RetractionService's job, which this durable-job path does not do.
+    async with sessionmaker() as s:
+        retracted = await s.scalar(
+            text(
+                "SELECT count(*) FROM published_episodes "
+                "WHERE group_id = :g AND retracted_at IS NOT NULL"
+            ),
+            {"g": group},
+        )
+    assert retracted == 0  # the cleanup job alone does not touch published_episodes
+
+
 async def test_search_carries_provenance_and_feedback_lowers_score(
     sessionmaker: async_sessionmaker[AsyncSession],
     make_container: Callable[[object], Container],

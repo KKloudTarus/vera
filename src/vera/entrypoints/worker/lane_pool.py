@@ -122,6 +122,11 @@ class LanePool:
                 queue.task_done()
 
     async def _process(self, job: QueuedJob) -> None:
+        # A retraction/erasure cleanup job carries the edge uuids and S3 keys to remove; it
+        # is the durable safety net for RetractionService (see persistence/retraction.py).
+        if job.payload.get("job_kind") == "retract_cleanup":
+            await self._process_retract_cleanup(job)
+            return
         bind_log_context(
             group_id=str(job.group_id),
             source_id=str(job.source_id),
@@ -160,6 +165,40 @@ class LanePool:
             log.info("ingest.done", episode_uuid=receipt.episode_uuid)
         finally:
             reset_usage_context(usage_token)
+            clear_log_context()
+
+    async def _process_retract_cleanup(self, job: QueuedJob) -> None:
+        # Idempotent: removing already-removed edges is a no-op and deleting an absent object
+        # is a no-op, so a retry (or running after the in-process cleanup already ran) is safe.
+        bind_log_context(
+            group_id=str(job.group_id),
+            source_id=str(job.source_id),
+            **_correlation(job.trace_context),
+        )
+        edge_uuids = [str(u) for u in job.payload.get("edge_uuids", [])]
+        s3_keys = [str(k) for k in job.payload.get("s3_keys", [])]
+        erase = bool(job.payload.get("erase", False))
+        budget = self._container.settings.resilience.per_episode_timeout_s
+        try:
+            with span("retract.cleanup", group_id=str(job.group_id)):
+                async with asyncio.timeout(budget):
+                    if edge_uuids:
+                        await self._container.memory.retract_episode(
+                            group_id=str(job.group_id), edge_uuids=edge_uuids
+                        )
+                    if erase:
+                        for key in s3_keys:
+                            await self._container.object_store.delete(key=key)
+                    async with self._container.sessionmaker() as session, session.begin():
+                        await session.execute(_MARK_DONE, {"id": job.id})
+            log.info(
+                "retract.cleanup.done",
+                group_id=str(job.group_id),
+                source_id=str(job.source_id),
+                edges=len(edge_uuids),
+                erased=erase,
+            )
+        finally:
             clear_log_context()
 
     async def _stitch(

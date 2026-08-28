@@ -16,7 +16,10 @@ from vera.domain.knowledge.models import CanonicalEntity
 from vera.domain.ports.curation import EntityResolutionJudge
 from vera.domain.ports.embedder import Embedder
 from vera.domain.ports.repositories import CanonicalEntityRepository
+from vera.observability import get_logger
 from vera.observability.metrics import record_entity_resolution
+
+log = get_logger(__name__)
 
 
 def cosine(a: list[float], b: list[float]) -> float:
@@ -47,6 +50,13 @@ class SemanticEntityResolver:
         self._max_candidates = max_candidates
         self._enabled = enabled and embedder is not None
         self._judge = judge
+        # Surface a misconfiguration instead of silently degrading dedup quality: semantic
+        # linking asked for but inert without an embedder, or reduced to cosine-only (missing
+        # synonyms, abbreviations, and cross-lingual merges) without the equivalence judge.
+        if enabled and embedder is None:
+            log.warning("entity_resolver.semantic_enabled_without_embedder")
+        elif self._enabled and judge is None:
+            log.warning("entity_resolver.semantic_enabled_without_judge")
 
     async def resolve_or_create(
         self,

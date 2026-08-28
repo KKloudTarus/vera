@@ -4,12 +4,21 @@ Withdraws one published episode from memory end to end: its edges leave the grap
 graph maps are cleared, and the episode is marked retracted (hidden from search and
 skipped by a rebuild). Erasure goes further, deleting the episode row and its raw artifact
 bytes from the object store for data-subject requests. Every retraction writes an audit
-event. Postgres is the source of truth, so it commits first; the graph and object store
-(both rebuildable or already-recorded) are updated after.
+event.
+
+Postgres is the source of truth, so it commits first. The graph and object-store cleanup
+that follows is a separate step, so a crash between the commit and that cleanup would
+otherwise leave the graph or (worse, for erasure) the raw bytes behind. To make the whole
+operation durable, the same committing transaction also enqueues a ``retract_cleanup`` job
+carrying the edge uuids and S3 keys, scheduled a short while ahead. The happy path still
+cleans up in-process immediately and then retires that job; if the process dies first, the
+worker runs the identical, idempotent cleanup once the job becomes visible. Erasure is
+therefore guaranteed to complete, not merely attempted.
 """
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from uuid import UUID
 
@@ -20,9 +29,14 @@ from vera.domain.ports.memory_engine import MemoryEngine
 from vera.domain.ports.object_store import ObjectStore
 from vera.observability import get_logger
 from vera.shared.errors import DomainError, Err, NotFound, Ok, Result
+from vera.shared.ids import uuid7
 from vera.shared.time import utc_now
 
 log = get_logger(__name__)
+
+# How far ahead the durable cleanup job is scheduled. The in-process cleanup normally runs
+# and retires the job well within this window, so the worker only ever sees it after a crash.
+_CLEANUP_SAFETY_DELAY_S = 30.0
 
 _FIND = text("SELECT id FROM published_episodes WHERE group_id = :g AND source_id = :s")
 _EDGES = text(
@@ -48,6 +62,12 @@ _AUDIT = text(
     "INSERT INTO audit_events (actor, group_id, action, target, payload) "
     "VALUES (:actor, :g, :action, :target, '{}'::jsonb)"
 )
+_ENQUEUE_CLEANUP = text(
+    "INSERT INTO ingestion_jobs (group_id, source_id, dedup_uuid, payload, next_visible_at) "
+    "VALUES (:g, :s, :dedup, CAST(:payload AS jsonb), now() + (:delay * interval '1 second')) "
+    "RETURNING id"
+)
+_MARK_JOB_DONE = text("UPDATE ingestion_jobs SET status = 'done', last_error = NULL WHERE id = :id")
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,18 +138,58 @@ class RetractionService:
                     "target": source_id,
                 },
             )
+            # Durable safety net: enqueue the graph/object-store cleanup atomically with the
+            # commit, so a crash before the in-process cleanup below still gets it done.
+            cleanup_job_id: UUID | None = None
+            if edge_uuids or (erase_artifact and s3_keys):
+                cleanup_job_id = await session.scalar(
+                    _ENQUEUE_CLEANUP,
+                    {
+                        "g": group_id,
+                        "s": source_id,
+                        "dedup": uuid7(),
+                        "payload": json.dumps(
+                            {
+                                "job_kind": "retract_cleanup",
+                                "edge_uuids": edge_uuids,
+                                "s3_keys": s3_keys,
+                                "erase": erase_artifact,
+                            }
+                        ),
+                        "delay": _CLEANUP_SAFETY_DELAY_S,
+                    },
+                )
 
-        # Postgres committed; update the projection and (for erasure) the object store.
-        await self._memory.retract_episode(group_id=group_id, edge_uuids=edge_uuids)
-        if erase_artifact and self._object_store is not None:
-            for key in s3_keys:
-                await self._object_store.delete(key=key)
+        # Postgres committed. Clean the projection and (for erasure) the object store now; on
+        # any failure the queued job guarantees the same cleanup runs later, so the operation
+        # completes durably either way.
+        cleaned = True
+        try:
+            await self._memory.retract_episode(group_id=group_id, edge_uuids=edge_uuids)
+            if erase_artifact and self._object_store is not None:
+                for key in s3_keys:
+                    await self._object_store.delete(key=key)
+        except Exception as exc:
+            cleaned = False
+            log.warning(
+                "retraction.cleanup_deferred",
+                group_id=group_id,
+                source_id=source_id,
+                job_id=str(cleanup_job_id) if cleanup_job_id else None,
+                error=str(exc),
+            )
+
+        if cleaned and cleanup_job_id is not None:
+            async with self._session_factory() as session, session.begin():
+                await session.execute(_MARK_JOB_DONE, {"id": cleanup_job_id})
+
         log.info(
             "retraction.done",
             group_id=group_id,
             source_id=source_id,
             edges=len(edge_uuids),
             erased=erase_artifact,
+            deferred=not cleaned,
         )
         return Ok(
             RetractionResult(

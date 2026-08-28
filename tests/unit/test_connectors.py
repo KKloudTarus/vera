@@ -224,6 +224,44 @@ def test_registry_builds_connectors_by_kind() -> None:
         build_connector({"kind": "nope"})
 
 
+@pytest.mark.asyncio
+@respx.mock
+async def test_registry_wires_cmdb_over_http() -> None:
+    respx.get("https://cmdb/export").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "items": [
+                    {
+                        "id": "svc-1",
+                        "name": "paymentapi",
+                        "type": "Service",
+                        "updated_at": "2026-01-01T00:00:00Z",
+                        "relations": [{"predicate": "RUNS_ON", "object": "prod-eks"}],
+                    }
+                ]
+            },
+        )
+    )
+    connector = build_connector({"kind": "cmdb", "url": "https://cmdb/export"})
+    assert connector.kind == "cmdb"
+
+    batch = await connector.fetch_changes(None)
+    assert batch.records[0].external_id == "cmdb:svc-1"
+    triples = batch.records[0].metadata["triples"]
+    assert triples[0] == {
+        "subject": "paymentapi",
+        "predicate": "RUNS_ON",
+        "object": "prod-eks",
+        "entity_type": "Service",
+    }
+
+
+def test_registry_cmdb_without_url_is_an_error() -> None:
+    with pytest.raises(VeraError, match="cmdb connector needs 'url'"):
+        build_connector({"kind": "cmdb"})
+
+
 def test_registry_resolves_token_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("VERA_TEST_JIRA_TOKEN", "secret-value")
     client = build_connector(
