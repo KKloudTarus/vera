@@ -45,9 +45,10 @@ search for a known fact.
 A group's vectors must share one embedding dimension. Ingestion records the model and
 dimension a group was first built with and refuses a later write under a different one
 (the job dead-letters with a clear message). To adopt a new embedding model, change
-`VERA_MEMORY__EMBEDDING_MODEL` / `VERA_MEMORY__EMBEDDING_DIM` and reprocess each affected
-group: the rebuild drops the old fingerprint and re-embeds every episode under the new
-model.
+`VERA_MEMORY__EMBEDDING_MODEL` / `VERA_MEMORY__EMBEDDING_DIM` for OpenAI, or
+`VERA_VOYAGE__EMBEDDING_MODEL` / `VERA_VOYAGE__EMBEDDING_DIM` for Voyage, and reprocess
+each affected group: the rebuild drops the old fingerprint and re-embeds every episode
+under the new model.
 
 ## Full Neo4j loss
 

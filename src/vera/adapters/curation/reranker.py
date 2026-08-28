@@ -26,8 +26,17 @@ _SYSTEM = (
 
 
 class LlmReranker:
-    def __init__(self, *, api_key: str | None = None, model: str, client: Any = None) -> None:
-        self._client = client if client is not None else AsyncOpenAI(api_key=api_key)
+    def __init__(
+        self,
+        *,
+        api_key: str | None = None,
+        base_url: str | None = None,
+        model: str,
+        client: Any = None,
+    ) -> None:
+        self._client = (
+            client if client is not None else AsyncOpenAI(api_key=api_key, base_url=base_url)
+        )
         self._model = model
 
     async def rerank(self, *, query: str, facts: Sequence[str]) -> list[float]:

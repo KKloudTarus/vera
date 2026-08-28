@@ -55,7 +55,11 @@ def judge() -> EntityResolutionJudge:
     key = settings.memory.openai_api_key.get_secret_value()  # type: ignore[union-attr]
     # Matches production wiring: entity resolution uses the larger model, which is stable
     # on sibling-vs-same where the small model is not.
-    return LlmEntityResolutionJudge(api_key=key, model=settings.memory.llm_model)  # type: ignore[attr-defined]
+    return LlmEntityResolutionJudge(
+        api_key=key,
+        base_url=settings.memory.openai_base_url,
+        model=settings.memory.llm_model,
+    )
 
 
 async def test_cosine_over_bare_names_cannot_separate_the_set(embedder: Embedder) -> None:

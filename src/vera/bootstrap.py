@@ -158,7 +158,7 @@ def build_container(settings: Settings) -> Container:
 
         key = settings.memory.openai_api_key.get_secret_value()
         curation_client = MeteredChatClient(
-            AsyncOpenAI(api_key=key),
+            AsyncOpenAI(api_key=key, base_url=settings.memory.openai_base_url),
             policy=build_resilience_policy(settings.resilience, name="openai-curation"),
             sink=usage_sink,
         )

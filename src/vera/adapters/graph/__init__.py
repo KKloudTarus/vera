@@ -50,6 +50,7 @@ def _embedder(settings: Settings) -> object:
             api_key=key,
             embedding_model=memory.embedding_model,
             embedding_dim=memory.embedding_dim,
+            base_url=memory.openai_base_url,
         )
     )
 
@@ -70,6 +71,7 @@ def _llm_client(settings: Settings, usage_sink: UsageSink | None) -> object:
             api_key=memory.openai_api_key.get_secret_value(),
             model=memory.llm_model,
             small_model=memory.small_llm_model,
+            base_url=memory.openai_base_url,
         ),
         llm_model=memory.llm_model,
         sink=usage_sink,

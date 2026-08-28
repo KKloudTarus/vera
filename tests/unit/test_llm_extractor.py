@@ -87,6 +87,22 @@ async def test_incomplete_triples_are_dropped() -> None:
 
 
 @pytest.mark.asyncio
+async def test_oversized_triples_are_dropped_without_losing_valid_facts() -> None:
+    content = (
+        '{"facts": [{"subject": "a", "predicate": "REL", "object": "'
+        + ("x" * 513)
+        + '"}, {"subject": "b", "predicate": "REL", "object": "c"}]}'
+    )
+    extractor, _ = _extractor(content)
+
+    claims = await extractor.extract(body="prose", knowledge_type="text", metadata={})
+
+    assert [(claim.subject, claim.predicate, claim.object) for claim in claims] == [
+        ("b", "REL", "c")
+    ]
+
+
+@pytest.mark.asyncio
 async def test_bad_json_is_handled() -> None:
     extractor, _ = _extractor("not json")
     assert await extractor.extract(body="prose", knowledge_type="text", metadata={}) == []

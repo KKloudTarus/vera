@@ -35,7 +35,7 @@ embedding and reranker backends are swappable here.
 - **Embeddings** (`VERA_MEMORY__EMBEDDER`): `deterministic` (offline, tests), `openai`
   (`text-embedding-3-small`, default), or `voyage` (Voyage AI). For Voyage, set
   `VERA_VOYAGE__API_KEY`, pick `VERA_VOYAGE__EMBEDDING_MODEL` (e.g. `voyage-3.5`,
-  `voyage-4-lite`, `voyage-code-4`), and set `VERA_MEMORY__EMBEDDING_DIM` to match
+  `voyage-4-lite`, `voyage-code-4`), and set `VERA_VOYAGE__EMBEDDING_DIM` to match
   (256/512/1024/2048). A group is pinned to one embedding dimension; changing it means
   reprocessing that group (`python -m vera.entrypoints.reprocess <group>`).
 - **Reranking** (stage 3): off by default. Enable with

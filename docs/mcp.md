@@ -37,6 +37,7 @@ mint one with the shared secret. The token's `sub` must be a real principal id (
 
 ```python
 import jwt, time
+
 token = jwt.encode(
     {
         "sub": "<principal-uuid>",

@@ -24,6 +24,10 @@ from vera.shared.types import JsonDict
 
 log = get_logger(__name__)
 
+_MAX_SUBJECT_LENGTH = 512
+_MAX_PREDICATE_LENGTH = 256
+_MAX_OBJECT_LENGTH = 512
+
 _SYSTEM = (
     "You extract durable, structural knowledge about software systems, teams, and "
     "engineering decisions from text, as (subject, predicate, object) triples.\n"
@@ -42,14 +46,24 @@ _SYSTEM = (
 
 _SCHEMA_HINT = (
     'Respond as JSON: {"facts": [{"subject": str, "predicate": str, "object": str}]}. '
+    "Keep subject and object within 512 characters and predicate within 256 characters. "
     "Return an empty list if there are no clear facts."
 )
 
 
 class LlmClaimExtractor:
-    def __init__(self, *, model: str, api_key: str | None = None, client: Any = None) -> None:
+    def __init__(
+        self,
+        *,
+        model: str,
+        api_key: str | None = None,
+        base_url: str | None = None,
+        client: Any = None,
+    ) -> None:
         # A client can be injected for tests; otherwise one is built from the key.
-        self._client = client if client is not None else AsyncOpenAI(api_key=api_key)
+        self._client = (
+            client if client is not None else AsyncOpenAI(api_key=api_key, base_url=base_url)
+        )
         self._model = model
         self._structured = StructuredClaimExtractor()
 
@@ -87,6 +101,18 @@ class LlmClaimExtractor:
             predicate = str(fact.get("predicate", "")).strip()
             obj = str(fact.get("object", "")).strip()
             if not (subject and predicate and obj):
+                continue
+            if (
+                len(subject) > _MAX_SUBJECT_LENGTH
+                or len(predicate) > _MAX_PREDICATE_LENGTH
+                or len(obj) > _MAX_OBJECT_LENGTH
+            ):
+                log.warning(
+                    "llm_extractor.oversized_fact",
+                    subject_length=len(subject),
+                    predicate_length=len(predicate),
+                    object_length=len(obj),
+                )
                 continue
             claims.append(
                 ExtractedClaim(

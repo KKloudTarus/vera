@@ -214,6 +214,7 @@ class MemorySettings(BaseModel):
     embedding_model: str = "text-embedding-3-small"
     embedding_dim: int = 1536
     openai_api_key: SecretStr | None = None
+    openai_base_url: str | None = None
     llm_model: str = "gpt-4.1-mini"
     small_llm_model: str = "gpt-4.1-nano"
     # Semantic (embedding) canonical-entity linking: off by default; enable to merge
