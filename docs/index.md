@@ -14,6 +14,8 @@ application or an AI agent.
    connects to it.
 5. [Deployment](deployment.md) - Docker Compose and Kubernetes, plus the operational
    commands.
+6. [Architecture and algorithms](architecture.md) - how VERA is built and the methods it
+   uses: scoring, ranking, embeddings, the temporal model, and more.
 
 ## The mental model in one minute
 
@@ -28,7 +30,7 @@ application or an AI agent.
   to the caller's tenant; every hit carries its provenance.
 
 For the architecture, algorithms (ranking, embeddings, scoring), and design rationale, see
-the top-level [README](../README.md).
+[Architecture and algorithms](architecture.md).
 
 ## Prerequisites
 

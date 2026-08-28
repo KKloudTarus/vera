@@ -17,10 +17,11 @@ carries where it came from, how trusted it is, when it was true, and who may see
 
 ## Documentation
 
-Step-by-step guides live in [`docs/`](docs/README.md): [getting started](docs/getting-started.md),
+The documentation site is at **https://kkloudtarus.github.io/vera/**. Source lives in
+[`docs/`](docs/index.md): [getting started](docs/getting-started.md),
 [loading knowledge](docs/loading-knowledge.md) (repositories, Markdown, Confluence),
-[using the API](docs/usage.md), [connecting an AI agent over MCP](docs/mcp.md), and
-[deployment](docs/deployment.md). This README covers the architecture and methodology.
+[using the API](docs/usage.md), [connecting an AI agent over MCP](docs/mcp.md),
+[deployment](docs/deployment.md), and [architecture and algorithms](docs/architecture.md).
 
 ## Contents
 

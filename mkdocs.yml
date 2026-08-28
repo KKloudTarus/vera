@@ -1,0 +1,72 @@
+site_name: VERA
+site_description: Verified Episodic Recall for Agents - a shared, verified agent-memory platform
+site_url: https://kkloudtarus.github.io/vera/
+repo_url: https://github.com/KKloudTarus/vera
+repo_name: KKloudTarus/vera
+edit_uri: edit/main/docs/
+docs_dir: docs
+copyright: Copyright &copy; 2026 The VERA Authors - Apache License 2.0
+
+theme:
+  name: material
+  language: en
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+  features:
+    - navigation.instant
+    - navigation.tracking
+    - navigation.top
+    - navigation.footer
+    - content.code.copy
+    - content.code.annotate
+    - search.suggest
+    - search.highlight
+    - toc.follow
+  icon:
+    repo: fontawesome/brands/github
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+
+plugins:
+  - search
+
+nav:
+  - Home: index.md
+  - Getting started: getting-started.md
+  - Loading knowledge: loading-knowledge.md
+  - Using the API: usage.md
+  - MCP (AI agents): mcp.md
+  - Deployment: deployment.md
+  - Architecture & algorithms: architecture.md
+  - Disaster recovery: dr-runbook.md
