@@ -436,7 +436,16 @@ class GraphitiMemoryEngine:
         # Graphiti clusters the group's entities and writes an LLM summary per community. The
         # community nodes are a rebuildable projection: clear_group plus a re-run reconstructs
         # them, so this is safe to run repeatedly.
-        nodes, _edges = await self._client.build_communities(
-            group_ids=[_graphiti_group(str(group_id))]
+        gid = _graphiti_group(str(group_id))
+        # Entities ingested via add_triplet persist only uuid/name/group_id, but the community
+        # clustering reads full EntityNode records (created_at and summary are required). Backfill
+        # those fields (idempotent) so clustering can consume the structured-triple graph.
+        await self._client.driver.execute_query(  # pyright: ignore[reportUnknownMemberType]
+            "MATCH (n:Entity {group_id: $gid}) "
+            "WHERE n.created_at IS NULL OR n.summary IS NULL "
+            "SET n.created_at = coalesce(n.created_at, $now), n.summary = coalesce(n.summary, '')",
+            gid=gid,
+            now=utc_now().isoformat(),
         )
+        nodes, _edges = await self._client.build_communities(group_ids=[gid])
         return len(nodes)
