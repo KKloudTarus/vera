@@ -5,8 +5,10 @@ from __future__ import annotations
 import pytest
 
 from vera.bootstrap import build_container, dispose_container
-from vera.config.settings import get_settings
+from vera.config.settings import McpSettings, get_settings
+from vera.entrypoints.mcp import main as mcp_main
 from vera.entrypoints.mcp.main import build_server
+from vera.shared.ids import deterministic_id
 
 _EXPECTED = {
     "memory_search",
@@ -18,6 +20,7 @@ _EXPECTED = {
     "memory_propose",
     "memory_feedback",
 }
+_JWT_SECRET = "test-secret"  # noqa: S105
 
 
 @pytest.mark.asyncio
@@ -30,3 +33,24 @@ async def test_server_exposes_the_memory_tools() -> None:
         assert names == _EXPECTED
     finally:
         await dispose_container(container)
+
+
+def test_local_server_uses_stable_principal_without_jwt() -> None:
+    principal_id = deterministic_id("test", "local-mcp")
+    settings = get_settings().model_copy(
+        update={"mcp": McpSettings(local_principal_id=principal_id)}
+    )
+
+    assert mcp_main._principal_id(settings) == principal_id
+
+
+def test_jwt_server_never_falls_back_to_local_principal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = get_settings().model_copy(
+        update={"mcp": McpSettings(jwt_secret=_JWT_SECRET)}  # type: ignore[arg-type]
+    )
+    monkeypatch.setattr(mcp_main, "get_access_token", lambda: None)
+
+    with pytest.raises(PermissionError, match="no authenticated principal"):
+        mcp_main._principal_id(settings)
