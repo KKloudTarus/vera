@@ -13,9 +13,12 @@ from __future__ import annotations
 
 from functools import lru_cache
 from typing import Literal
+from uuid import UUID
 
 from pydantic import BaseModel, Field, PostgresDsn, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from vera.shared.ids import deterministic_id
 
 Environment = Literal["local", "dev", "staging", "prod"]
 
@@ -68,6 +71,9 @@ class WorkerSettings(BaseModel):
 class McpSettings(BaseModel):
     host: str = "0.0.0.0"  # noqa: S104
     port: int = 8080
+    # Auth-disabled local development uses one stable principal with only its personal
+    # scope. Override this id to attach the local client to explicit memberships.
+    local_principal_id: UUID = deterministic_id("mcp", "local-principal")
     # OAuth 2.1 Resource Server. Auth is enabled when a JWT secret is set; without it
     # the server runs unauthenticated for local development.
     auth_issuer: str = "https://auth.vera.local"

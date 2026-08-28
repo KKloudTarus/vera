@@ -324,7 +324,8 @@ and provenance are never bypassed.
 `memory_search`, `memory_get_context`, `memory_explore`, `memory_explain`,
 `memory_get_source`, `memory_recent_changes`, `memory_propose`, `memory_feedback`. Every
 tool resolves the caller's scopes server-side; tools expose only reads and proposals, never
-raw graph mutation.
+raw graph mutation. When JWT auth is unset in the `local` environment, the server provisions
+a stable `Local MCP` principal with only its personal scope; non-local clients should use JWT.
 
 **Multi-hop reasoning** (`memory_explore` / `/memory/explore`): from a named entity, return
 the facts on paths within N hops (bounded), with provenance, to trace how entities connect
