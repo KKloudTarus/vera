@@ -40,7 +40,8 @@ SELECT f.fact_key AS fact_key, f.id AS fact_id, cs.canonical_name AS subject_nam
        f.authority AS authority, f.confidence AS confidence,
        f.lifecycle_state AS lifecycle_state, f.valid_from AS valid_from,
        (ts_rank(f.search_vector, q.q)
-        + ts_rank(to_tsvector('english', cs.canonical_name), q.q)) AS score,
+        + ts_rank(to_tsvector('english', cs.canonical_name), q.q)
+        + ts_rank(to_tsvector('english', coalesce(co.canonical_name, '')), q.q)) AS score,
        sup.sources AS sources
 FROM facts f
 JOIN canonical_entities cs ON cs.id = f.subject_entity_id
@@ -53,7 +54,9 @@ LEFT JOIN LATERAL (
     WHERE a.fact_id = f.id AND a.state = 'active' AND a.polarity = 'supports'
 ) sup ON true
 WHERE f.group_id = :g
-  AND (f.search_vector @@ q.q OR to_tsvector('english', cs.canonical_name) @@ q.q)
+  AND (f.search_vector @@ q.q
+       OR to_tsvector('english', cs.canonical_name) @@ q.q
+       OR to_tsvector('english', coalesce(co.canonical_name, '')) @@ q.q)
   AND {{membership}}
 ORDER BY score DESC
 LIMIT :lim

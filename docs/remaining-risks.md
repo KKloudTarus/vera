@@ -23,10 +23,13 @@ making the fabric the primary production path.
 - **Vector search is deferred.** Candidate generation is Postgres full-text over rebuildable
   `search_vector` columns behind swappable ports; a pgvector backend is not yet implemented.
   Semantic recall depends on adding it.
-- **The evaluation-metric expansion is partial.** The combined retrieval is tested for
-  correctness and cited output, but the golden-set metrics (nDCG, citation and temporal
-  correctness datasets) from the Phase 4 plan are not yet built, so there is no CI regression
-  gate on retrieval quality for the new path.
+- **A committed golden set gates retrieval quality in CI.** `datasets/retrieval/golden.json`
+  seeds a fixed set of entities, facts, and passages; `tests/integration/test_retrieval_golden.py`
+  runs the real ContextAssembler over it and fails the build if hit@k, nDCG@k, or the citation
+  rate drop below the thresholds in the file (currently hit 1.0, nDCG 0.85, citation 1.0; the
+  seeded set measures nDCG 0.97). The metrics live in `application/queries/retrieval_eval.py`
+  (hit@k, MRR, nDCG@k, citation rate) and the `retrieval_eval` CLI reports them against a live
+  database. A production-scale relevance benchmark at target volumes is still a run-time action.
 
 ## Graph projection
 

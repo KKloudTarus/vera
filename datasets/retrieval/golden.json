@@ -1,0 +1,39 @@
+{
+  "description": "Reproducible retrieval-quality golden set for the fact path. The integration test seeds `seed` into a fresh group, runs the ContextAssembler for each case, and gates hit@k, nDCG@k, and citation rate against `thresholds`. The `cases` alone (query + expected) are also usable by the retrieval_eval CLI against a live database.",
+  "k": 5,
+  "thresholds": {
+    "min_hit_rate": 1.0,
+    "min_ndcg": 0.85,
+    "min_citation_rate": 1.0
+  },
+  "seed": {
+    "entities": [
+      {"name": "paymentapi", "type": "Service"},
+      {"name": "checkout", "type": "Service"},
+      {"name": "billing", "type": "Service"},
+      {"name": "prod-eks", "type": "Environment"},
+      {"name": "staging-eks", "type": "Environment"},
+      {"name": "postgres", "type": "Datastore"},
+      {"name": "payments-team", "type": "Team"}
+    ],
+    "facts": [
+      {"subject": "paymentapi", "predicate": "RUNS_ON", "object": "prod-eks", "authority": 1.0, "confidence": 0.95},
+      {"subject": "checkout", "predicate": "RUNS_ON", "object": "staging-eks", "authority": 1.0, "confidence": 0.9},
+      {"subject": "paymentapi", "predicate": "DEPENDS_ON", "object": "postgres", "authority": 1.0, "confidence": 0.92},
+      {"subject": "billing", "predicate": "DEPENDS_ON", "object": "postgres", "authority": 0.8, "confidence": 0.85},
+      {"subject": "payments-team", "predicate": "OWNS", "object": "paymentapi", "authority": 1.0, "confidence": 0.9}
+    ],
+    "chunks": [
+      {"text": "The paymentapi service is deployed to the prod-eks cluster and scales on CPU.", "heading_path": "Runbook > Deploy"},
+      {"text": "Checkout runs on staging-eks during release rehearsals before promotion.", "heading_path": "Runbook > Staging"},
+      {"text": "Billing and paymentapi both read from the shared postgres primary.", "heading_path": "Architecture > Data"}
+    ]
+  },
+  "cases": [
+    {"query": "where does paymentapi run", "expected": ["prod-eks"]},
+    {"query": "what does paymentapi depend on", "expected": ["postgres"]},
+    {"query": "which environment does checkout run on", "expected": ["staging-eks"]},
+    {"query": "who owns paymentapi", "expected": ["payments-team"]},
+    {"query": "what depends on postgres", "expected": ["postgres"]}
+  ]
+}

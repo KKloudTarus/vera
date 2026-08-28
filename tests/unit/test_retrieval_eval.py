@@ -33,3 +33,36 @@ def test_hit_at_k_widens_with_k() -> None:
 def test_empty_set_is_zero() -> None:
     report = score([], k=5)
     assert report == EvalReport(cases=0, hits_at_k=0, k=5, mrr=0.0)
+
+
+def test_ndcg_rewards_higher_placement() -> None:
+    from vera.application.queries.retrieval_eval import ndcg_at_k
+
+    # A relevant item at rank 1 scores a perfect nDCG; pushed to rank 3 it scores less.
+    assert ndcg_at_k([1.0, 0.0, 0.0], k=3) == 1.0
+    lower = ndcg_at_k([0.0, 0.0, 1.0], k=3)
+    assert 0.0 < lower < 1.0
+    # No relevant item: nothing to normalize against, so 0.
+    assert ndcg_at_k([0.0, 0.0, 0.0], k=3) == 0.0
+
+
+def test_relevances_are_binary_and_case_insensitive() -> None:
+    from vera.application.queries.retrieval_eval import relevances
+
+    assert relevances(["paymentapi RUNS_ON EKS", "unrelated"], ["eks"]) == [1.0, 0.0]
+
+
+def test_citation_rate() -> None:
+    from vera.application.queries.retrieval_eval import citation_rate
+
+    assert citation_rate([True, True, False, True]) == 0.75
+    assert citation_rate([]) == 0.0
+
+
+def test_score_reports_ndcg() -> None:
+    from vera.application.queries.retrieval_eval import score
+
+    report = score([(["paymentapi RUNS_ON eks", "noise"], ["eks"])], k=5)
+    assert report.hit_rate == 1.0
+    assert report.mrr == 1.0
+    assert report.ndcg == 1.0

@@ -65,7 +65,7 @@ async def _run(spec: _Spec) -> None:
     report = score(per_case, k=spec.k)
     print(  # operator-facing
         f"cases={report.cases} hit@{spec.k}={report.hits_at_k}/{report.cases} "
-        f"({report.hit_rate:.2%}) mrr={report.mrr:.3f}"
+        f"({report.hit_rate:.2%}) mrr={report.mrr:.3f} ndcg@{spec.k}={report.ndcg:.3f}"
     )
     if report.hit_rate < spec.min_hit_rate:
         raise SystemExit(f"hit rate {report.hit_rate:.2%} below required {spec.min_hit_rate:.2%}")
