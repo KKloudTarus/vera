@@ -96,10 +96,30 @@ def _sentences(body: str, base_offset: int) -> list[tuple[str, int, int]]:
     return result
 
 
+def _enforce_sentence_bound(
+    sentences: list[tuple[str, int, int]], max_tokens: int
+) -> list[tuple[str, int, int]]:
+    """Hard-split any single sentence that alone exceeds the token budget, so no chunk can be
+    unbounded (a page with one giant sentence still yields bounded chunks). Offsets are kept.
+    """
+    budget = max_tokens * 4  # ~4 chars per token
+    out: list[tuple[str, int, int]] = []
+    for text, start, end in sentences:
+        if _estimate_tokens(text) <= max_tokens:
+            out.append((text, start, end))
+            continue
+        for offset in range(0, len(text), budget):
+            piece = text[offset : offset + budget]
+            out.append((piece, start + offset, start + offset + len(piece)))
+    return out
+
+
 def _window(
     sentences: list[tuple[str, int, int]], max_tokens: int, overlap: int
 ) -> list[tuple[str, int, int]]:
-    """Pack sentences into bounded token windows with a small sentence overlap."""
+    """Pack sentences into bounded token windows with a small sentence overlap. Each sentence
+    is already bounded (see ``_enforce_sentence_bound``), so every window is bounded too.
+    """
     if not sentences:
         return []
     windows: list[tuple[str, int, int]] = []
@@ -225,7 +245,9 @@ def chunk_artifact(
 
     for segment in segments:
         windows = _window(
-            _sentences(segment.body, segment.base_offset), max_tokens, overlap_sentences
+            _enforce_sentence_bound(_sentences(segment.body, segment.base_offset), max_tokens),
+            max_tokens,
+            overlap_sentences,
         )
         if not windows and segment.body.strip():
             windows = [

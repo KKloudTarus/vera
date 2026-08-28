@@ -69,3 +69,12 @@ def test_code_splits_by_symbol_with_line_ranges() -> None:
 
 def test_empty_text_yields_no_chunks() -> None:
     assert _chunk("   \n  ", "text/markdown") == []
+
+
+def test_single_huge_sentence_is_hard_split_below_the_token_bound() -> None:
+    # One sentence with no terminators, far larger than the budget, must still yield bounded
+    # chunks so extraction never sees an unbounded input (gap 6).
+    giant = "word " * 4000  # ~20k chars, ~5k tokens, a single "sentence"
+    chunks = _chunk(giant, "text/plain", max_tokens=64)
+    assert len(chunks) > 1
+    assert all(c.token_count <= 64 for c in chunks)

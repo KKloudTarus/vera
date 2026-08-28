@@ -13,6 +13,7 @@ import hashlib
 from dataclasses import dataclass
 from uuid import UUID
 
+from vera.application.curation.chunking import chunk_artifact
 from vera.application.curation.supersede import SupersedePolicy
 from vera.domain.curation.models import ClaimRecord
 from vera.domain.curation.policy import may_publish_to
@@ -25,7 +26,7 @@ from vera.domain.curation.trust import (
 )
 from vera.domain.knowledge.models import ReviewDecision, VerificationStatus
 from vera.domain.ontology import CURRENT_PIPELINE_VERSIONS
-from vera.domain.ports.curation import ClaimExtractor, ContradictionJudge
+from vera.domain.ports.curation import ClaimExtractor, ContradictionJudge, ExtractedClaim
 from vera.domain.ports.object_store import ObjectStore
 from vera.domain.ports.unit_of_work import UnitOfWork
 from vera.shared.errors import Conflict, DomainError, Err, NotFound, Ok, PolicyRejected, Result
@@ -149,9 +150,37 @@ class CurationService:
                 reference_time=utc_now(),
             )
 
-        extracted = await self._extractor.extract(
-            body=cmd.body, knowledge_type=cmd.knowledge_type, metadata=metadata
+        # Structure-aware chunking (persisted before extraction) so retrieval has citable
+        # passages and free-text extraction never sends an unbounded document to the LLM: each
+        # chunk is bounded, and extraction runs per chunk. Structured triples come from the
+        # metadata, so they are extracted once and need no chunk loop.
+        content_type = str(metadata.get("content_type") or "text/markdown")
+        chunks = (
+            chunk_artifact(
+                text=cmd.body,
+                content_type=content_type,
+                artifact_version_id=ref.version_id,
+                group_id=cmd.group_id,
+            )
+            if cmd.body.strip()
+            else []
         )
+        for chunk in chunks:
+            await uow.chunks.upsert(chunk)
+
+        has_structured = bool(metadata.get("triples") or metadata.get("claims"))
+        if has_structured or not chunks:
+            extracted = await self._extractor.extract(
+                body=cmd.body, knowledge_type=cmd.knowledge_type, metadata=metadata
+            )
+        else:
+            extracted: list[ExtractedClaim] = []
+            for chunk in chunks:
+                extracted.extend(
+                    await self._extractor.extract(
+                        body=chunk.text, knowledge_type=cmd.knowledge_type, metadata={}
+                    )
+                )
         action = action_for_tier(source.trust_tier)
         claim_ids: list[str] = []
         published = 0
