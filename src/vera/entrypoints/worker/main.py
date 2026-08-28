@@ -11,8 +11,14 @@ import asyncio
 import contextlib
 import signal
 
+from vera.adapters.persistence.repositories import (
+    SqlAlchemyFactExpiryRepository,
+    SqlAlchemyKnowledgeEventLog,
+    SqlAlchemyOutboxRepository,
+)
 from vera.adapters.persistence.unit_of_work import SqlAlchemyUnitOfWork
 from vera.application.connectors import SyncRegistration, SyncRunner, SyncScheduler
+from vera.application.curation.reconciliation import FactExpiryService
 from vera.bootstrap import Container, build_container, dispose_container, verify_ontology
 from vera.config.settings import Settings, get_settings
 from vera.entrypoints.worker.lane_pool import LanePool
@@ -24,6 +30,7 @@ from vera.observability import (
 )
 from vera.observability.metrics import note_backpressure, set_queue_depth, start_metrics_server
 from vera.shared.errors import VeraError
+from vera.shared.ids import uuid7
 
 log = get_logger(__name__)
 
@@ -92,6 +99,25 @@ def _build_pool(container: Container, settings: Settings) -> LanePool:
     return LanePool(container, lanes=lanes, queue_maxsize=per_lane)
 
 
+async def expire_due_facts(container: Container) -> int:
+    """Expire stale governed facts and transactionally enqueue their graph cleanup."""
+    async with container.workers() as session, session.begin():
+        report = await FactExpiryService(
+            facts=SqlAlchemyFactExpiryRepository(session),
+            events=SqlAlchemyKnowledgeEventLog(session),
+        ).run()
+        if container.fact_projection is not None:
+            outbox = SqlAlchemyOutboxRepository(session)
+            for group_id in report.group_ids:
+                await outbox.add(
+                    group_id=group_id,
+                    source_id=f"ttl:{group_id}",
+                    dedup_uuid=uuid7(),
+                    payload={"job_kind": "project_facts", "group_id": group_id},
+                )
+        return report.expired
+
+
 async def run_until_empty(container: Container, pool: LanePool, *, batch_size: int) -> int:
     """Claim and process until the queue is drained. Returns the number processed.
 
@@ -154,6 +180,9 @@ async def run() -> None:
                         pending=depths.get("pending", 0),
                         threshold=threshold,
                     )
+                expired = await expire_due_facts(container)
+                if expired:
+                    log.info("worker.facts_expired", count=expired)
             if scheduler is not None and cycles % _SYNC_EVERY_CYCLES == 0:
                 outcomes = await scheduler.run_due()
                 if outcomes:

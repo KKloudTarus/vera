@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from uuid import UUID
 
 from vera.domain.knowledge.models import ClaimType, VerificationStatus
+from vera.shared.types import JsonDict, empty_json
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,6 +48,9 @@ class ClaimRecord:
     subject: str | None
     predicate: str | None
     object: str | None
+    subject_entity_type: str | None = None
+    object_entity_type: str | None = None
+    qualifiers: JsonDict = field(default_factory=empty_json)
     confidence: float | None = None
     extraction_run_id: UUID | None = None
     chunk_id: UUID | None = None

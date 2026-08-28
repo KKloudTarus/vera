@@ -545,8 +545,8 @@ async def test_live_path_persists_exact_chunk_quote_and_extraction_lineage(
     assert row["quote_hash"] == hashlib.sha256(_PROVENANCE_QUOTE.encode()).hexdigest()
     assert row["provider"] == "test-provider"
     assert row["model"] == "test-extractor-v1"
-    assert row["prompt_version"] == "2"
-    assert row["pipeline_version"]["extractor"] == "2"
+    assert row["prompt_version"] == "3"
+    assert row["pipeline_version"]["extractor"] == "3"
 
     evidence = await SqlAlchemyKnowledgeReadModel(container.sessionmaker).get_evidence(
         group_ids=[group], fact_key=str(row["fact_key"])

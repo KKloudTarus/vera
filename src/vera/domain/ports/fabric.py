@@ -8,6 +8,7 @@ group_id and never an arbitrary tenant id.
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Protocol
 
 from vera.domain.knowledge.fabric import (
@@ -74,6 +75,16 @@ class FactRepository(Protocol):
     async def set_aggregates(
         self, *, group_id: str, fact_id: str, authority: float, confidence: float
     ) -> None: ...
+
+    async def set_expiry(
+        self, *, group_id: str, fact_id: str, expires_at: datetime | None
+    ) -> None: ...
+
+
+class FactExpiryRepository(Protocol):
+    async def expire_due(self, *, at: datetime, limit: int = 1000) -> list[Fact]:
+        """Expire active facts across scopes in the privileged worker path."""
+        ...
 
 
 class AssertionRepository(Protocol):

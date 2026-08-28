@@ -29,7 +29,7 @@ from vera.domain.ontology.types import (
 )
 
 ONTOLOGY_NAME = "vera-core"
-ONTOLOGY_VERSION = 1
+ONTOLOGY_VERSION = 2
 
 ENTITY_TYPES: dict[str, type[BaseModel]] = {
     "Service": Service,

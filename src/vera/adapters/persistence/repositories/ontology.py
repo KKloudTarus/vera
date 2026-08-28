@@ -30,8 +30,16 @@ class SqlAlchemyOntologyRepository:
         row = await self._session.scalar(
             select(OntologyVersionRow).order_by(OntologyVersionRow.version.desc()).limit(1)
         )
-        if row is None:
-            return None
+        return self._descriptor(row) if row is not None else None
+
+    async def get_version(self, version: int) -> OntologyDescriptor | None:
+        row = await self._session.scalar(
+            select(OntologyVersionRow).where(OntologyVersionRow.version == version)
+        )
+        return self._descriptor(row) if row is not None else None
+
+    @staticmethod
+    def _descriptor(row: OntologyVersionRow) -> OntologyDescriptor:
         return descriptor_from_row(
             id=row.id,
             version=row.version,

@@ -7,6 +7,7 @@ from vera.domain.ontology import (
     current_descriptor,
     descriptor_from_row,
     detect_drift,
+    diff_descriptors,
     governed_predicates,
 )
 from vera.domain.ontology.policy import AbsenceSemantics, Cardinality, ConflictStrategy
@@ -36,6 +37,22 @@ def test_descriptor_round_trips_through_json() -> None:
         predicate_policies=code.policies_as_json(),
     )
     assert detect_drift(code, rebuilt) == []
+
+
+def test_version_diff_reports_policy_changes() -> None:
+    current = current_descriptor()
+    previous = OntologyDescriptor(
+        version=1,
+        name=current.name,
+        entity_types=current.entity_types[:-1],
+        edge_types=current.edge_types,
+        predicate_policies=current.predicate_policies[:-1],
+    )
+    report = diff_descriptors(previous, current)
+    assert report["from_version"] == 1
+    assert report["to_version"] == 2
+    assert report["entity_types_added"]
+    assert report["predicates_added"]
 
 
 def test_detect_drift_flags_each_divergence() -> None:

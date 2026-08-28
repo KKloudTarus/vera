@@ -6,14 +6,14 @@ in the adapters layer.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Protocol
 from uuid import UUID
 
 from vera.domain.curation.models import ArtifactHead, ArtifactRef, ClaimRecord
 from vera.domain.knowledge.models import ClaimType, VerificationStatus
-from vera.shared.types import JsonDict
+from vera.shared.types import JsonDict, empty_json
 
 
 @dataclass(frozen=True, slots=True)
@@ -23,6 +23,9 @@ class ExtractedClaim:
     subject: str | None = None
     predicate: str | None = None
     object: str | None = None
+    subject_entity_type: str | None = None
+    object_entity_type: str | None = None
+    qualifiers: JsonDict = field(default_factory=empty_json)
     confidence: float | None = None
     source_quote: str | None = None
     quote_start: int | None = None

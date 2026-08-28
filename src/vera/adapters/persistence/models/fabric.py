@@ -128,6 +128,7 @@ class FactRow(Base, UUIDPK, Timestamps):
     confidence: Mapped[float] = mapped_column(Float, nullable=False, server_default="0")
     valid_from: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     valid_to: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     system_from: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -154,6 +155,11 @@ class FactRow(Base, UUIDPK, Timestamps):
         ),
         Index("ix_facts_slot", "group_id", "slot_key"),
         Index("ix_facts_subject", "subject_entity_id"),
+        Index(
+            "ix_facts_expiry",
+            "expires_at",
+            postgresql_where=text("lifecycle_state = 'active' AND expires_at IS NOT NULL"),
+        ),
     )
 
 

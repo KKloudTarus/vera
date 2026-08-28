@@ -74,6 +74,9 @@ def _payload_for(
     obj: str | None,
     statement: str,
     *,
+    subject_entity_type: str | None = None,
+    object_entity_type: str | None = None,
+    qualifiers: JsonDict | None = None,
     supersede_objects: list[str] | None = None,
     source_quote: str | None = None,
     quote_start: int | None = None,
@@ -81,6 +84,12 @@ def _payload_for(
 ) -> JsonDict:
     if subject and predicate and obj:
         triple: JsonDict = {"subject": subject, "predicate": predicate, "object": obj}
+        if subject_entity_type:
+            triple["entity_type"] = subject_entity_type
+        if object_entity_type:
+            triple["object_type"] = object_entity_type
+        if qualifiers:
+            triple["qualifiers"] = qualifiers
         if supersede_objects:
             # The worker closes the prior edges' valid time for these specific objects.
             triple["supersede_objects"] = supersede_objects
@@ -493,6 +502,9 @@ class CurationService:
             claim.predicate,
             claim.object,
             claim.statement,
+            subject_entity_type=claim.subject_entity_type,
+            object_entity_type=claim.object_entity_type,
+            qualifiers=claim.qualifiers,
             supersede_objects=supersede_objects,
             source_quote=claim.source_quote,
             quote_start=claim.quote_start,
@@ -556,6 +568,9 @@ class CurationService:
             claim.predicate,
             claim.object,
             claim.statement,
+            subject_entity_type=claim.subject_entity_type,
+            object_entity_type=claim.object_entity_type,
+            qualifiers=claim.qualifiers,
             source_quote=claim.source_quote,
             quote_start=claim.quote_start,
             quote_end=claim.quote_end,

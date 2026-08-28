@@ -15,6 +15,7 @@ from datetime import datetime, timedelta
 from typing import Literal
 
 from vera.application.retrieval.context_assembler import ContextAssembler, ScoredCandidate
+from vera.domain.ontology.registry import ONTOLOGY_VERSION
 from vera.domain.ports.retrieval_index import RetrievalFilters
 from vera.domain.ports.snapshot import (
     ContextPack,
@@ -25,7 +26,7 @@ from vera.domain.ports.snapshot import (
 from vera.shared.time import utc_now
 from vera.shared.types import JsonDict
 
-_POLICY_VERSION = "ontology-v1"
+_POLICY_VERSION = f"ontology-v{ONTOLOGY_VERSION}"
 _ASSEMBLER_VERSION = "context-assembler-v1"
 _PACK_TTL = timedelta(days=30)
 

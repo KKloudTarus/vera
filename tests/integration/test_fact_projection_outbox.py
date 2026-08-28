@@ -22,7 +22,7 @@ from vera.adapters.persistence.unit_of_work import SqlAlchemyUnitOfWork
 from vera.application.projection.service import FactProjectionService
 from vera.bootstrap import Container
 from vera.entrypoints.worker.lane_pool import LanePool
-from vera.entrypoints.worker.main import run_until_empty
+from vera.entrypoints.worker.main import expire_due_facts, run_until_empty
 from vera.shared.ids import deterministic_id, uuid7
 from vera.shared.types import GroupId, SourceId
 
@@ -133,6 +133,22 @@ async def test_reconcile_enqueues_projection_and_worker_projects_facts(
     proj_source = SqlAlchemyProjectionSource(container.sessionmaker)
     active = await proj_source.active_fact_keys(group_id=group)
     assert active
+    drift = await FactProjectionService(
+        source=proj_source, projection=container.fact_projection
+    ).verify_group(group)
+    assert drift.in_sync, f"missing={drift.missing_in_graph} extra={drift.extra_in_graph}"
+
+    async with container.workers() as session, session.begin():
+        await session.execute(
+            text(
+                "UPDATE facts SET expires_at = now() - interval '1 second' WHERE group_id = :group"
+            ),
+            {"group": group},
+        )
+    assert await expire_due_facts(container) == 1
+    await _drain(container)
+
+    assert not await proj_source.active_fact_keys(group_id=group)
     drift = await FactProjectionService(
         source=proj_source, projection=container.fact_projection
     ).verify_group(group)

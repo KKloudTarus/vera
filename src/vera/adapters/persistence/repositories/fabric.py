@@ -7,6 +7,7 @@ index) so retries and rebuilds converge; see docs/adr/0002.
 
 from __future__ import annotations
 
+from datetime import datetime
 from uuid import UUID
 
 from sqlalchemy import select, update
@@ -81,6 +82,7 @@ def _to_fact(row: FactRow) -> Fact:
         confidence=row.confidence,
         valid_from=row.valid_from,
         valid_to=row.valid_to,
+        expires_at=row.expires_at,
         system_from=row.system_from,
         system_to=row.system_to,
         ontology_version_id=row.ontology_version_id,
@@ -284,6 +286,7 @@ class SqlAlchemyFactRepository:
             confidence=fact.confidence,
             valid_from=fact.valid_from,
             valid_to=fact.valid_to,
+            expires_at=fact.expires_at,
             system_to=fact.system_to,
             ontology_version_id=fact.ontology_version_id,
         )
@@ -341,6 +344,40 @@ class SqlAlchemyFactRepository:
             .where(FactRow.group_id == group_id, FactRow.id == UUID(fact_id))
             .values(authority=authority, confidence=confidence, updated_at=utc_now())
         )
+
+    async def set_expiry(self, *, group_id: str, fact_id: str, expires_at: datetime | None) -> None:
+        await self._session.execute(
+            update(FactRow)
+            .where(FactRow.group_id == group_id, FactRow.id == UUID(fact_id))
+            .values(expires_at=expires_at, updated_at=utc_now())
+        )
+
+
+class SqlAlchemyFactExpiryRepository:
+    """Privileged worker adapter for cross-scope freshness expiration."""
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def expire_due(self, *, at: datetime, limit: int = 1000) -> list[Fact]:
+        rows = list(
+            await self._session.scalars(
+                select(FactRow)
+                .where(
+                    FactRow.lifecycle_state == FactLifecycle.ACTIVE.value,
+                    FactRow.expires_at.is_not(None),
+                    FactRow.expires_at <= at,
+                )
+                .order_by(FactRow.expires_at, FactRow.id)
+                .limit(limit)
+                .with_for_update(skip_locked=True)
+            )
+        )
+        for row in rows:
+            row.lifecycle_state = FactLifecycle.EXPIRED.value
+            row.updated_at = at
+        await self._session.flush()
+        return [_to_fact(row) for row in rows]
 
 
 class SqlAlchemyAssertionRepository:

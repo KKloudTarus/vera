@@ -33,6 +33,9 @@ class StructuredClaimExtractor:
                     subject=raw.get("subject"),
                     predicate=raw.get("predicate"),
                     object=raw.get("object"),
+                    subject_entity_type=raw.get("subject_entity_type") or raw.get("entity_type"),
+                    object_entity_type=raw.get("object_entity_type") or raw.get("object_type"),
+                    qualifiers=dict(raw.get("qualifiers") or {}),
                     confidence=raw.get("confidence"),
                     source_quote=raw.get("source_quote"),
                     quote_start=raw.get("quote_start"),
@@ -48,6 +51,11 @@ class StructuredClaimExtractor:
                     subject=subject,
                     predicate=predicate,
                     object=obj,
+                    subject_entity_type=triple.get("subject_entity_type")
+                    or triple.get("entity_type"),
+                    object_entity_type=triple.get("object_entity_type")
+                    or triple.get("object_type"),
+                    qualifiers=dict(triple.get("qualifiers") or {}),
                     source_quote=triple.get("source_quote"),
                     quote_start=triple.get("quote_start"),
                     quote_end=triple.get("quote_end"),

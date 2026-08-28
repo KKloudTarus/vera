@@ -54,7 +54,7 @@ from vera.domain.knowledge.fabric import (
     normalize_object,
     slot_key,
 )
-from vera.domain.ontology import current_descriptor
+from vera.domain.ontology import current_descriptor, diff_descriptors
 from vera.domain.ports.identity import ResolvedScope, ScopeResolver
 from vera.domain.ports.retrieval_index import CodeIndex, PassageIndex, RetrievalFilters
 from vera.domain.ports.snapshot import ContextPack
@@ -565,7 +565,38 @@ class KnowledgeService:
                     "cardinality": p.cardinality.value,
                     "absence_semantics": p.absence_semantics.value,
                     "conflict_strategy": p.conflict_strategy.value,
+                    "subject_types": list(p.subject_types),
+                    "object_types": list(p.object_types),
+                    "object_kind": p.object_kind.value,
+                    "qualifier_schema": {
+                        rule.name: {
+                            "type": rule.value_type.value,
+                            "required": rule.required,
+                        }
+                        for rule in p.qualifier_schema
+                    },
+                    "allow_additional_qualifiers": p.allow_additional_qualifiers,
+                    "minimum_source_authority": p.minimum_source_authority,
+                    "ttl_seconds": p.ttl_seconds,
+                    "deprecated": p.deprecated,
+                    "replacement_predicate": p.replacement_predicate,
                 }
                 for p in active.predicate_policies
             ],
         }
+
+    async def ontology_diff(self, *, from_version: int, to_version: int | None = None) -> JsonDict:
+        async with self._c.reads() as session:
+            repository = SqlAlchemyOntologyRepository(session)
+            previous = await repository.get_version(from_version)
+            current = (
+                await repository.get_version(to_version)
+                if to_version is not None
+                else await repository.get_active()
+            )
+        if previous is None:
+            raise ValueError(f"ontology version {from_version} was not found")
+        if current is None:
+            requested = to_version if to_version is not None else "active"
+            raise ValueError(f"ontology version {requested} was not found")
+        return diff_descriptors(previous, current)

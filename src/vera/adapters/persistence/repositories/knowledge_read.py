@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 _FACT = text(
     "SELECT f.id::text AS fact_id, f.fact_key, f.group_id, cs.canonical_name AS subject, "
     "f.predicate, COALESCE(co.canonical_name, f.object_scalar) AS object, f.qualifiers, "
-    "f.lifecycle_state, f.authority, f.confidence, f.valid_from, f.valid_to "
+    "f.lifecycle_state, f.authority, f.confidence, f.valid_from, f.valid_to, f.expires_at "
     "FROM facts f JOIN canonical_entities cs ON cs.id = f.subject_entity_id "
     "LEFT JOIN canonical_entities co ON co.id = f.object_entity_id "
     "WHERE f.group_id = ANY(CAST(:gids AS text[])) AND f.fact_key = :fk "
@@ -110,7 +110,7 @@ _ENTITY_ALIASES = text(
 _ENTITY_FACTS = text(
     "SELECT f.fact_key, cs.canonical_name AS subject, f.predicate, "
     "COALESCE(co.canonical_name, f.object_scalar) AS object, f.lifecycle_state, "
-    "f.authority, f.confidence, f.valid_from, f.valid_to "
+    "f.authority, f.confidence, f.valid_from, f.valid_to, f.expires_at "
     "FROM facts f JOIN canonical_entities cs ON cs.id = f.subject_entity_id "
     "LEFT JOIN canonical_entities co ON co.id = f.object_entity_id "
     "WHERE f.group_id = ANY(CAST(:gids AS text[])) "

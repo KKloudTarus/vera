@@ -69,6 +69,7 @@ class KnowledgeEventType(StrEnum):
     FACT_DISPUTED = "FACT_DISPUTED"
     FACT_SUPERSEDED = "FACT_SUPERSEDED"
     FACT_RETRACTED = "FACT_RETRACTED"
+    FACT_EXPIRED = "FACT_EXPIRED"
     FACT_RESTORED = "FACT_RESTORED"
     ENTITY_MERGED = "ENTITY_MERGED"
     ENTITY_SPLIT = "ENTITY_SPLIT"
@@ -224,6 +225,7 @@ class Fact:
     confidence: float = 0.0
     valid_from: datetime | None = None
     valid_to: datetime | None = None
+    expires_at: datetime | None = None
     system_from: datetime | None = None
     system_to: datetime | None = None
     ontology_version_id: UUID | None = None

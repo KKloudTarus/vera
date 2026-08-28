@@ -328,12 +328,20 @@ class LanePool:
         # The artifact id lets reconciliation withdraw the previous version's assertions when a
         # new version of the same artifact drops a proposition (live update path).
         artifact_id: UUID | None = None
+        knowledge_source_id: UUID | None = None
         if version_id is not None:
-            found = await session.scalar(
-                text("SELECT artifact_id FROM artifact_versions WHERE id = :v"),
-                {"v": str(version_id)},
-            )
-            artifact_id = UUID(str(found)) if found is not None else None
+            found = (
+                await session.execute(
+                    text(
+                        "SELECT av.artifact_id, a.source_id FROM artifact_versions av "
+                        "JOIN artifacts a ON a.id = av.artifact_id WHERE av.id = :v"
+                    ),
+                    {"v": str(version_id)},
+                )
+            ).first()
+            if found is not None:
+                artifact_id = UUID(str(found.artifact_id))
+                knowledge_source_id = UUID(str(found.source_id))
 
         canonical = SqlAlchemyCanonicalEntityRepository(session)
         propositions: list[ResolvedProposition] = []
@@ -346,6 +354,12 @@ class LanePool:
             source_quote = triple.get("source_quote")
             quote_start = triple.get("quote_start")
             quote_end = triple.get("quote_end")
+            subject_entity_type = str(triple.get("entity_type") or "Entity")
+            object_entity_type = str(triple["object_type"]) if triple.get("object_type") else None
+            qualifier_value = triple.get("qualifiers")
+            qualifiers = (
+                cast("JsonDict", qualifier_value) if isinstance(qualifier_value, dict) else {}
+            )
             chunk_id = UUID(str(meta["chunk_id"])) if meta.get("chunk_id") else None
             quote_hash = str(meta["quote_hash"]) if meta.get("quote_hash") else None
             needs_review = await _triple_needs_review(
@@ -358,7 +372,7 @@ class LanePool:
                 canonical,
                 group_id=group,
                 name=subject,
-                entity_type=str(triple.get("entity_type", "Entity")),
+                entity_type=subject_entity_type,
             )
             # An edge predicate relates two entities, so resolve the object to a canonical
             # entity and record the object side of the graph edge; scalar attributes stay scalar.
@@ -369,7 +383,7 @@ class LanePool:
                     canonical,
                     group_id=group,
                     name=obj,
-                    entity_type=str(triple.get("object_type", "Entity")),
+                    entity_type=object_entity_type or "Entity",
                 )
                 object_entity_id = object_entity.id
                 object_scalar = None
@@ -379,6 +393,9 @@ class LanePool:
                     predicate=predicate,
                     object_entity_id=object_entity_id,
                     object_scalar=object_scalar,
+                    subject_entity_type=subject_entity_type,
+                    object_entity_type=object_entity_type,
+                    qualifiers=qualifiers,
                     extractor_confidence=confidence,
                     chunk_id=chunk_id,
                     excerpt=source_quote if isinstance(source_quote, str) else None,
@@ -404,6 +421,7 @@ class LanePool:
                 trust_tier=trust_tier,
                 propositions=propositions,
                 artifact_version_id=version_id,
+                knowledge_source_id=knowledge_source_id,
                 artifact_id=artifact_id,
                 ontology_version_id=ontology_version_id,
                 extraction_run_id=extraction_run_id,

@@ -5,6 +5,7 @@ from vera.domain.ontology.descriptor import (
     current_descriptor,
     descriptor_from_row,
     detect_drift,
+    diff_descriptors,
     governed_predicates,
 )
 from vera.domain.ontology.registry import (
@@ -34,6 +35,7 @@ __all__ = [
     "current_descriptor",
     "descriptor_from_row",
     "detect_drift",
+    "diff_descriptors",
     "edge_type_names",
     "entity_type_names",
     "governed_predicates",

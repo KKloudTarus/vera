@@ -209,6 +209,19 @@ async def ontology(principal: PrincipalDep, service: KnowledgeServiceDep) -> dic
     return await service.ontology()
 
 
+@router.get("/ontology/diff", summary="Structured diff between ontology versions")
+async def ontology_diff(
+    principal: PrincipalDep,
+    service: KnowledgeServiceDep,
+    from_version: int = Query(alias="from", ge=1),
+    to_version: int | None = Query(default=None, alias="to", ge=1),
+) -> dict[str, Any]:
+    try:
+        return await service.ontology_diff(from_version=from_version, to_version=to_version)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+
 @router.get("/review", summary="The review queue: proposed facts awaiting a decision")
 async def review_queue(
     principal: PrincipalDep,
