@@ -68,11 +68,33 @@ class Container:
     # Active rerank weights: the configured defaults until refresh_rerank_weights loads a
     # calibrated set from the database at startup.
     rerank_weights: RerankWeights = field(default_factory=RerankWeights)
+    # Role-bound session factories for the cross-scope read and worker paths. When role
+    # enforcement is off (default) these are None and both paths fall back to `sessionmaker`.
+    read_sessionmaker: async_sessionmaker[AsyncSession] | None = None
+    worker_sessionmaker: async_sessionmaker[AsyncSession] | None = None
+
+    @property
+    def reads(self) -> async_sessionmaker[AsyncSession]:
+        """Session factory for the cross-scope read path (vera_trusted when enforced)."""
+        return self.read_sessionmaker or self.sessionmaker
+
+    @property
+    def workers(self) -> async_sessionmaker[AsyncSession]:
+        """Session factory for the worker and projection path (vera_worker when enforced)."""
+        return self.worker_sessionmaker or self.sessionmaker
 
 
 def build_container(settings: Settings) -> Container:
     engine = create_engine(settings.db)
     sessionmaker = create_sessionmaker(engine)
+    # The cross-scope read and worker paths assume their non-superuser roles when enforcement
+    # is on; otherwise they share the base factory (login role).
+    read_sessionmaker: async_sessionmaker[AsyncSession] | None = None
+    worker_sessionmaker: async_sessionmaker[AsyncSession] | None = None
+    if settings.db.role_enforcement:
+        read_sessionmaker = create_sessionmaker(engine, role="vera_trusted")
+        worker_sessionmaker = create_sessionmaker(engine, role="vera_worker")
+    reads = read_sessionmaker or sessionmaker
     queue: JobQueue = PostgresJobQueue(
         sessionmaker, visibility_timeout_s=settings.worker.visibility_timeout_s
     )
@@ -86,9 +108,10 @@ def build_container(settings: Settings) -> Container:
 
         embedder = build_embedder(settings)  # type: ignore[assignment]
     object_store: ObjectStore = S3ObjectStore(settings.objectstore)
-    retrieval_read: RetrievalReadModel = SqlAlchemyRetrievalReadModel(sessionmaker)
+    # The retrieval read model and scope resolution are cross-scope reads: the trusted role.
+    retrieval_read: RetrievalReadModel = SqlAlchemyRetrievalReadModel(reads)
 
-    scopes = ScopeResolutionService(SqlAlchemyScopeResolver(sessionmaker))
+    scopes = ScopeResolutionService(SqlAlchemyScopeResolver(reads))
     oidc: OidcAuthenticator | None = None
     if settings.api.oidc_signing_key is not None or settings.api.oidc_jwks_url is not None:
         signing_key = (
@@ -184,6 +207,8 @@ def build_container(settings: Settings) -> Container:
         embedder=embedder,
         reranker=reranker,
         rerank_weights=build_rerank_weights(settings),
+        read_sessionmaker=read_sessionmaker,
+        worker_sessionmaker=worker_sessionmaker,
     )
 
 

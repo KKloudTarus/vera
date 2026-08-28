@@ -32,6 +32,10 @@ class DatabaseSettings(BaseModel):
     pool_pre_ping: bool = True
     pool_recycle_s: int = 1800
     echo: bool = False
+    # When true, the read path assumes vera_trusted and the worker path vera_worker via
+    # SET LOCAL ROLE, so a superuser login is never relied on. Off by default: the login role
+    # must be a member of those roles (or a superuser) for the SET to succeed.
+    role_enforcement: bool = False
 
 
 class ObjectStoreSettings(BaseModel):

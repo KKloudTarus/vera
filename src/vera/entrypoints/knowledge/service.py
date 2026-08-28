@@ -67,7 +67,9 @@ class KnowledgeService:
     def __init__(self, container: Container, scope_resolver: ScopeResolver) -> None:
         self._c = container
         self._scopes = scope_resolver
-        sm = container.sessionmaker
+        # Read repos run on the cross-scope read path (vera_trusted when enforced); writes go
+        # through a UnitOfWork on the base factory (vera_app + RLS via use_tenant).
+        sm = container.reads
         self._read = SqlAlchemyKnowledgeReadModel(sm)
         self._snapshots = SqlAlchemySnapshotRepository(sm)
         self._packs = SqlAlchemyContextPackRepository(sm)
@@ -393,7 +395,7 @@ class KnowledgeService:
         """The active ontology from the persisted registry: its identity and the governance
         policies it shipped with. Falls back to the code registry only if nothing is persisted.
         """
-        async with self._c.sessionmaker() as session:
+        async with self._c.reads() as session:
             active = await SqlAlchemyOntologyRepository(session).get_active()
         if active is None:
             active = current_descriptor()

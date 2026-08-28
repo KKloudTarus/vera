@@ -155,7 +155,7 @@ class LanePool:
             # errors, the lane is freed, and the queue retries it (not left pinned).
             with span("ingest.job", group_id=str(job.group_id)):
                 async with asyncio.timeout(episode_budget):
-                    async with self._container.sessionmaker() as session, session.begin():
+                    async with self._container.workers() as session, session.begin():
                         await session.execute(_GROUP_LOCK, {"g": str(job.group_id)})
                         # One embedding dimension per group: refuse a write under a changed
                         # model/dim (job dead-letters with a clear message) until reprocess.
@@ -289,7 +289,7 @@ class LanePool:
                     if erase:
                         for key in s3_keys:
                             await self._container.object_store.delete(key=key)
-                    async with self._container.sessionmaker() as session, session.begin():
+                    async with self._container.workers() as session, session.begin():
                         await session.execute(_MARK_DONE, {"id": job.id})
             log.info(
                 "retract.cleanup.done",
