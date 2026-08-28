@@ -12,6 +12,14 @@ from vera.adapters.persistence.repositories.curation import (
     SqlAlchemyPublishedEpisodeRepository,
     SqlAlchemyReviewRepository,
 )
+from vera.adapters.persistence.repositories.fabric import (
+    SqlAlchemyAssertionRepository,
+    SqlAlchemyChunkRepository,
+    SqlAlchemyEvidenceRepository,
+    SqlAlchemyFactRelationRepository,
+    SqlAlchemyFactRepository,
+    SqlAlchemyKnowledgeEventLog,
+)
 from vera.adapters.persistence.repositories.graph_map import SqlAlchemyGraphMapRepository
 from vera.adapters.persistence.repositories.identity import SqlAlchemyIdentityRepository
 from vera.adapters.persistence.repositories.ontology import SqlAlchemyOntologyRepository
@@ -24,10 +32,16 @@ from vera.adapters.persistence.repositories.tenancy import SqlAlchemyTenancyRepo
 
 __all__ = [
     "SqlAlchemyArtifactRepository",
+    "SqlAlchemyAssertionRepository",
     "SqlAlchemyCandidateClaimRepository",
     "SqlAlchemyCanonicalEntityRepository",
+    "SqlAlchemyChunkRepository",
+    "SqlAlchemyEvidenceRepository",
+    "SqlAlchemyFactRelationRepository",
+    "SqlAlchemyFactRepository",
     "SqlAlchemyGraphMapRepository",
     "SqlAlchemyIdentityRepository",
+    "SqlAlchemyKnowledgeEventLog",
     "SqlAlchemyKnowledgeSourceRepository",
     "SqlAlchemyOntologyRepository",
     "SqlAlchemyOutboxRepository",

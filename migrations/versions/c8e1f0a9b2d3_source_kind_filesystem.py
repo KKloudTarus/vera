@@ -24,7 +24,9 @@ _KINDS_OLD = "'git','confluence','jira','cmdb','slack','pdf','agent'"
 
 def _reset(kinds: str) -> None:
     op.execute("ALTER TABLE knowledge_sources DROP CONSTRAINT IF EXISTS ck_source_kind")
-    op.execute(f"ALTER TABLE knowledge_sources ADD CONSTRAINT ck_source_kind CHECK (kind IN ({kinds}))")
+    op.execute(
+        f"ALTER TABLE knowledge_sources ADD CONSTRAINT ck_source_kind CHECK (kind IN ({kinds}))"
+    )
 
 
 def upgrade() -> None:

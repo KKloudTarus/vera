@@ -8,6 +8,14 @@ from vera.adapters.persistence.models.canonical import (
     GraphEdgeMapRow,
     GraphNodeMapRow,
 )
+from vera.adapters.persistence.models.fabric import (
+    AssertionRow,
+    ChunkRow,
+    EvidenceRow,
+    FactRelationRow,
+    FactRow,
+    KnowledgeEventRow,
+)
 from vera.adapters.persistence.models.identity import (
     CredentialRow,
     MembershipRow,
@@ -40,14 +48,20 @@ from vera.adapters.persistence.models.tenancy import (
 __all__ = [
     "ArtifactRow",
     "ArtifactVersionRow",
+    "AssertionRow",
     "AuditEventRow",
     "CandidateClaimRow",
     "CanonicalEntityRow",
+    "ChunkRow",
     "CredentialRow",
     "EntityAliasRow",
+    "EvidenceRow",
+    "FactRelationRow",
+    "FactRow",
     "GraphEdgeMapRow",
     "GraphNodeMapRow",
     "IngestionJobRow",
+    "KnowledgeEventRow",
     "KnowledgeSourceRow",
     "LlmUsageRow",
     "MembershipRow",
