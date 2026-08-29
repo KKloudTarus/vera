@@ -21,6 +21,7 @@ artifact so removing this artifact's support never touches another artifact's as
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from uuid import UUID
@@ -81,6 +82,7 @@ class ResolvedProposition:
     excerpt: str | None = None
     citation_uri: str | None = None
     evidence_content_hash: str | None = None
+    structured_record: JsonDict | None = None
     quote_start: int | None = None
     quote_end: int | None = None
     needs_review: bool = False
@@ -435,13 +437,23 @@ class ReconciliationService:
         if prop.needs_review:
             return
         content = prop.excerpt
-        if content is None:
+        if content is None and prop.structured_record is None and prop.citation_uri is None:
             return
         if prop.chunk_id is not None and (
             prop.quote_start is None or prop.quote_end is None or prop.evidence_content_hash is None
         ):
             return
-        content_hash = prop.evidence_content_hash or hashlib.sha256(content.encode()).hexdigest()
+        if content is not None:
+            evidence_bytes = content.encode()
+        elif prop.structured_record is not None:
+            evidence_bytes = json.dumps(
+                prop.structured_record, sort_keys=True, separators=(",", ":")
+            ).encode()
+        else:
+            if prop.citation_uri is None:
+                return
+            evidence_bytes = prop.citation_uri.encode()
+        content_hash = prop.evidence_content_hash or hashlib.sha256(evidence_bytes).hexdigest()
         before = await self._evidence.for_assertion(
             group_id=req.group_id, assertion_id=str(assertion_id)
         )
@@ -453,6 +465,7 @@ class ReconciliationService:
                 content_hash=content_hash,
                 chunk_id=prop.chunk_id,
                 artifact_version_id=req.artifact_version_id,
+                structured_record=prop.structured_record,
                 excerpt=prop.excerpt,
                 citation_uri=prop.citation_uri,
                 quote_start=prop.quote_start,

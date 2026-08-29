@@ -23,6 +23,7 @@ class HybridPassageIndex:
         query: str,
         limit: int,
         created_before: datetime | None = None,
+        snapshot_id: str | None = None,
         filters: RetrievalFilters | None = None,
     ) -> list[PassageHit]:
         async with asyncio.TaskGroup() as group:
@@ -33,6 +34,7 @@ class HybridPassageIndex:
                         query=query,
                         limit=limit,
                         created_before=created_before,
+                        snapshot_id=snapshot_id,
                         filters=filters,
                     )
                 )

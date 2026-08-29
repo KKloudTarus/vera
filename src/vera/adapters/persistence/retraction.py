@@ -47,6 +47,12 @@ _S3_KEYS = text(
     "JOIN artifact_versions av ON av.id = cc.artifact_version_id "
     "WHERE cc.group_id = :g AND cc.id = :cid"
 )
+_ARTIFACT_VERSION_IDS = text(
+    "SELECT DISTINCT artifact_version_id FROM candidate_claims WHERE group_id = :g AND id = :cid"
+)
+_ERASE_RETRIEVAL_INPUTS = text(
+    "SELECT erase_artifact_retrieval_inputs(:g, CAST(:version_ids AS uuid[]))"
+)
 _DELETE_EDGES = text(
     "DELETE FROM graph_edge_map WHERE group_id = :g AND published_episode_id = :eid"
 )
@@ -117,12 +123,30 @@ class RetractionService:
                 for (r,) in (await session.execute(_EDGES, {"g": group_id, "eid": episode_id}))
             ]
             s3_keys: list[str] = []
+            artifact_version_ids: list[UUID] = []
             claim_id = _claim_id(source_id)
             if erase_artifact and claim_id is not None:
                 s3_keys = [
                     str(r)
                     for (r,) in (await session.execute(_S3_KEYS, {"g": group_id, "cid": claim_id}))
                 ]
+                artifact_version_ids = [
+                    r
+                    for (r,) in (
+                        await session.execute(
+                            _ARTIFACT_VERSION_IDS, {"g": group_id, "cid": claim_id}
+                        )
+                    )
+                ]
+            if artifact_version_ids:
+                await session.execute(
+                    text("SELECT set_config('vera.group_id', :group_id, true)"),
+                    {"group_id": group_id},
+                )
+                await session.execute(
+                    _ERASE_RETRIEVAL_INPUTS,
+                    {"g": group_id, "version_ids": artifact_version_ids},
+                )
             await session.execute(_DELETE_EDGES, {"g": group_id, "eid": episode_id})
             await session.execute(_DELETE_NODES, {"g": group_id, "eid": episode_id})
             if erase_artifact:

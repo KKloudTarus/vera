@@ -138,6 +138,7 @@ class FactRow(Base, UUIDPK, Timestamps):
     )
 
     __table_args__ = (
+        UniqueConstraint("id", "group_id", name="uq_facts_tenant_snapshot"),
         CheckConstraint(f"lifecycle_state IN ({_LIFECYCLE})", name="ck_fact_lifecycle"),
         CheckConstraint(f"object_type IN ({_OBJECT_TYPE})", name="ck_fact_object_type"),
         CheckConstraint(

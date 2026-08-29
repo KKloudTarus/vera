@@ -10,7 +10,7 @@ from __future__ import annotations
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -330,10 +330,18 @@ class SqlAlchemyFactRepository:
         return _to_fact(row) if row is not None else None
 
     async def set_lifecycle(self, *, group_id: str, fact_id: str, state: FactLifecycle) -> None:
+        now = utc_now()
+        values: dict[str, object] = {"lifecycle_state": state.value, "updated_at": now}
+        if state in {
+            FactLifecycle.SUPERSEDED,
+            FactLifecycle.RETRACTED,
+            FactLifecycle.EXPIRED,
+        }:
+            values["valid_to"] = func.coalesce(FactRow.valid_to, now)
         await self._session.execute(
             update(FactRow)
             .where(FactRow.group_id == group_id, FactRow.id == UUID(fact_id))
-            .values(lifecycle_state=state.value, updated_at=utc_now())
+            .values(**values)
         )
 
     async def set_aggregates(
@@ -406,9 +414,6 @@ class SqlAlchemyAssertionRepository:
             state=assertion.state.value,
         )
         updates = {
-            "recorded_at": now,
-            "state": assertion.state.value,
-            "withdrawn_at": None,
             "extractor_confidence": assertion.extractor_confidence,
             "source_authority": assertion.source_authority,
             "verification_state": assertion.verification_state,

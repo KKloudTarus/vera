@@ -9,12 +9,13 @@ a personal-scope proposal, never a published shared fact (invariant 5).
 
 from __future__ import annotations
 
-from datetime import datetime
 from typing import Any
+from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Query, status
-from pydantic import BaseModel, Field
+from pydantic import AwareDatetime, BaseModel, Field
 
+from vera.application.snapshot import SnapshotNotFoundError, SnapshotNotReproducibleError
 from vera.entrypoints.api.deps import KnowledgeServiceDep, PrincipalDep
 from vera.entrypoints.knowledge import ScopeError
 
@@ -28,10 +29,10 @@ def _forbidden(exc: ScopeError) -> HTTPException:
 class ContextRequest(BaseModel):
     query: str = Field(min_length=1)
     project: str | None = None  # a hint, validated against the caller's resolved scopes
-    snapshot_id: str | None = None
+    snapshot_id: UUID | None = None
     limit: int = Field(default=10, ge=1, le=50)
     token_budget: int = Field(default=2000, ge=100, le=32000)
-    as_of: datetime | None = None
+    as_of: AwareDatetime | None = None
     hints: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -39,7 +40,7 @@ class SearchRequest(BaseModel):
     query: str = Field(min_length=1)
     project: str | None = None
     limit: int = Field(default=10, ge=1, le=50)
-    as_of: datetime | None = None
+    as_of: AwareDatetime | None = None
 
 
 class ProposeRequest(BaseModel):
@@ -52,7 +53,7 @@ class ProposeRequest(BaseModel):
 
 class SnapshotRequest(BaseModel):
     project: str | None = None
-    as_of: datetime | None = None
+    as_of: AwareDatetime | None = None
 
 
 @router.post("/context", summary="Assemble a bounded, cited context pack (primary tool)")
@@ -64,7 +65,7 @@ async def get_context(
             principal.id,
             query=req.query,
             project=req.project,
-            snapshot_id=req.snapshot_id,
+            snapshot_id=str(req.snapshot_id) if req.snapshot_id else None,
             limit=req.limit,
             token_budget=req.token_budget,
             as_of=req.as_of,
@@ -72,6 +73,10 @@ async def get_context(
         )
     except ScopeError as exc:
         raise _forbidden(exc) from exc
+    except SnapshotNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except SnapshotNotReproducibleError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
 
 @router.post("/search", summary="Combined, cited search (no persisted pack)")
@@ -209,9 +214,9 @@ async def create_snapshot(
 
 @router.get("/snapshots/{snapshot_id}", summary="Get a snapshot's metadata")
 async def get_snapshot(
-    snapshot_id: str, principal: PrincipalDep, service: KnowledgeServiceDep
+    snapshot_id: UUID, principal: PrincipalDep, service: KnowledgeServiceDep
 ) -> dict[str, Any]:
-    snap = await service.get_snapshot(principal.id, snapshot_id=snapshot_id)
+    snap = await service.get_snapshot(principal.id, snapshot_id=str(snapshot_id))
     if snap is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="snapshot not found")
     return snap

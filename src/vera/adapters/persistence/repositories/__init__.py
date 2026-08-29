@@ -36,6 +36,10 @@ from vera.adapters.persistence.repositories.retrieval import (
     SqlAlchemyRetrievalFeedbackRepository,
     SqlAlchemyRetrievalReadModel,
 )
+from vera.adapters.persistence.repositories.snapshot import (
+    SqlAlchemyContextPackRepository,
+    SqlAlchemySnapshotRepository,
+)
 from vera.adapters.persistence.repositories.tenancy import SqlAlchemyTenancyRepository
 
 __all__ = [
@@ -46,6 +50,7 @@ __all__ = [
     "SqlAlchemyChunkEmbeddingRepository",
     "SqlAlchemyChunkRepository",
     "SqlAlchemyCommunityLineageRepository",
+    "SqlAlchemyContextPackRepository",
     "SqlAlchemyEvidenceRepository",
     "SqlAlchemyExtractionRunRepository",
     "SqlAlchemyFactExpiryRepository",
@@ -61,5 +66,6 @@ __all__ = [
     "SqlAlchemyRetrievalFeedbackRepository",
     "SqlAlchemyRetrievalReadModel",
     "SqlAlchemyReviewRepository",
+    "SqlAlchemySnapshotRepository",
     "SqlAlchemyTenancyRepository",
 ]

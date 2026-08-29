@@ -82,7 +82,9 @@ jobs:
       - name: Apply migrations
         run: alembic upgrade head
       - name: Integration tests
-        run: pytest -m integration -rA
+        run: pytest -m "integration and not llm" -rA
+      - name: Issue 6 E2E acceptance
+        run: pytest -m "issue6_acceptance and not llm" -rA
 
   security:
     name: Dependency audit

@@ -3,7 +3,17 @@
 from vera.application.snapshot.service import (
     ContextPackExpiredError,
     ContextPackService,
+    SnapshotNotFoundError,
+    SnapshotNotReproducibleError,
     SnapshotService,
+    serialize_candidate,
 )
 
-__all__ = ["ContextPackExpiredError", "ContextPackService", "SnapshotService"]
+__all__ = [
+    "ContextPackExpiredError",
+    "ContextPackService",
+    "SnapshotNotFoundError",
+    "SnapshotNotReproducibleError",
+    "SnapshotService",
+    "serialize_candidate",
+]

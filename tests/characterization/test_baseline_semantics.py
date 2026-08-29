@@ -19,9 +19,8 @@ from vera.domain.curation.trust import (
 from vera.domain.ontology.registry import ONTOLOGY_VERSION, is_single_valued
 
 
-def test_current_ontology_version_is_one() -> None:
-    # Phase 6 introduces versioned predicate governance; today there is a single version.
-    assert ONTOLOGY_VERSION == 1
+def test_current_ontology_version_is_two() -> None:
+    assert ONTOLOGY_VERSION == 2
 
 
 def test_trust_tier_to_publish_action_is_stable() -> None:

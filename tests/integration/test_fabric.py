@@ -208,6 +208,7 @@ async def test_fact_and_chunk_and_evidence_upsert_are_idempotent(
             )
         )
         assert a1.id == a2.id  # reaffirmed in place, not duplicated
+        assert a2.recorded_at == a1.recorded_at
         assert len(await asserts.active_for_fact(group_id=group, fact_id=str(f1.id))) == 1
 
         evidence = SqlAlchemyEvidenceRepository(s)
@@ -233,6 +234,33 @@ async def test_fact_and_chunk_and_evidence_upsert_are_idempotent(
         )
         assert e1.id == e2.id  # same content hash -> one evidence row
         assert len(await evidence.for_assertion(group_id=group, assertion_id=str(a1.id))) == 1
+
+        await asserts.withdraw(group_id=group, assertion_id=str(a1.id))
+        membership_before = (
+            await s.execute(
+                text("SELECT recorded_at, withdrawn_at FROM assertions WHERE id = :id"),
+                {"id": a1.id},
+            )
+        ).one()
+        replayed = await asserts.upsert(
+            Assertion(
+                id=uuid7(),
+                group_id=group,
+                fact_id=f1.id,
+                polarity=Polarity.SUPPORTS,
+                artifact_version_id=version_id,
+                extractor_confidence=0.9,
+                source_authority=1.0,
+            )
+        )
+        membership_after = (
+            await s.execute(
+                text("SELECT recorded_at, withdrawn_at FROM assertions WHERE id = :id"),
+                {"id": a1.id},
+            )
+        ).one()
+        assert replayed.state.value == "withdrawn"
+        assert membership_after == membership_before
 
 
 async def test_one_fact_supported_by_multiple_sources(

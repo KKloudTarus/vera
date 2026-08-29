@@ -234,16 +234,16 @@ Each resolution is counted by `vera_entity_resolution_total` (created / linked b
 linked by judge), so precision can be watched on real data. Use `dedup_eval` to measure a
 threshold sweep and the judge's agreement on a labeled set before trusting it.
 
-## Temporal model: bi-temporal truth
+## Temporal model
 
-Facts carry a valid-time window (`valid_at`, `invalid_at`). A search defaults to "as of
-now", so a superseded or retracted fact is hidden from the current view; an explicit
-`as_of` returns the memory as it stood at that instant. This is a first-class query on both
-the HTTP API (`as_of` on `/memory/search`) and the MCP `memory_search` tool.
+Facts carry a valid-time window (`valid_from`, `valid_to`). A search defaults to "as of now",
+so a superseded or retracted fact is hidden from the current view. An explicit `as_of` filters
+the authoritative revisions currently stored. Knowledge snapshots copy retrieval inputs at a
+system-time boundary when later replay must remain stable.
 
 **Supersession.** When a new, sufficiently trusted fact contradicts an existing one, the
-old fact is invalidated (its `invalid_at` is set) rather than deleted, so history stays
-queryable. One `SupersedePolicy` governs both the structured and free-text publish paths,
+old fact remains stored with a superseded lifecycle. One `SupersedePolicy` governs both the
+structured and free-text publish paths,
 so contradiction handling is uniform:
 
 - A functional predicate (one value at a time, for example `RUNS_ON`) supersedes every

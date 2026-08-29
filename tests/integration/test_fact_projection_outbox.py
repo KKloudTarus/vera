@@ -18,6 +18,7 @@ import pytest_asyncio
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from vera.adapters.curation.extractor import StructuredClaimExtractor
 from vera.adapters.graph.graphiti_adapter import GraphitiMemoryEngine
 from vera.adapters.graph.offline import (
     DeterministicCommunityLLM,
@@ -29,6 +30,7 @@ from vera.adapters.persistence.repositories.community import (
 )
 from vera.adapters.persistence.repositories.projection import SqlAlchemyProjectionSource
 from vera.adapters.persistence.unit_of_work import SqlAlchemyUnitOfWork
+from vera.application.curation import CurationService, IngestArtifact
 from vera.application.projection.service import FactProjectionService
 from vera.bootstrap import Container
 from vera.domain.ports.identity import ResolvedScope, ScopeResolver
@@ -71,6 +73,8 @@ async def graphiti_engine() -> AsyncIterator[GraphitiMemoryEngine]:
     engine = GraphitiMemoryEngine(client)
     if not await engine.health():
         await client.close()
+        if os.environ.get("CI"):
+            pytest.fail("Neo4j not reachable in CI")
         pytest.skip("Neo4j not reachable")
     await engine.ensure_schema()
     try:
@@ -87,7 +91,7 @@ async def _tenant(sm: async_sessionmaker[AsyncSession], group: str) -> AsyncIter
         yield session
 
 
-async def _provision(container: Container, group: str) -> None:
+async def _provision(container: Container, group: str) -> tuple[UUID, UUID]:
     async with SqlAlchemyUnitOfWork(container.sessionmaker) as uow:
         await uow.use_tenant(group)
         org = await uow.tenancy.create_organization(
@@ -96,10 +100,11 @@ async def _provision(container: Container, group: str) -> None:
         ws = await uow.tenancy.create_workspace(
             org_id=org.id, slug=f"w-{group}", name="W", group_id=f"w:{group}"
         )
-        await uow.tenancy.create_project(
+        project = await uow.tenancy.create_project(
             workspace_id=ws.id, slug=f"pr-{group}", name="P", group_id=group
         )
         await uow.commit()
+        return ws.id, project.id
 
 
 async def _drain(container: Container) -> None:
@@ -111,6 +116,7 @@ async def _drain(container: Container) -> None:
         await pool.stop()
 
 
+@pytest.mark.issue6_acceptance
 async def test_reconcile_enqueues_projection_and_worker_projects_facts(
     make_container: Callable[[object], Container],
     graphiti_engine: GraphitiMemoryEngine,
@@ -228,3 +234,91 @@ async def test_reconcile_enqueues_projection_and_worker_projects_facts(
     assert drift.in_sync, f"missing={drift.missing_in_graph} extra={drift.extra_in_graph}"
 
     await container.fact_projection.clear(group_id=group)
+
+
+@pytest.mark.issue6_acceptance
+async def test_same_source_replacement_converges_incremental_graph_projection(
+    make_container: Callable[[object], Container],
+    graphiti_engine: GraphitiMemoryEngine,
+) -> None:
+    container = make_container(graphiti_engine)
+    memory = container.settings.memory.model_copy(update={"fabric_write_mode": "fabric"})
+    container = dataclasses.replace(
+        container, settings=container.settings.model_copy(update={"memory": memory})
+    )
+    assert container.fact_projection is not None
+    group = f"p:replace-{uuid7().hex[:12]}"
+    workspace_id, project_id = await _provision(container, group)
+    async with SqlAlchemyUnitOfWork(container.sessionmaker) as uow:
+        await uow.use_tenant(group)
+        source_id = await uow.sources.create(
+            workspace_id=workspace_id,
+            project_id=project_id,
+            kind="cmdb",
+            name="CMDB",
+            trust_tier=1,
+        )
+        await uow.commit()
+
+    async def ingest(revision: int, target: str) -> None:
+        async with SqlAlchemyUnitOfWork(container.sessionmaker) as uow:
+            await uow.use_tenant(group)
+            body = f"paymentapi runs on {target}"
+            await CurationService(uow, StructuredClaimExtractor()).ingest_artifact(
+                IngestArtifact(
+                    source_id=source_id,
+                    group_id=group,
+                    external_id="payment-runtime",
+                    body=body,
+                    knowledge_type="fact_triple",
+                    metadata={
+                        "triples": [
+                            {
+                                "subject": "paymentapi",
+                                "predicate": "RUNS_ON",
+                                "object": target,
+                                "source_quote": body,
+                                "quote_start": 0,
+                                "quote_end": len(body),
+                            }
+                        ]
+                    },
+                    source_revision=revision,
+                )
+            )
+            await uow.commit()
+        await _drain(container)
+
+    try:
+        await ingest(1, "eks")
+        await ingest(2, "ecs")
+
+        source = SqlAlchemyProjectionSource(container.sessionmaker)
+        active = await source.active_fact_keys(group_id=group)
+        projected = await container.fact_projection.projected_fact_keys(group_id=group)
+        assert projected == active
+        async with container.sessionmaker() as session:
+            states = {
+                str(row.object_name): (str(row.lifecycle_state), str(row.fact_key))
+                for row in (
+                    await session.execute(
+                        text(
+                            "SELECT co.canonical_name AS object_name, f.lifecycle_state, "
+                            "f.fact_key "
+                            "FROM facts f LEFT JOIN canonical_entities co "
+                            "ON co.id = f.object_entity_id WHERE f.group_id = :group"
+                        ),
+                        {"group": group},
+                    )
+                )
+            }
+        assert states["eks"][0] == "retracted"
+        assert states["ecs"][0] == "active"
+        assert projected == {states["ecs"][1]}
+        assert states["eks"][1] not in projected
+
+        # A stale source replay emits no regression and leaves the graph converged.
+        await ingest(1, "eks")
+        assert await container.fact_projection.projected_fact_keys(group_id=group) == active
+    finally:
+        await container.fact_projection.clear(group_id=group)

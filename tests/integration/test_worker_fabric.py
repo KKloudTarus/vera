@@ -13,6 +13,7 @@ import dataclasses
 import hashlib
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
+from datetime import timedelta
 from uuid import UUID
 
 import pytest
@@ -23,6 +24,8 @@ from vera.adapters.curation.extractor import StructuredClaimExtractor
 from vera.adapters.graph.null import NullMemoryEngine
 from vera.adapters.persistence.models.knowledge import ArtifactRow, ArtifactVersionRow
 from vera.adapters.persistence.repositories.knowledge_read import SqlAlchemyKnowledgeReadModel
+from vera.adapters.persistence.repositories.passage_index import SqlAlchemyFactCandidateSource
+from vera.adapters.persistence.retraction import RetractionService
 from vera.adapters.persistence.unit_of_work import SqlAlchemyUnitOfWork
 from vera.application.curation import CurationService, IngestArtifact
 from vera.bootstrap import Container
@@ -270,6 +273,31 @@ async def test_worker_uses_real_source_authority_not_hardcoded(fabric_container:
     assert authority == pytest.approx(0.85)
     assert await _fact_state(container, group, "eks") == "active"
 
+    live_hits = await SqlAlchemyFactCandidateSource(container.sessionmaker).search(
+        group_id=group, query="eks", limit=10
+    )
+    assert live_hits[0].evidence_structured_record == {
+        "subject": "paymentapi",
+        "predicate": "RUNS_ON",
+        "object": "eks",
+    }
+    assert live_hits[0].evidence_id is not None
+    assert live_hits[0].evidence_assertion_id is not None
+    assert live_hits[0].evidence_source_id is not None
+
+    async with SqlAlchemyUnitOfWork(container.sessionmaker) as uow:
+        await uow.set_repeatable_read()
+        await uow.use_tenant(group)
+        snapshot = await uow.snapshots.create(group_id=group, policy_version="ontology-v2")
+        await uow.commit()
+    frozen_hits = await SqlAlchemyFactCandidateSource(container.sessionmaker).search(
+        group_id=group, query="eks", limit=10, snapshot_id=snapshot.id
+    )
+    assert frozen_hits[0].evidence_structured_record == live_hits[0].evidence_structured_record
+    assert frozen_hits[0].evidence_id == live_hits[0].evidence_id
+    assert frozen_hits[0].evidence_assertion_id == live_hits[0].evidence_assertion_id
+    assert frozen_hits[0].evidence_source_id == live_hits[0].evidence_source_id
+
     # Replaying the same episode does not duplicate.
     await _enqueue(
         container,
@@ -327,10 +355,12 @@ async def test_new_version_withdraws_dropped_proposition_on_live_path(
     assert withdrawn >= 1
 
 
+@pytest.mark.issue6_acceptance
 async def test_stale_predecessor_job_cannot_regress_the_current_fact(
     fabric_container: Container,
 ) -> None:
-    container = fabric_container
+    projection = _RecordingFactProjection()
+    container = dataclasses.replace(fabric_container, fact_projection=projection)
     group = f"p:w-{uuid7().hex[:12]}"
     v1, v2 = await _artifact_versions(container, group, ordered=True)
 
@@ -353,6 +383,7 @@ async def test_stale_predecessor_job_cannot_regress_the_current_fact(
 
     assert await _fact_state(container, group, "ecs") == "active"
     assert await _fact_state(container, group, "eks") is None
+    assert {fact.object_name for fact in projection.facts.values()} == {"ecs"}
 
 
 async def test_tombstone_version_retracts_the_previous_fact(
@@ -554,6 +585,81 @@ async def test_live_path_persists_exact_chunk_quote_and_extraction_lineage(
     assert evidence is not None
     assert evidence[0]["excerpt"] == _PROVENANCE_QUOTE
     assert evidence[0]["extraction_run_id"] == str(row["assertion_run_id"])
+
+
+async def test_erasure_removes_live_and_frozen_retrieval_inputs(
+    fabric_container: Container,
+) -> None:
+    container = fabric_container
+    group = f"p:w-{uuid7().hex[:12]}"
+    claim_id = await _ingest_provenance_claim(container, group, aligned=True)
+    async with _tenant(container.sessionmaker, group) as session:
+        source_row = (
+            await session.execute(
+                text(
+                    "SELECT pe.source_id, cc.artifact_version_id "
+                    "FROM published_episodes pe JOIN candidate_claims cc ON cc.id = :claim_id "
+                    "WHERE pe.group_id = :group AND pe.source_id LIKE '%' || :claim_text"
+                ),
+                {
+                    "claim_id": claim_id,
+                    "group": group,
+                    "claim_text": str(claim_id),
+                },
+            )
+        ).one()
+
+    async with SqlAlchemyUnitOfWork(container.sessionmaker) as uow:
+        await uow.set_repeatable_read()
+        await uow.use_tenant(group)
+        snapshot = await uow.snapshots.create(group_id=group, policy_version="ontology-v2")
+        pack = await uow.context_packs.save(
+            group_id=group,
+            query="PostgreSQL",
+            snapshot_id=snapshot.id,
+            token_estimate=1,
+            result_count=1,
+            omitted=0,
+            conflicts=0,
+            freshness_warnings=0,
+            results=[
+                {
+                    "ref": "fact",
+                    "citation": {"artifact_version_id": str(source_row.artifact_version_id)},
+                }
+            ],
+            request_hash="0" * 64,
+            result_references=["fact"],
+            expires_at=utc_now() + timedelta(days=1),
+            assembler_version="context-assembler-v2",
+            request={"query": "PostgreSQL", "snapshot_id": snapshot.id},
+        )
+        await uow.commit()
+
+    result = await RetractionService(container.sessionmaker, container.memory).retract_source(
+        group_id=group,
+        source_id=str(source_row.source_id),
+        erase_artifact=True,
+    )
+    assert not is_err(result)
+    async with container.sessionmaker() as session:
+        counts = (
+            await session.execute(
+                text(
+                    "SELECT "
+                    "(SELECT count(*) FROM chunks WHERE artifact_version_id = :version_id), "
+                    "(SELECT count(*) FROM evidence WHERE artifact_version_id = :version_id), "
+                    "(SELECT count(*) FROM knowledge_snapshots WHERE id = :snapshot_id), "
+                    "(SELECT count(*) FROM context_packs WHERE id = :pack_id)"
+                ),
+                {
+                    "version_id": source_row.artifact_version_id,
+                    "snapshot_id": snapshot.id,
+                    "pack_id": pack.id,
+                },
+            )
+        ).one()
+    assert tuple(counts) == (0, 0, 0, 0)
 
 
 async def test_misaligned_quote_goes_to_review_without_synthetic_evidence(

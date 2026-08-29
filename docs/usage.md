@@ -39,7 +39,8 @@ handle for provenance and retraction.
 ## Point-in-time queries (`as_of`)
 
 By default search returns the current view (superseded and retracted facts are hidden). Pass
-`as_of` (ISO-8601) to ask what memory held at that instant:
+`as_of` (ISO-8601) to select the valid-time boundary from the authoritative revisions currently
+stored:
 
 ```bash
 curl -s -X POST localhost:8000/memory/search \
@@ -47,8 +48,11 @@ curl -s -X POST localhost:8000/memory/search \
   -d '{"text":"payment service environment","as_of":"2026-01-01T00:00:00Z","limit":5}'
 ```
 
-This works because facts are bi-temporal: superseding a fact invalidates the old one rather
-than deleting it, so history stays queryable.
+Create a knowledge snapshot when retrieval must remain reproducible across later ingestion,
+source mutation, supersession, or re-embedding. The snapshot copies fact, citation, chunk, and
+vector inputs at one system-time boundary and pins the embedding, retrieval-index, and
+assembler/scoring contracts. Persisted context packs retain the canonical request JSON as well
+as its hash, so audits do not depend on reconstructing omitted defaults.
 
 ## Multi-hop explore
 
@@ -72,7 +76,7 @@ Withdraw a published source. `source_id` is the value from a search hit.
 curl -s -X DELETE "localhost:8000/memory/sources/<SOURCE_ID>" \
   -H "authorization: Bearer $KEY"
 
-# Erase (GDPR): also delete the episode row and its raw artifact bytes.
+# Erase (GDPR): also delete raw bytes and every live or snapshotted retrieval copy.
 curl -s -X DELETE "localhost:8000/memory/sources/<SOURCE_ID>?erase=true" \
   -H "authorization: Bearer $KEY"
 ```

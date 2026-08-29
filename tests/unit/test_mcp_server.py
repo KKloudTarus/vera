@@ -63,6 +63,12 @@ def test_local_server_uses_stable_principal_without_jwt() -> None:
     assert mcp_main._principal_id(settings) == principal_id
 
 
+def test_mcp_timestamps_require_an_offset() -> None:
+    with pytest.raises(ValueError, match="UTC offset"):
+        mcp_main._parse_instant("2026-01-02T03:04:05")
+    assert mcp_main._parse_instant("2026-01-02T03:04:05Z") is not None
+
+
 def test_jwt_server_never_falls_back_to_local_principal(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

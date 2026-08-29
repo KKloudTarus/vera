@@ -18,8 +18,9 @@ from vera.domain.ports.community import (
 _ACTIVE_FACTS = text(
     "SELECT f.id, f.fact_key, s.canonical_name AS subject_name, f.predicate, "
     "COALESCE(o.canonical_name, f.object_scalar) AS object_name "
-    "FROM facts f JOIN canonical_entities s ON s.id = f.subject_entity_id "
-    "LEFT JOIN canonical_entities o ON o.id = f.object_entity_id "
+    "FROM facts f JOIN canonical_entities s "
+    "ON s.id = f.subject_entity_id AND s.group_id = f.group_id "
+    "LEFT JOIN canonical_entities o ON o.id = f.object_entity_id AND o.group_id = f.group_id "
     "WHERE f.group_id = :group AND f.lifecycle_state = 'active' ORDER BY f.id"
 )
 _PAGE = text(
@@ -36,9 +37,9 @@ _PAGE = text(
     "COALESCE(o.canonical_name, f.object_scalar) AS object_name, l.created_at "
     "FROM community_fact_lineage l "
     "JOIN selected_run r ON r.id = l.derivation_run_id "
-    "JOIN facts f ON f.id = l.fact_id "
-    "JOIN canonical_entities s ON s.id = f.subject_entity_id "
-    "LEFT JOIN canonical_entities o ON o.id = f.object_entity_id "
+    "JOIN facts f ON f.id = l.fact_id AND f.group_id = l.group_id "
+    "JOIN canonical_entities s ON s.id = f.subject_entity_id AND s.group_id = f.group_id "
+    "LEFT JOIN canonical_entities o ON o.id = f.object_entity_id AND o.group_id = f.group_id "
     "WHERE l.community_id = CAST(:community AS uuid) "
     "AND l.group_id = ANY(CAST(:groups AS text[])) "
     "AND (CAST(:cursor AS uuid) IS NULL OR l.fact_id > CAST(:cursor AS uuid)) "

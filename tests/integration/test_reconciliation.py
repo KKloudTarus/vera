@@ -14,7 +14,7 @@ from datetime import timedelta
 from uuid import UUID
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import exc, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from vera.adapters.persistence.models.knowledge import ArtifactRow, ArtifactVersionRow
@@ -207,6 +207,46 @@ async def test_repeated_proposition_reaffirms_and_does_not_duplicate(
         == 1
     )
     assert await _count(sessionmaker, group, "SELECT count(*) FROM evidence") == 1
+
+
+async def test_uri_only_evidence_survives_live_and_snapshot_retrieval(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    from vera.adapters.persistence.repositories.passage_index import SqlAlchemyFactCandidateSource
+
+    group = f"p:uri-{uuid7().hex[:12]}"
+    source, artifact, version, _ = await _bootstrap(sessionmaker, group)
+    subject = await _subject(sessionmaker, group)
+    citation_uri = "confluence://space/runtime#paymentapi"
+    proposition = ResolvedProposition(
+        subject_entity_id=subject,
+        predicate="RUNS_ON",
+        object_scalar="eks",
+        subject_entity_type="Service",
+        object_entity_type="Environment",
+        qualifiers={"environment": "prod"},
+        extractor_confidence=0.9,
+        citation_uri=citation_uri,
+    )
+    async with _tenant(sessionmaker, group) as session:
+        report = await _service(session).reconcile(
+            _req(group, artifact, version, source, 1, [proposition])
+        )
+    assert report.evidence_added == 1
+
+    candidates = SqlAlchemyFactCandidateSource(sessionmaker)
+    live = await candidates.search(group_id=group, query="eks", limit=10)
+    assert live[0].evidence_citation_uri == citation_uri
+    assert live[0].evidence_id is not None
+
+    async with SqlAlchemyUnitOfWork(sessionmaker) as uow:
+        await uow.set_repeatable_read()
+        await uow.use_tenant(group)
+        snapshot = await uow.snapshots.create(group_id=group, policy_version="ontology-v2")
+        await uow.commit()
+    frozen = await candidates.search(group_id=group, query="eks", limit=10, snapshot_id=snapshot.id)
+    assert frozen[0].evidence_citation_uri == citation_uri
+    assert frozen[0].evidence_id == live[0].evidence_id
 
 
 async def test_new_version_reaffirms_same_fact_and_withdraws_prior_assertion(
@@ -657,3 +697,30 @@ async def test_community_fact_lineage_is_scope_safe_and_paginated(
         limit=10,
     )
     assert hidden.items == ()
+
+    other_group = f"p:community-{uuid7().hex[:12]}"
+    other_source, other_artifact, other_version, _ = await _bootstrap(sessionmaker, other_group)
+    other_subject = await _subject(sessionmaker, other_group)
+    async with _tenant(sessionmaker, other_group) as session:
+        await _service(session).reconcile(
+            _req(
+                other_group,
+                other_artifact,
+                other_version,
+                other_source,
+                1,
+                [_depends_on(other_subject, "secret")],
+            )
+        )
+        foreign_fact_id = await session.scalar(
+            text("SELECT id FROM facts WHERE group_id = :group"),
+            {"group": other_group},
+        )
+    assert foreign_fact_id is not None
+    with pytest.raises(exc.IntegrityError):
+        await repository.record(
+            group_id=group,
+            community_id=community_id,
+            derivation_run_id=uuid7(),
+            fact_ids=(foreign_fact_id,),
+        )

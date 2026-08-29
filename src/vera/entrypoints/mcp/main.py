@@ -45,7 +45,10 @@ log = get_logger(__name__)
 def _parse_instant(value: str | None) -> datetime | None:
     if value is None:
         return None
-    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.utcoffset() is None:
+        raise ValueError("timestamp must include a UTC offset")
+    return parsed
 
 
 def _uses_local_principal(settings: Settings) -> bool:

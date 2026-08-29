@@ -402,6 +402,7 @@ class LanePool:
                     quote_start=(quote_start if isinstance(quote_start, int) else None),
                     quote_end=quote_end if isinstance(quote_end, int) else None,
                     evidence_content_hash=quote_hash,
+                    structured_record=dict(triple) if chunk_id is None else None,
                     needs_review=needs_review,
                 )
             )

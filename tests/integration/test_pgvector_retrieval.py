@@ -27,8 +27,10 @@ from vera.application.curation import CurationService, IngestArtifact
 from vera.application.retrieval import HybridPassageIndex
 from vera.domain.knowledge import fabric
 from vera.domain.knowledge.fabric import Chunk, ChunkEmbedding
+from vera.domain.ports.snapshot import Snapshot
 from vera.shared.ids import uuid7
 from vera.shared.time import utc_now
+from vera.shared.types import JsonDict
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 
@@ -62,6 +64,26 @@ async def _tenant(sm: async_sessionmaker[AsyncSession], group: str) -> AsyncIter
         yield session
 
 
+async def _snapshot(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    group: str,
+    *,
+    embedding_version: JsonDict,
+) -> Snapshot:
+    async with SqlAlchemyUnitOfWork(sessionmaker) as uow:
+        await uow.set_repeatable_read()
+        await uow.use_tenant(group)
+        snapshot = await uow.snapshots.create(
+            group_id=group,
+            policy_version="ontology-v2",
+            embedding_version=embedding_version,
+            retrieval_index_version="hybrid-rrf-v1",
+        )
+        await uow.commit()
+        return snapshot
+
+
+@pytest.mark.issue6_acceptance
 async def test_hybrid_retrieval_and_model_rollback(
     sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -169,6 +191,86 @@ async def test_hybrid_retrieval_and_model_rollback(
         "active": True,
     }
     assert rows[1]["active"] is False
+
+    foreign_group = f"p:vec-{uuid7().hex[:12]}"
+    async with SqlAlchemyUnitOfWork(sessionmaker) as uow:
+        await uow.use_tenant(foreign_group)
+        foreign_org = await uow.tenancy.create_organization(
+            slug=f"o-{foreign_group}", name="O", group_id=f"o:{foreign_group}"
+        )
+        foreign_ws = await uow.tenancy.create_workspace(
+            org_id=foreign_org.id,
+            slug=f"w-{foreign_group}",
+            name="W",
+            group_id=f"w:{foreign_group}",
+        )
+        foreign_project = await uow.tenancy.create_project(
+            workspace_id=foreign_ws.id,
+            slug=f"pr-{foreign_group}",
+            name="P",
+            group_id=foreign_group,
+        )
+        foreign_source = await uow.sources.create(
+            workspace_id=foreign_ws.id,
+            project_id=foreign_project.id,
+            kind="confluence",
+            name="Foreign",
+            trust_tier=1,
+        )
+        await uow.commit()
+    async with _tenant(sessionmaker, foreign_group) as session:
+        foreign_artifact = ArtifactRow(
+            source_id=foreign_source,
+            external_id="foreign",
+            content_hash="foreign",
+            s3_key="foreign",
+            reference_time=utc_now(),
+        )
+        session.add(foreign_artifact)
+        await session.flush()
+        foreign_version = ArtifactVersionRow(
+            artifact_id=foreign_artifact.id,
+            version=1,
+            content_hash="foreign",
+            s3_key="foreign",
+            reference_time=utc_now(),
+        )
+        session.add(foreign_version)
+        await session.flush()
+        foreign_version_id = foreign_version.id
+    foreign_chunk_id = uuid7()
+    async with _tenant(sessionmaker, group) as session:
+        await SqlAlchemyChunkRepository(session).upsert(
+            Chunk(
+                id=foreign_chunk_id,
+                artifact_version_id=foreign_version_id,
+                group_id=group,
+                chunk_key=fabric.chunk_key(
+                    artifact_version_id=foreign_version_id,
+                    ordinal=0,
+                    content_hash="foreign",
+                ),
+                ordinal=0,
+                text="cross tenant vector secret",
+                content_hash="foreign",
+                token_count=6,
+            )
+        )
+        await SqlAlchemyChunkEmbeddingRepository(session).upsert(
+            ChunkEmbedding(
+                id=uuid7(),
+                group_id=group,
+                chunk_id=foreign_chunk_id,
+                provider="test",
+                model="deterministic",
+                model_version="1",
+                dimension=_DIM,
+                embedding=await embedder.embed(query),
+                content_hash="foreign",
+                created_at=utc_now(),
+            )
+        )
+
     vector = PgVectorPassageIndex(
         sessionmaker,
         embedder,
@@ -179,10 +281,63 @@ async def test_hybrid_retrieval_and_model_rollback(
     )
     vector_hits = await vector.search(group_id=group, query=query, limit=3)
     assert vector_hits[0].chunk_id == chunk_ids[1]
+    assert str(foreign_chunk_id) not in {hit.chunk_id for hit in vector_hits}
 
     hybrid = HybridPassageIndex(SqlAlchemyPassageIndex(sessionmaker), vector)
     hits = await hybrid.search(group_id=group, query=query, limit=3)
     assert {hit.chunk_id for hit in hits} == {chunk_ids[0], chunk_ids[1]}
+
+    inactive_snapshot = await _snapshot(
+        sessionmaker,
+        group,
+        embedding_version={
+            "provider": "test",
+            "model": "deterministic",
+            "model_version": "2",
+            "dimension": _DIM,
+        },
+    )
+    inactive_vector = PgVectorPassageIndex(
+        sessionmaker,
+        embedder,
+        provider="test",
+        model="deterministic",
+        model_version="2",
+        dimension=_DIM,
+    )
+    assert (
+        await inactive_vector.search(
+            group_id=group, query=query, limit=3, snapshot_id=inactive_snapshot.id
+        )
+        == []
+    )
+
+    snapshot = await _snapshot(
+        sessionmaker,
+        group,
+        embedding_version={
+            "provider": "test",
+            "model": "deterministic",
+            "model_version": "1",
+            "dimension": _DIM,
+        },
+    )
+    frozen_before = await vector.search(
+        group_id=group, query=query, limit=3, snapshot_id=snapshot.id
+    )
+    async with _tenant(sessionmaker, group) as session:
+        await session.execute(
+            text(
+                "DELETE FROM chunk_embeddings WHERE group_id = :g "
+                "AND provider = 'test' AND model = 'deterministic' AND model_version = '1'"
+            ),
+            {"g": group},
+        )
+    assert await vector.search(group_id=group, query=query, limit=3) == []
+    frozen_after = await vector.search(
+        group_id=group, query=query, limit=3, snapshot_id=snapshot.id
+    )
+    assert frozen_after == frozen_before
 
 
 async def test_live_ingest_embeds_chunks_and_rejects_dimension_mismatch(

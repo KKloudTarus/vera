@@ -153,6 +153,7 @@ testpaths = ["tests"]
 addopts = "-q --strict-markers"
 markers = [
     "integration: tests that need real Postgres/Neo4j (testcontainers)",
+    "issue6_acceptance: mandatory end-to-end acceptance scenarios for issue #6",
     "llm: opt-in tests that call real LLM providers (nightly only)",
 ]
 

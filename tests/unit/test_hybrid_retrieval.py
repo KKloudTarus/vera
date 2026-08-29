@@ -19,9 +19,10 @@ class _Index:
         query: str,
         limit: int,
         created_before: datetime | None = None,
+        snapshot_id: str | None = None,
         filters: RetrievalFilters | None = None,
     ) -> list[PassageHit]:
-        del group_id, query, created_before, filters
+        del group_id, query, created_before, snapshot_id, filters
         return self._hits[:limit]
 
 

@@ -188,7 +188,13 @@ class _FakeExtractor:
         if "runs on" in body.lower():
             return [
                 ExtractedClaim(
-                    statement=body, subject="checkout", predicate="RUNS_ON", object="gke"
+                    statement=body,
+                    subject="checkout",
+                    predicate="RUNS_ON",
+                    object="gke",
+                    source_quote=body,
+                    quote_start=0,
+                    quote_end=len(body),
                 )
             ]
         return []

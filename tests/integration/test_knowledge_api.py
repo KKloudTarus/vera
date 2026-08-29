@@ -156,6 +156,20 @@ async def test_knowledge_contracts_end_to_end(
     body = ctx.json()
     assert body["result_count"] >= 1
     assert any(r["kind"] == "fact" and r["ref"] == fact_key for r in body["results"])
+    invalid_context = await app_client.post(
+        "/v2/knowledge/context",
+        json={"query": "eks", "snapshot_id": "invalid"},
+        headers=alice,
+    )
+    assert invalid_context.status_code == 422
+    invalid_snapshot = await app_client.get("/v2/knowledge/snapshots/invalid", headers=alice)
+    assert invalid_snapshot.status_code == 422
+    naive_as_of = await app_client.post(
+        "/v2/knowledge/context",
+        json={"query": "eks", "as_of": "2026-01-02T03:04:05"},
+        headers=alice,
+    )
+    assert naive_as_of.status_code == 422
 
     # explain_fact returns the supporting assertions.
     explain = await app_client.get(f"/v2/knowledge/facts/{fact_key}/explain", headers=alice)

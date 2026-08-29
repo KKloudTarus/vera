@@ -1,77 +1,78 @@
 # Remaining-risk register
 
-Honest status of the Knowledge Fabric after Phase 8. Phases 0 through 8 are implemented,
-gated, and migration-verified; the items below are known gaps and risks to weigh before
-making the fabric the primary production path.
+Honest status after the knowledge-lifecycle work in issue #6. Exact provenance,
+deterministic reconciliation, authoritative-first writes, projection cleanup, hybrid
+retrieval, reproducible snapshots, the agent MCP contract, Confluence lifecycle handling,
+ontology governance, and governed community lineage are implemented and tested. The items
+below remain operational or migration risks; none is a substitute for a production readiness
+review.
 
-## Cutover and wiring
+## Cutover and deployment
 
-- **The worker fabric cutover is available behind a flag, off by default.** With
-  `VERA_MEMORY__FABRIC_ENABLED=true` the ingestion worker also reconciles each episode's
-  triples into the fact store (idempotent on replay by the episode's extraction run id), so
-  the `/v2` knowledge surface reflects live ingest; the legacy published-episode path is
-  unchanged. It is off by default: turning it on in production, validated per group, is the
-  rollout decision. When fabric is on, reconciliation enqueues an outbox `project_facts` job
-  (coalesced per group) and the worker projects the group's active facts into the graph as
-  RELATES_TO edges downstream of the fact store, so graph mutation is outbox-driven and
-  rebuildable (gap 8), alongside the existing episode projection.
-- **The database role split is adopted by the read and worker paths when enabled.** The roles
-  and grants exist (migration `c9e2f3a4b5d6`); with `VERA_DB__ROLE_ENFORCEMENT=true` the read
-  path assumes `vera_trusted` and the worker path `vera_worker` via a per-transaction
-  SET LOCAL ROLE (gap 16). It is off by default because the login role must be a member of
-  those roles (or a superuser) for the SET to succeed; enabling it in production is a
-  deployment decision.
+- **Authoritative Fabric writes remain an explicit rollout decision.**
+  `VERA_MEMORY__FABRIC_WRITE_MODE` supports `legacy`, `dual`, and `fabric`, and defaults to
+  `legacy`. `fabric` makes PostgreSQL facts authoritative and drives graph projection only
+  from committed outbox work. Production rollout still needs per-scope verification, queue
+  monitoring, and a tested rollback plan.
+- **Database role enforcement remains deployment-gated.** The read and worker paths assume
+  `vera_trusted` and `vera_worker` with per-transaction `SET LOCAL ROLE` when
+  `VERA_DB__ROLE_ENFORCEMENT=true`. The login role must be granted those roles before the
+  setting is enabled. Cross-tenant security testing belongs to the production-readiness
+  follow-up.
 
 ## Retrieval
 
-- **pgvector passage search is available, gated.** Full-text over rebuildable `search_vector`
-  columns is the default; with `VERA_MEMORY__VECTOR_SEARCH_ENABLED=true` and an embedder, the
-  passage and code candidate sources use approximate nearest-neighbor search over a
-  `chunks.embedding vector(1024)` HNSW index behind the same PassageIndex/CodeIndex ports (gap
-  11). The column and index are added conditionally (migration `e2b3c4d5f6a7`, a no-op on a
-  stock postgres image; the `pgvector/pgvector:pg18` compose image ships the extension), and
-  `backfill_chunk_embeddings` populates embeddings per group. The embedding dimension is frozen
-  at 1024 and must match the embedder.
-- **A committed golden set gates retrieval quality in CI.** `datasets/retrieval/golden.json`
-  seeds a fixed set of entities, facts, and passages; `tests/integration/test_retrieval_golden.py`
-  runs the real ContextAssembler over it and fails the build if hit@k, nDCG@k, or the citation
-  rate drop below the thresholds in the file (currently hit 1.0, nDCG 0.85, citation 1.0; the
-  seeded set measures nDCG 0.97). The metrics live in `application/queries/retrieval_eval.py`
-  (hit@k, MRR, nDCG@k, citation rate) and the `retrieval_eval` CLI reports them against a live
-  database. A production-scale relevance benchmark at target volumes is still a run-time action.
+- **Vector retrieval remains provider- and rollout-dependent.** When
+  `VERA_MEMORY__VECTOR_SEARCH_ENABLED=true`, full-text and vector candidates are fused rather
+  than selected as alternatives. Embeddings are versioned per chunk, provider, model, and
+  model version, and new chunks are embedded on the live path. Existing chunks still require
+  an operator backfill for the selected model, and production must supply provider credentials,
+  validate dimensions, and monitor embedding failures.
+- **Old vector snapshots require their pinned query embedder.** Snapshot rows retain exact
+  chunk fields and vectors. Replaying vector ranking also requires the provider, model, and
+  model version recorded by the snapshot to remain configured. Vera fails closed when the
+  active retrieval implementation differs from that pin.
+- **Assembler contracts require an explicit version bump.** A snapshot pins the assembler
+  version, which covers its scoring algorithm, default weights, diversification, and packing.
+  Changing any of those without bumping the version would make replay claims inaccurate.
+- **The committed golden set covers deterministic fixtures at test scale.** It gates
+  hit@k, MRR, nDCG@k, and citation rate against deterministic fixtures. Domain coverage,
+  latency, and ranking quality still need measurement with production-shaped data and traffic.
 
-## Graph projection
+## Graph and communities
 
-- **Community construction is wired as an operator-run step; sagas are deferred.** The
-  rebuildable temporal fact projection and its drift check are delivered, and
-  `build_communities` on the MemoryEngine port (the `build_communities` entrypoint, per group
-  or `--all`) clusters a group's entities and writes an LLM summary per community, rebuildable
-  from the graph (gap 13). It is operator-run and off the live path because it costs LLM calls;
-  the null engine is a no-op. Saga construction remains deferred.
+- **Community construction remains an operator-run, potentially expensive step.** Each run
+  rebuilds the active fact projection from PostgreSQL, records normalized lineage in
+  `community_fact_lineage`, and publishes summaries marked `derived`; authoritative fact
+  search never presents those summaries as evidence. Scheduling, LLM cost controls, and
+  freshness targets remain deployment concerns. Saga construction remains deferred.
+- **The graph is a rebuildable projection.** PostgreSQL and S3 remain the recovery sources.
+  Projection drift is
+  detectable and stale facts are removed incrementally, but operations must alert on queue lag
+  and drift and retain a tested rebuild procedure.
 
-## Migration fidelity
+## Historical migration
 
-- **Free-text episodes are not migrated.** Episodes with no structured triple are counted as
-  `needs_review` rather than converted, to avoid inventing provenance. Re-extracting them into
-  the fact model is future work.
-- **Backfilled objects are stored as scalars.** The backfill records a triple's object as a
-  scalar value, not as a resolved object entity, so entity-to-entity relationships from the
-  legacy model are not reconstructed as entity objects. This is faithful for retrieval and
-  citation but loses the object side of the graph edge until re-ingested.
+- **Free-text legacy episodes remain queued for controlled re-extraction.** Episodes without structured
+  triples are counted as `needs_review` rather than assigned invented evidence. Recovering them
+  requires controlled re-extraction from immutable source content.
+- **Backfilled legacy objects remain scalar values.** The backfill does not reconstruct the
+  object side of historical entity-to-entity graph edges. Re-ingestion is required where that
+  relationship structure matters.
+- **Alembic autogenerate reports legacy FTS model drift.** Migration upgrade, downgrade, and
+  re-upgrade pass, but `alembic check` currently proposes removal of generated
+  `search_vector` columns and related historical indexes that are not represented in ORM
+  metadata. Do not apply that generated diff without reconciling the model declarations.
 
-## Contracts
+## Production operations
 
-- **`knowledge_feedback` and `get_evidence` are first-class on the fact model.** `get_evidence`
-  is a dedicated read (`GET /v2/knowledge/facts/{fact_key}/evidence` and the
-  `knowledge_get_evidence` MCP tool) returning a fact's evidence flattened across its active
-  assertions, distinct from `explain_fact`. `knowledge_feedback`
-  (`POST /v2/knowledge/feedback` and the MCP tool) records up/down feedback keyed to a result
-  ref (a fact_key or context-pack id) into the caller's personal scope, so agent feedback
-  never mutates shared truth.
+- **No production-scale benchmark or recovery drill has been run here.** The
+  `benchmark_fabric` harness reports context-pack latency percentiles, but target volumes,
+  concurrency, backup/restore, retention, observability, and incident recovery require a
+  production-shaped environment.
+- **Production security is a separate gate.** MCP authorization, tenant-isolation adversarial
+  tests, data-poisoning and prompt-injection defenses, and operational abuse controls are not
+  claimed by issue #6.
 
-## Performance
-
-- **No production-scale benchmark has been run here.** The harness
-  (`benchmark_fabric`) is implemented and produces measured percentiles, but the target
-  volumes (10k artifacts, 100k chunks, 1M assertions) must be run against a
-  production-shaped database before any scalability claim.
+These production concerns are tracked in the dependent
+[production operations and security readiness EPIC](https://github.com/KKloudTarus/vera/issues/9).

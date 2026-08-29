@@ -34,13 +34,9 @@ from vera.adapters.persistence.repositories.pgvector_index import (
     PgVectorCodeIndex,
     PgVectorPassageIndex,
 )
-from vera.adapters.persistence.repositories.snapshot import (
-    SqlAlchemyContextPackRepository,
-    SqlAlchemySnapshotRepository,
-)
 from vera.adapters.persistence.unit_of_work import SqlAlchemyUnitOfWork
 from vera.application.retrieval import ContextAssembler, HybridPassageIndex
-from vera.application.snapshot import ContextPackService, SnapshotService
+from vera.application.snapshot import ContextPackService, SnapshotService, serialize_candidate
 from vera.bootstrap import Container
 from vera.domain.identity.models import Role, role_at_least
 from vera.domain.identity.scopes import ScopeKind, scope_kind
@@ -83,6 +79,7 @@ def _context_pack_payload(pack: ContextPack) -> JsonDict:
         "request_hash": pack.request_hash,
         "result_references": pack.result_references,
         "assembler_version": pack.assembler_version,
+        "request": pack.request,
         "token_estimate": pack.token_estimate,
         "result_count": pack.result_count,
         "omitted": pack.omitted,
@@ -96,12 +93,9 @@ class KnowledgeService:
     def __init__(self, container: Container, scope_resolver: ScopeResolver) -> None:
         self._c = container
         self._scopes = scope_resolver
-        # Read repos run on the cross-scope read path (vera_trusted when enforced); writes go
-        # through a UnitOfWork on the base factory (vera_app + RLS via use_tenant).
         sm = container.reads
         self._read = SqlAlchemyKnowledgeReadModel(sm)
-        self._snapshots = SqlAlchemySnapshotRepository(sm)
-        self._packs = SqlAlchemyContextPackRepository(sm)
+        self._uow_factory = lambda: SqlAlchemyUnitOfWork(container.sessionmaker)
         self._community_lineage = SqlAlchemyCommunityLineageRepository(sm)
         passages: PassageIndex
         code: CodeIndex
@@ -133,6 +127,10 @@ class KnowledgeService:
             code = SqlAlchemyCodeIndex(sm)
         self._assembler = ContextAssembler(
             facts=SqlAlchemyFactCandidateSource(sm), passages=passages, code=code
+        )
+        self._snapshot_service = SnapshotService(uow_factory=self._uow_factory)
+        self._context_pack_service = ContextPackService(
+            assembler=self._assembler, uow_factory=self._uow_factory
         )
 
     async def _resolve(self, principal_id: UUID) -> ResolvedScope:
@@ -185,9 +183,17 @@ class KnowledgeService:
     ) -> JsonDict:
         scope = await self._resolve(principal_id)
         group = await self._target_group(scope, project)
-        service = ContextPackService(
-            assembler=self._assembler, snapshots=self._snapshots, packs=self._packs
-        )
+        embedding_version: JsonDict = {}
+        retrieval_index_version = "fts-v1"
+        if self._c.settings.memory.vector_search_enabled and self._c.embedder is not None:
+            memory = self._c.settings.memory
+            embedding_version = {
+                "provider": memory.embedder,
+                "model": memory.embedding_model,
+                "model_version": memory.embedding_model_version,
+                "dimension": memory.embedding_dim,
+            }
+            retrieval_index_version = "hybrid-rrf-v1"
         filters = RetrievalFilters(
             repository=repository,
             branch=branch,
@@ -200,7 +206,7 @@ class KnowledgeService:
             max_trust_tier=max_trust_tier,
             conflict_handling=conflict_handling,
         )
-        pack = await service.create(
+        pack = await self._context_pack_service.create(
             group_id=group,
             query=query,
             snapshot_id=snapshot_id,
@@ -210,17 +216,20 @@ class KnowledgeService:
             as_of=as_of,
             filters=filters,
             citation_mode=citation_mode,
+            active_embedding_version=embedding_version,
+            active_retrieval_index_version=retrieval_index_version,
             actor=str(principal_id),
         )
         return _context_pack_payload(pack)
 
     async def get_context_pack(self, principal_id: UUID, *, pack_id: str) -> JsonDict | None:
+        try:
+            pack_id = str(UUID(pack_id))
+        except ValueError:
+            return None
         scope = await self._resolve(principal_id)
-        service = ContextPackService(
-            assembler=self._assembler, snapshots=self._snapshots, packs=self._packs
-        )
         for group_id in scope.group_ids:
-            pack = await service.get(group_id=group_id, pack_id=pack_id)
+            pack = await self._context_pack_service.get(group_id=group_id, pack_id=pack_id)
             if pack is not None:
                 return _context_pack_payload(pack)
         return None
@@ -245,20 +254,7 @@ class KnowledgeService:
             "freshness_warnings": assembled.freshness_warnings,
             "omitted": assembled.omitted,
             "results": [
-                {
-                    "kind": r.kind,
-                    "ref": r.ref,
-                    "text": r.text,
-                    "score": r.score,
-                    "conflict": r.conflict,
-                    "reason": r.reason,
-                    "citation": {
-                        "kind": r.citation.kind,
-                        "ref": r.citation.ref,
-                        "excerpt": r.citation.excerpt,
-                    },
-                }
-                for r in assembled.results
+                serialize_candidate(result, citation_mode="full") for result in assembled.results
             ],
         }
 
@@ -412,7 +408,7 @@ class KnowledgeService:
                 "dimension": memory.embedding_dim,
             }
             retrieval_index_version = "hybrid-rrf-v1"
-        snap = await SnapshotService(snapshots=self._snapshots).create(
+        snap = await self._snapshot_service.create(
             group_id=group,
             as_of=as_of,
             embedding_version=embedding_version,
@@ -427,14 +423,21 @@ class KnowledgeService:
             "frozen_at_system_time": snap.frozen_at_system_time.isoformat(),
             "embedding_version": snap.embedding_version,
             "retrieval_index_version": snap.retrieval_index_version,
+            "assembler_version": snap.assembler_version,
             "graph_projection_checkpoint": snap.graph_projection_checkpoint,
             "policy_version": snap.policy_version,
+            "ontology_version_id": snap.ontology_version_id,
+            "retrieval_frozen": snap.retrieval_frozen,
         }
 
     async def get_snapshot(self, principal_id: UUID, *, snapshot_id: str) -> JsonDict | None:
+        try:
+            snapshot_id = str(UUID(snapshot_id))
+        except ValueError:
+            return None
         scope = await self._resolve(principal_id)
         for group in scope.group_ids:
-            snap = await self._snapshots.get(group_id=group, snapshot_id=snapshot_id)
+            snap = await self._snapshot_service.get(group_id=group, snapshot_id=snapshot_id)
             if snap is not None:
                 return {
                     "snapshot_id": snap.id,
@@ -445,8 +448,11 @@ class KnowledgeService:
                     "frozen_at_system_time": snap.frozen_at_system_time.isoformat(),
                     "embedding_version": snap.embedding_version,
                     "retrieval_index_version": snap.retrieval_index_version,
+                    "assembler_version": snap.assembler_version,
                     "graph_projection_checkpoint": snap.graph_projection_checkpoint,
                     "policy_version": snap.policy_version,
+                    "ontology_version_id": snap.ontology_version_id,
+                    "retrieval_frozen": snap.retrieval_frozen,
                     "source_boundaries": snap.source_boundaries,
                 }
         return None
