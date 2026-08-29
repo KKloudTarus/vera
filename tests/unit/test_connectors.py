@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import httpx
@@ -43,7 +45,12 @@ async def test_confluence_maps_pages_and_advances_cursor() -> None:
         )
     )
     async with httpx.AsyncClient() as client:
-        connector = ConfluenceConnector(client, base_url="https://cf.example", space_key="ENG")
+        connector = ConfluenceConnector(
+            client,
+            base_url="https://cf.example",
+            space_key="ENG",
+            scan_tombstones=False,
+        )
         batch = await connector.fetch_changes(None)
 
     assert len(batch.records) == 1
@@ -62,12 +69,18 @@ async def test_confluence_incremental_uses_the_cursor() -> None:
         return_value=httpx.Response(200, json={"results": [], "_links": {}})
     )
     async with httpx.AsyncClient() as client:
-        connector = ConfluenceConnector(client, base_url="https://cf.example", space_key="ENG")
+        connector = ConfluenceConnector(
+            client,
+            base_url="https://cf.example",
+            space_key="ENG",
+            scan_tombstones=False,
+        )
         await connector.fetch_changes({"since": "2026-01-01T00:00:00.000Z"})
 
     cql = route.calls.last.request.url.params["cql"]
-    # >= (not >) so pages sharing the boundary lastmodified are not skipped across runs.
-    assert 'lastmodified >= "2026-01-01T00:00:00.000Z"' in cql
+    # The overlap catches late indexing while content/version idempotency absorbs re-fetches.
+    assert 'lastmodified >= "2025-12-31T23:55:00.000Z"' in cql
+    assert "lastmodified <=" in cql
 
 
 @pytest.mark.asyncio
@@ -381,7 +394,11 @@ async def test_confluence_paginates_and_converts_to_markdown() -> None:
         ),
     ]
     conn = ConfluenceConnector(
-        httpx.AsyncClient(), base_url="https://c", space_key="ENG", page_size=2
+        httpx.AsyncClient(),
+        base_url="https://c",
+        space_key="ENG",
+        page_size=2,
+        scan_tombstones=False,
     )
 
     first = await conn.fetch_changes(None)
@@ -395,3 +412,149 @@ async def test_confluence_paginates_and_converts_to_markdown() -> None:
     assert second.next_cursor == {
         "since": "2026-01-03T00:00:00.000Z"
     }  # watermark = max lastmodified
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_confluence_honors_retry_after_and_jitters_backoff() -> None:
+    route = respx.get("https://c/rest/api/content/search")
+    route.side_effect = [
+        httpx.Response(429, headers={"Retry-After": "2"}),
+        httpx.Response(503),
+        httpx.Response(200, json={"results": [], "_links": {}}),
+    ]
+    delays: list[float] = []
+
+    async def _sleep(delay: float) -> None:
+        delays.append(delay)
+
+    async with httpx.AsyncClient() as client:
+        conn = ConfluenceConnector(
+            client,
+            base_url="https://c",
+            space_key="ENG",
+            scan_tombstones=False,
+            sleep=_sleep,
+            jitter=lambda low, high: (low + high) / 2,
+        )
+        await conn.fetch_changes(None)
+
+    assert route.call_count == 3
+    assert delays == [2.5, 1.0]
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_confluence_emits_archived_pages_as_tombstones() -> None:
+    respx.get("https://c/rest/api/content/search").mock(
+        return_value=httpx.Response(200, json={"results": [], "_links": {}})
+    )
+    respx.get("https://c/api/v2/spaces").mock(
+        return_value=httpx.Response(200, json={"results": [{"id": "7", "key": "ENG"}]})
+    )
+    tombstone_route = respx.get("https://c/api/v2/spaces/7/pages").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "results": [
+                    {
+                        "id": "42",
+                        "status": "archived",
+                        "title": "Old runbook",
+                        "version": {
+                            "number": 8,
+                            "createdAt": "2026-01-02T10:00:00.000Z",
+                        },
+                        "body": {"storage": {"value": "<p>stale content</p>"}},
+                    }
+                ],
+                "_links": {},
+            },
+        )
+    )
+    async with httpx.AsyncClient() as client:
+        connector = ConfluenceConnector(client, base_url="https://c", space_key="ENG")
+        changes = await connector.fetch_changes(None)
+        batch = await connector.fetch_changes(changes.next_cursor)
+
+    record = batch.records[0]
+    assert record.tombstone is True
+    assert record.body == ""
+    assert record.source_revision is None
+    assert record.metadata["status"] == "archived"
+    assert tombstone_route.calls.last.request.url.params.get_list("status") == [
+        "archived",
+        "trashed",
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("page_count", [28, 100, 500])
+async def test_confluence_drains_large_stable_spaces(page_count: int) -> None:
+    starts: list[int] = []
+    cql_queries: set[str] = set()
+    base_time = datetime(2026, 1, 1, tzinfo=UTC)
+
+    async def _handler(request: httpx.Request) -> httpx.Response:
+        start = int(request.url.params.get("cursor", "0"))
+        starts.append(start)
+        cql_queries.add(request.url.params["cql"])
+        when = (base_time + timedelta(seconds=start)).isoformat().replace("+00:00", "Z")
+        return httpx.Response(
+            200,
+            json={
+                "results": [_confluence_page(str(start), when, f"<p>page {start}</p>")],
+                "_links": (
+                    {"next": f"/rest/api/content/search?cursor={start + 1}"}
+                    if start + 1 < page_count
+                    else {}
+                ),
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(_handler)) as client:
+        conn = ConfluenceConnector(
+            client,
+            base_url="https://c",
+            space_key="ENG",
+            page_size=1,
+            scan_tombstones=False,
+        )
+        cursor = None
+        seen: list[str] = []
+        while True:
+            batch = await conn.fetch_changes(cursor)
+            seen.extend(record.external_id for record in batch.records)
+            cursor = batch.next_cursor
+            if not batch.has_more:
+                break
+
+    assert starts == list(range(page_count))
+    assert len(seen) == page_count
+    assert len(cql_queries) == 1  # the in-run upper bound freezes every paginated request
+
+
+@pytest.mark.asyncio
+async def test_confluence_bounds_concurrent_requests() -> None:
+    active = 0
+    peak = 0
+
+    async def _handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal active, peak
+        active += 1
+        peak = max(peak, active)
+        await asyncio.sleep(0.01)
+        active -= 1
+        return httpx.Response(200, json={"results": [], "_links": {}})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(_handler)) as client:
+        conn = ConfluenceConnector(
+            client,
+            base_url="https://c",
+            space_key="ENG",
+            max_concurrency=2,
+            scan_tombstones=False,
+        )
+        await asyncio.gather(*(conn.fetch_changes(None) for _ in range(8)))
+
+    assert peak == 2

@@ -11,8 +11,14 @@ import asyncio
 import contextlib
 import signal
 
+from vera.adapters.persistence.repositories import (
+    SqlAlchemyFactExpiryRepository,
+    SqlAlchemyKnowledgeEventLog,
+    SqlAlchemyOutboxRepository,
+)
 from vera.adapters.persistence.unit_of_work import SqlAlchemyUnitOfWork
 from vera.application.connectors import SyncRegistration, SyncRunner, SyncScheduler
+from vera.application.curation.reconciliation import FactExpiryService
 from vera.bootstrap import Container, build_container, dispose_container, verify_ontology
 from vera.config.settings import Settings, get_settings
 from vera.entrypoints.worker.lane_pool import LanePool
@@ -24,6 +30,7 @@ from vera.observability import (
 )
 from vera.observability.metrics import note_backpressure, set_queue_depth, start_metrics_server
 from vera.shared.errors import VeraError
+from vera.shared.ids import uuid7
 
 log = get_logger(__name__)
 
@@ -77,6 +84,11 @@ def _build_scheduler(container: Container) -> SyncScheduler | None:
         state=container.sync_state,
         object_store=container.object_store,
         judge=container.judge,
+        embedder=(container.embedder if container.settings.memory.vector_search_enabled else None),
+        embedding_provider=container.settings.memory.embedder,
+        embedding_model=container.settings.memory.embedding_model,
+        embedding_model_version=container.settings.memory.embedding_model_version,
+        embedding_dimension=container.settings.memory.embedding_dim,
     )
     return SyncScheduler(runner=runner, state=container.sync_state, registrations=registrations)
 
@@ -85,6 +97,25 @@ def _build_pool(container: Container, settings: Settings) -> LanePool:
     lanes = max(1, settings.worker.lanes)
     per_lane = max(1, settings.worker.batch_size // lanes + 1)
     return LanePool(container, lanes=lanes, queue_maxsize=per_lane)
+
+
+async def expire_due_facts(container: Container) -> int:
+    """Expire stale governed facts and transactionally enqueue their graph cleanup."""
+    async with container.workers() as session, session.begin():
+        report = await FactExpiryService(
+            facts=SqlAlchemyFactExpiryRepository(session),
+            events=SqlAlchemyKnowledgeEventLog(session),
+        ).run()
+        if container.fact_projection is not None:
+            outbox = SqlAlchemyOutboxRepository(session)
+            for group_id in report.group_ids:
+                await outbox.add(
+                    group_id=group_id,
+                    source_id=f"ttl:{group_id}",
+                    dedup_uuid=uuid7(),
+                    payload={"job_kind": "project_facts", "group_id": group_id},
+                )
+        return report.expired
 
 
 async def run_until_empty(container: Container, pool: LanePool, *, batch_size: int) -> int:
@@ -149,6 +180,9 @@ async def run() -> None:
                         pending=depths.get("pending", 0),
                         threshold=threshold,
                     )
+                expired = await expire_due_facts(container)
+                if expired:
+                    log.info("worker.facts_expired", count=expired)
             if scheduler is not None and cycles % _SYNC_EVERY_CYCLES == 0:
                 outcomes = await scheduler.run_due()
                 if outcomes:

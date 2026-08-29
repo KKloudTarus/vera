@@ -43,6 +43,7 @@ class FactLifecycle(StrEnum):
 
 class AssertionState(StrEnum):
     ACTIVE = "active"
+    NEEDS_REVIEW = "needs_review"
     WITHDRAWN = "withdrawn"
 
 
@@ -68,6 +69,7 @@ class KnowledgeEventType(StrEnum):
     FACT_DISPUTED = "FACT_DISPUTED"
     FACT_SUPERSEDED = "FACT_SUPERSEDED"
     FACT_RETRACTED = "FACT_RETRACTED"
+    FACT_EXPIRED = "FACT_EXPIRED"
     FACT_RESTORED = "FACT_RESTORED"
     ENTITY_MERGED = "ENTITY_MERGED"
     ENTITY_SPLIT = "ENTITY_SPLIT"
@@ -179,6 +181,33 @@ class Chunk:
 
 
 @dataclass(frozen=True, slots=True)
+class ChunkEmbedding:
+    id: UUID
+    group_id: str
+    chunk_id: UUID
+    provider: str
+    model: str
+    model_version: str
+    dimension: int
+    embedding: list[float]
+    content_hash: str
+    created_at: datetime
+    active: bool = True
+
+
+@dataclass(frozen=True, slots=True)
+class ExtractionRun:
+    id: UUID
+    group_id: str
+    artifact_version_id: UUID
+    model: str
+    provider: str
+    prompt_version: str
+    pipeline_version: JsonDict
+    started_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
 class Fact:
     id: UUID
     group_id: str
@@ -196,6 +225,7 @@ class Fact:
     confidence: float = 0.0
     valid_from: datetime | None = None
     valid_to: datetime | None = None
+    expires_at: datetime | None = None
     system_from: datetime | None = None
     system_to: datetime | None = None
     ontology_version_id: UUID | None = None
@@ -217,7 +247,8 @@ class Assertion:
     valid_to: datetime | None = None
     observed_at: datetime | None = None
     recorded_at: datetime | None = None
-    extraction_run_id: str | None = None
+    extraction_run_id: UUID | None = None
+    run_key: str | None = None
     state: AssertionState = AssertionState.ACTIVE
 
 
@@ -232,6 +263,11 @@ class Evidence:
     structured_record: JsonDict | None = None
     excerpt: str | None = None
     citation_uri: str | None = None
+    quote_start: int | None = None
+    quote_end: int | None = None
+    quote_hash: str | None = None
+    citation_override: str | None = None
+    extraction_run_id: UUID | None = None
     source_coordinates: JsonDict = field(default_factory=empty_json)
     confidentiality: str = "internal"
 

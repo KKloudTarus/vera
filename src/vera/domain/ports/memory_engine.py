@@ -78,6 +78,20 @@ class GraphHit:
     source_id: SourceId | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class GraphCommunity:
+    """A derived graph community. Its fact lineage remains authoritative in PostgreSQL."""
+
+    community_id: str
+    name: str
+    summary: str
+    member_names: tuple[str, ...] = ()
+    derivation_run_id: str | None = None
+    source_fact_set_hash: str | None = None
+    projection_checkpoint: str | None = None
+    derived: bool = False
+
+
 class MemoryEngine(Protocol):
     """Candidate generation + ingestion. Idempotency and re-rank live in VERA."""
 
@@ -110,9 +124,26 @@ class MemoryEngine(Protocol):
         graph, for retraction and erasure."""
         ...
 
-    async def build_communities(self, *, group_id: str) -> int:
-        """Cluster the group's entities into communities and summarize each, returning the
-        number built. Community summaries are LLM-derived and rebuildable from the graph, so
-        this is an operator-run, off-by-default step; an engine with no graph returns 0.
+    async def build_communities(self, *, group_id: str) -> tuple[GraphCommunity, ...]:
+        """Cluster the group's entities into derived communities and return their membership.
+        This is an operator-run, off-by-default step; an engine with no graph returns no rows.
         """
+        ...
+
+    async def annotate_community(
+        self,
+        *,
+        group_id: str,
+        community_id: str,
+        derivation_run_id: str,
+        source_fact_set_hash: str,
+        projection_checkpoint: str,
+    ) -> None:
+        """Attach rebuildable pointers to authoritative PostgreSQL lineage."""
+        ...
+
+    async def search_communities(
+        self, *, group_ids: Sequence[GroupId], query: str | None, limit: int
+    ) -> Sequence[GraphCommunity]:
+        """Return only governed summaries explicitly marked as derived."""
         ...

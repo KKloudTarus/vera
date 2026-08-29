@@ -10,6 +10,7 @@ from collections.abc import Sequence
 
 from vera.domain.ports.memory_engine import (
     EpisodeSpec,
+    GraphCommunity,
     GraphHit,
     GraphQuery,
     IngestReceipt,
@@ -41,5 +42,21 @@ class NullMemoryEngine:
     async def retract_episode(self, *, group_id: str, edge_uuids: Sequence[str]) -> None:
         return None
 
-    async def build_communities(self, *, group_id: str) -> int:
-        return 0
+    async def build_communities(self, *, group_id: str) -> tuple[GraphCommunity, ...]:
+        return ()
+
+    async def annotate_community(
+        self,
+        *,
+        group_id: str,
+        community_id: str,
+        derivation_run_id: str,
+        source_fact_set_hash: str,
+        projection_checkpoint: str,
+    ) -> None:
+        return None
+
+    async def search_communities(
+        self, *, group_ids: Sequence[GroupId], query: str | None, limit: int
+    ) -> Sequence[GraphCommunity]:
+        return []

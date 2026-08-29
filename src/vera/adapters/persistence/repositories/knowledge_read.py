@@ -7,6 +7,7 @@ Returns plain dicts so the API and MCP surfaces can serialize them directly.
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 from sqlalchemy import text
@@ -15,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 _FACT = text(
     "SELECT f.id::text AS fact_id, f.fact_key, f.group_id, cs.canonical_name AS subject, "
     "f.predicate, COALESCE(co.canonical_name, f.object_scalar) AS object, f.qualifiers, "
-    "f.lifecycle_state, f.authority, f.confidence, f.valid_from, f.valid_to "
+    "f.lifecycle_state, f.authority, f.confidence, f.valid_from, f.valid_to, f.expires_at "
     "FROM facts f JOIN canonical_entities cs ON cs.id = f.subject_entity_id "
     "LEFT JOIN canonical_entities co ON co.id = f.object_entity_id "
     "WHERE f.group_id = ANY(CAST(:gids AS text[])) AND f.fact_key = :fk "
@@ -30,19 +31,31 @@ _ASSERTIONS = text(
     "ORDER BY a.recorded_at DESC"
 )
 _EVIDENCE = text(
-    "SELECT e.id::text AS evidence_id, e.excerpt, e.citation_uri, e.chunk_id::text AS chunk_id, "
-    "e.artifact_version_id::text AS artifact_version_id, e.confidentiality "
-    "FROM evidence e WHERE e.group_id = ANY(CAST(:gids AS text[])) "
+    "SELECT e.id::text AS evidence_id, "
+    "COALESCE(CASE WHEN e.quote_start IS NOT NULL THEN "
+    "substring(c.text FROM e.quote_start + 1 FOR e.quote_end - e.quote_start) END, "
+    "e.excerpt) AS excerpt, COALESCE(e.citation_override, e.citation_uri) AS citation_uri, "
+    "e.chunk_id::text AS chunk_id, e.artifact_version_id::text AS artifact_version_id, "
+    "e.quote_start, e.quote_end, e.quote_hash, "
+    "e.extraction_run_id::text AS extraction_run_id, e.confidentiality "
+    "FROM evidence e LEFT JOIN chunks c ON c.id = e.chunk_id AND c.group_id = e.group_id "
+    "WHERE e.group_id = ANY(CAST(:gids AS text[])) "
     "AND e.assertion_id = CAST(:aid AS uuid)"
 )
 # Evidence for a fact, flattened across its active supporting assertions, for citation. The
 # per-assertion verification and source travel with each evidence row so a caller can weigh it.
 _FACT_EVIDENCE = text(
-    "SELECT e.id::text AS evidence_id, e.excerpt, e.citation_uri, e.chunk_id::text AS chunk_id, "
-    "e.artifact_version_id::text AS artifact_version_id, e.confidentiality, "
+    "SELECT e.id::text AS evidence_id, "
+    "COALESCE(CASE WHEN e.quote_start IS NOT NULL THEN "
+    "substring(c.text FROM e.quote_start + 1 FOR e.quote_end - e.quote_start) END, "
+    "e.excerpt) AS excerpt, COALESCE(e.citation_override, e.citation_uri) AS citation_uri, "
+    "e.chunk_id::text AS chunk_id, e.artifact_version_id::text AS artifact_version_id, "
+    "e.quote_start, e.quote_end, e.quote_hash, "
+    "e.extraction_run_id::text AS extraction_run_id, e.confidentiality, "
     "a.id::text AS assertion_id, a.polarity, a.verification_state, "
     "a.knowledge_source_id::text AS source_id "
     "FROM evidence e "
+    "LEFT JOIN chunks c ON c.id = e.chunk_id AND c.group_id = e.group_id "
     "JOIN assertions a ON a.id = e.assertion_id AND a.state = 'active' "
     "JOIN facts f ON f.id = a.fact_id "
     "WHERE f.group_id = ANY(CAST(:gids AS text[])) AND f.fact_key = :fk "
@@ -81,11 +94,135 @@ _TIMELINE = text(
     "  SELECT id FROM facts WHERE group_id = ANY(CAST(:gids AS text[])) AND fact_key = :fk"
     ") ORDER BY occurred_at ASC LIMIT :lim"
 )
+_PROJECT_GROUP = text(
+    "SELECT group_id FROM projects WHERE group_id = ANY(CAST(:gids AS text[])) "
+    "AND (slug = :project OR name = :project) ORDER BY group_id LIMIT 1"
+)
+_ENTITY = text(
+    "SELECT id::text AS entity_id, group_id, entity_type, canonical_name, summary, attributes, "
+    "created_at, updated_at FROM canonical_entities "
+    "WHERE group_id = ANY(CAST(:gids AS text[])) AND id::text = :eid"
+)
+_ENTITY_ALIASES = text(
+    "SELECT alias FROM entity_aliases WHERE group_id = ANY(CAST(:gids AS text[])) "
+    "AND canonical_entity_id::text = :eid ORDER BY alias"
+)
+_ENTITY_FACTS = text(
+    "SELECT f.fact_key, cs.canonical_name AS subject, f.predicate, "
+    "COALESCE(co.canonical_name, f.object_scalar) AS object, f.lifecycle_state, "
+    "f.authority, f.confidence, f.valid_from, f.valid_to, f.expires_at "
+    "FROM facts f JOIN canonical_entities cs ON cs.id = f.subject_entity_id "
+    "LEFT JOIN canonical_entities co ON co.id = f.object_entity_id "
+    "WHERE f.group_id = ANY(CAST(:gids AS text[])) "
+    "AND (f.subject_entity_id::text = :eid OR f.object_entity_id::text = :eid) "
+    "ORDER BY f.updated_at DESC LIMIT :lim"
+)
+_SOURCE = text(
+    "SELECT s.id::text AS source_id, s.kind, s.name, s.trust_tier, s.enabled, "
+    "s.created_at, s.updated_at, COALESCE(p.group_id, w.group_id) AS scope_id "
+    "FROM knowledge_sources s JOIN workspaces w ON w.id = s.workspace_id "
+    "LEFT JOIN projects p ON p.id = s.project_id "
+    "WHERE s.id::text = :sid AND (p.group_id = ANY(CAST(:gids AS text[])) "
+    "OR w.group_id = ANY(CAST(:gids AS text[])))"
+)
+_SOURCE_VERSIONS = text(
+    "SELECT a.id::text AS artifact_id, a.external_id, a.title, a.current_version, "
+    "a.reference_time AS artifact_reference_time, av.id::text AS artifact_version_id, "
+    "av.version, av.source_revision, av.source_version_id, av.source_updated_at, "
+    "av.observed_at, av.reference_time, av.content_hash "
+    "FROM artifacts a LEFT JOIN artifact_versions av ON av.artifact_id = a.id "
+    "WHERE a.source_id::text = :sid ORDER BY a.external_id, av.version DESC"
+)
 
 
 class SqlAlchemyKnowledgeReadModel:
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self._session_factory = session_factory
+
+    async def resolve_project(self, *, group_ids: list[str], project: str) -> str | None:
+        async with self._session_factory() as session:
+            return await session.scalar(_PROJECT_GROUP, {"gids": group_ids, "project": project})
+
+    async def get_entity(
+        self, *, group_ids: list[str], entity_id: str, limit: int = 100
+    ) -> dict[str, Any] | None:
+        async with self._session_factory() as session:
+            row = (
+                (await session.execute(_ENTITY, {"gids": group_ids, "eid": entity_id}))
+                .mappings()
+                .one_or_none()
+            )
+            if row is None:
+                return None
+            entity = dict(row)
+            aliases = await session.scalars(_ENTITY_ALIASES, {"gids": group_ids, "eid": entity_id})
+            facts = (
+                (
+                    await session.execute(
+                        _ENTITY_FACTS,
+                        {"gids": group_ids, "eid": entity_id, "lim": limit},
+                    )
+                )
+                .mappings()
+                .all()
+            )
+            entity["aliases"] = list(aliases)
+            entity["facts"] = [dict(fact) for fact in facts]
+            return entity
+
+    async def get_source(self, *, group_ids: list[str], source_id: str) -> dict[str, Any] | None:
+        async with self._session_factory() as session:
+            row = (
+                (await session.execute(_SOURCE, {"gids": group_ids, "sid": source_id}))
+                .mappings()
+                .one_or_none()
+            )
+            if row is None:
+                return None
+            source = dict(row)
+            versions = (
+                (await session.execute(_SOURCE_VERSIONS, {"sid": source_id})).mappings().all()
+            )
+        artifacts: dict[str, dict[str, Any]] = {}
+        latest_observed_at: datetime | None = None
+        for version in versions:
+            artifact_id = str(version["artifact_id"])
+            artifact = artifacts.setdefault(
+                artifact_id,
+                {
+                    "artifact_id": artifact_id,
+                    "external_id": version["external_id"],
+                    "title": version["title"],
+                    "current_version": version["current_version"],
+                    "reference_time": version["artifact_reference_time"],
+                    "versions": [],
+                },
+            )
+            if version["artifact_version_id"] is not None:
+                artifact["versions"].append(
+                    {
+                        key: version[key]
+                        for key in (
+                            "artifact_version_id",
+                            "version",
+                            "source_revision",
+                            "source_version_id",
+                            "source_updated_at",
+                            "observed_at",
+                            "reference_time",
+                            "content_hash",
+                        )
+                    }
+                )
+                observed_at = version["observed_at"]
+                if latest_observed_at is None or observed_at > latest_observed_at:
+                    latest_observed_at = observed_at
+        source["artifacts"] = list(artifacts.values())
+        source["freshness"] = {
+            "latest_observed_at": latest_observed_at,
+            "artifact_count": len(artifacts),
+        }
+        return source
 
     async def get_fact(self, *, group_ids: list[str], fact_key: str) -> dict[str, Any] | None:
         async with self._session_factory() as session:

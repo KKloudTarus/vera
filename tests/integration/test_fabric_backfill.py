@@ -174,13 +174,27 @@ async def test_backfill_links_edge_objects_as_entities(
 class _FakeExtractor:
     """A deterministic stand-in for the LLM extractor: turns known prose into one triple."""
 
+    @property
+    def provider(self) -> str:
+        return "test"
+
+    @property
+    def model(self) -> str:
+        return "backfill"
+
     async def extract(self, *, body, knowledge_type, metadata):
         from vera.domain.ports.curation import ExtractedClaim
 
         if "runs on" in body.lower():
             return [
                 ExtractedClaim(
-                    statement=body, subject="checkout", predicate="RUNS_ON", object="gke"
+                    statement=body,
+                    subject="checkout",
+                    predicate="RUNS_ON",
+                    object="gke",
+                    source_quote=body,
+                    quote_start=0,
+                    quote_end=len(body),
                 )
             ]
         return []

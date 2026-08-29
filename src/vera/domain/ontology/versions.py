@@ -17,8 +17,8 @@ class PipelineVersions:
     ontology: int = ONTOLOGY_VERSION
     parser: str = "1"
     normalizer: str = "1"
-    extractor: str = "1"
-    prompt: str = "1"
+    extractor: str = "3"
+    prompt: str = "3"
     model: str = "gpt-4.1-mini"
 
     def as_dict(self) -> dict[str, str]:

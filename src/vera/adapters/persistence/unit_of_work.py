@@ -16,7 +16,10 @@ from vera.adapters.persistence.repositories import (
     SqlAlchemyArtifactRepository,
     SqlAlchemyCandidateClaimRepository,
     SqlAlchemyCanonicalEntityRepository,
+    SqlAlchemyChunkEmbeddingRepository,
     SqlAlchemyChunkRepository,
+    SqlAlchemyContextPackRepository,
+    SqlAlchemyExtractionRunRepository,
     SqlAlchemyIdentityRepository,
     SqlAlchemyKnowledgeSourceRepository,
     SqlAlchemyOntologyRepository,
@@ -24,6 +27,7 @@ from vera.adapters.persistence.repositories import (
     SqlAlchemyPublishedEpisodeRepository,
     SqlAlchemyRetrievalFeedbackRepository,
     SqlAlchemyReviewRepository,
+    SqlAlchemySnapshotRepository,
     SqlAlchemyTenancyRepository,
 )
 from vera.domain.ports.curation import (
@@ -33,7 +37,11 @@ from vera.domain.ports.curation import (
     PublishedEpisodeRepository,
     ReviewRepository,
 )
-from vera.domain.ports.fabric import ChunkRepository
+from vera.domain.ports.fabric import (
+    ChunkEmbeddingRepository,
+    ChunkRepository,
+    ExtractionRunRepository,
+)
 from vera.domain.ports.identity import IdentityRepository
 from vera.domain.ports.ontology import OntologyRepository
 from vera.domain.ports.repositories import (
@@ -42,6 +50,7 @@ from vera.domain.ports.repositories import (
     TenancyRepository,
 )
 from vera.domain.ports.retrieval import RetrievalFeedbackRepository
+from vera.domain.ports.snapshot import ContextPackRepository, SnapshotRepository
 
 
 class SqlAlchemyUnitOfWork:
@@ -64,6 +73,10 @@ class SqlAlchemyUnitOfWork:
     feedback: RetrievalFeedbackRepository
     ontology: OntologyRepository
     chunks: ChunkRepository
+    chunk_embeddings: ChunkEmbeddingRepository
+    extraction_runs: ExtractionRunRepository
+    snapshots: SnapshotRepository
+    context_packs: ContextPackRepository
 
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self._session_factory = session_factory
@@ -82,6 +95,10 @@ class SqlAlchemyUnitOfWork:
         self.feedback = SqlAlchemyRetrievalFeedbackRepository(self.session)
         self.ontology = SqlAlchemyOntologyRepository(self.session)
         self.chunks = SqlAlchemyChunkRepository(self.session)
+        self.chunk_embeddings = SqlAlchemyChunkEmbeddingRepository(self.session)
+        self.extraction_runs = SqlAlchemyExtractionRunRepository(self.session)
+        self.snapshots = SqlAlchemySnapshotRepository(self.session)
+        self.context_packs = SqlAlchemyContextPackRepository(self.session)
         return self
 
     async def __aexit__(
@@ -105,6 +122,9 @@ class SqlAlchemyUnitOfWork:
         await self.session.execute(
             text("SELECT set_config('vera.group_id', :gid, true)"), {"gid": group_id}
         )
+
+    async def set_repeatable_read(self) -> None:
+        await self.session.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ"))
 
     async def commit(self) -> None:
         await self.session.commit()

@@ -1,9 +1,7 @@
-"""Backfill dense embeddings for chunks so pgvector passage search has vectors to rank.
+"""Backfill one model version into the multi-model chunk embedding table.
 
-Requires the pgvector chunk embedding column (migration e2b3c4d5f6a7 on the pgvector image)
-and a configured embedder. Embeds each chunk in the group that lacks an embedding, in batches,
-and is idempotent: a chunk that already has one is skipped, so a partial run resumes. Run it
-per group after enabling vector search; new ingests can be embedded by re-running it.
+Existing embeddings from other models remain available. A partial run resumes by selecting only
+chunks without the configured provider, model, and model version.
 
     python -m vera.entrypoints.backfill_chunk_embeddings <group_id>
 """
@@ -24,25 +22,56 @@ log = get_logger(__name__)
 
 _BATCH = 200
 _PENDING = text(
-    "SELECT id::text AS id, text FROM chunks "
-    "WHERE group_id = :g AND embedding IS NULL ORDER BY created_at LIMIT :lim"
+    "SELECT c.id::text AS id, c.text, c.content_hash FROM chunks c "
+    "LEFT JOIN chunk_embeddings ce ON ce.chunk_id = c.id "
+    "AND ce.provider = :provider AND ce.model = :model AND ce.model_version = :version "
+    "WHERE c.group_id = :g AND ce.id IS NULL ORDER BY c.created_at LIMIT :lim"
 )
-_SET = text("UPDATE chunks SET embedding = CAST(:v AS vector) WHERE id = CAST(:id AS uuid)")
+_SET = text(
+    "INSERT INTO chunk_embeddings ("
+    "group_id, chunk_id, provider, model, model_version, dimension, embedding, content_hash, active"
+    ") VALUES ("
+    ":g, CAST(:id AS uuid), :provider, :model, :version, :dimension, "
+    "CAST(:embedding AS vector), :content_hash, true"
+    ") ON CONFLICT (chunk_id, provider, model, model_version) DO NOTHING"
+)
 
 
 async def backfill_group(container: Container, group_id: str) -> int:
     embedder = container.embedder
     if embedder is None:
         raise SystemExit("no embedder configured: set memory.embedder and its provider")
+    memory = container.settings.memory
+    params: dict[str, object] = {
+        "g": group_id,
+        "provider": memory.embedder,
+        "model": memory.embedding_model,
+        "version": memory.embedding_model_version,
+        "dimension": memory.embedding_dim,
+    }
     updated = 0
     while True:
         async with container.workers() as session, session.begin():
-            rows = (
-                (await session.execute(_PENDING, {"g": group_id, "lim": _BATCH})).mappings().all()
+            await session.execute(
+                text("SELECT set_config('vera.group_id', :g, true)"), {"g": group_id}
             )
+            rows = (await session.execute(_PENDING, params | {"lim": _BATCH})).mappings().all()
             for row in rows:
                 vector = await embedder.embed(row["text"])
-                await session.execute(_SET, {"v": vector_literal(vector), "id": row["id"]})
+                if len(vector) != memory.embedding_dim:
+                    raise ValueError(
+                        "embedding dimension mismatch: "
+                        f"expected {memory.embedding_dim}, got {len(vector)}"
+                    )
+                await session.execute(
+                    _SET,
+                    params
+                    | {
+                        "embedding": vector_literal(vector),
+                        "id": row["id"],
+                        "content_hash": row["content_hash"],
+                    },
+                )
             updated += len(rows)
         if len(rows) < _BATCH:
             break

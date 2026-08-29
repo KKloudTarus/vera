@@ -5,6 +5,12 @@ the application and domain never see SQLAlchemy.
 from vera.adapters.persistence.repositories.canonical import (
     SqlAlchemyCanonicalEntityRepository,
 )
+from vera.adapters.persistence.repositories.chunk_embedding import (
+    SqlAlchemyChunkEmbeddingRepository,
+)
+from vera.adapters.persistence.repositories.community import (
+    SqlAlchemyCommunityLineageRepository,
+)
 from vera.adapters.persistence.repositories.curation import (
     SqlAlchemyArtifactRepository,
     SqlAlchemyCandidateClaimRepository,
@@ -16,6 +22,8 @@ from vera.adapters.persistence.repositories.fabric import (
     SqlAlchemyAssertionRepository,
     SqlAlchemyChunkRepository,
     SqlAlchemyEvidenceRepository,
+    SqlAlchemyExtractionRunRepository,
+    SqlAlchemyFactExpiryRepository,
     SqlAlchemyFactRelationRepository,
     SqlAlchemyFactRepository,
     SqlAlchemyKnowledgeEventLog,
@@ -28,6 +36,10 @@ from vera.adapters.persistence.repositories.retrieval import (
     SqlAlchemyRetrievalFeedbackRepository,
     SqlAlchemyRetrievalReadModel,
 )
+from vera.adapters.persistence.repositories.snapshot import (
+    SqlAlchemyContextPackRepository,
+    SqlAlchemySnapshotRepository,
+)
 from vera.adapters.persistence.repositories.tenancy import SqlAlchemyTenancyRepository
 
 __all__ = [
@@ -35,8 +47,13 @@ __all__ = [
     "SqlAlchemyAssertionRepository",
     "SqlAlchemyCandidateClaimRepository",
     "SqlAlchemyCanonicalEntityRepository",
+    "SqlAlchemyChunkEmbeddingRepository",
     "SqlAlchemyChunkRepository",
+    "SqlAlchemyCommunityLineageRepository",
+    "SqlAlchemyContextPackRepository",
     "SqlAlchemyEvidenceRepository",
+    "SqlAlchemyExtractionRunRepository",
+    "SqlAlchemyFactExpiryRepository",
     "SqlAlchemyFactRelationRepository",
     "SqlAlchemyFactRepository",
     "SqlAlchemyGraphMapRepository",
@@ -49,5 +66,6 @@ __all__ = [
     "SqlAlchemyRetrievalFeedbackRepository",
     "SqlAlchemyRetrievalReadModel",
     "SqlAlchemyReviewRepository",
+    "SqlAlchemySnapshotRepository",
     "SqlAlchemyTenancyRepository",
 ]

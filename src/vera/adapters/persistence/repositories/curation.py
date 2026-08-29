@@ -38,7 +38,17 @@ def _to_claim(row: CandidateClaimRow) -> ClaimRecord:
         subject=row.subject,
         predicate=row.predicate,
         object=row.object,
+        subject_entity_type=row.subject_entity_type,
+        object_entity_type=row.object_entity_type,
+        qualifiers=dict(row.qualifiers),
         confidence=row.confidence,
+        extraction_run_id=row.extraction_run_id,
+        chunk_id=row.chunk_id,
+        source_quote=row.source_quote,
+        quote_start=row.quote_start,
+        quote_end=row.quote_end,
+        quote_hash=row.quote_hash,
+        needs_review=row.needs_review,
     )
 
 
@@ -103,6 +113,10 @@ class SqlAlchemyArtifactRepository:
         content_hash: str,
         s3_key: str,
         reference_time: datetime,
+        source_revision: int | None = None,
+        source_updated_at: datetime | None = None,
+        source_version_id: str | None = None,
+        observed_at: datetime | None = None,
     ) -> ArtifactRef:
         artifact = ArtifactRow(
             source_id=source_id,
@@ -121,10 +135,22 @@ class SqlAlchemyArtifactRepository:
             content_hash=content_hash,
             s3_key=s3_key,
             reference_time=reference_time,
+            source_revision=source_revision,
+            source_updated_at=source_updated_at,
+            source_version_id=source_version_id,
+            observed_at=observed_at or reference_time,
         )
         self._session.add(version)
         await self._session.flush()
-        return ArtifactRef(artifact_id=artifact.id, version_id=version.id, version=1)
+        return ArtifactRef(
+            artifact_id=artifact.id,
+            version_id=version.id,
+            version=1,
+            source_revision=version.source_revision,
+            source_updated_at=version.source_updated_at,
+            source_version_id=version.source_version_id,
+            observed_at=version.observed_at,
+        )
 
     async def get_head(self, *, source_id: UUID, external_id: str) -> ArtifactHead | None:
         row = (
@@ -137,19 +163,23 @@ class SqlAlchemyArtifactRepository:
         ).scalar_one_or_none()
         if row is None:
             return None
-        version_id = await self._session.scalar(
-            select(ArtifactVersionRow.id).where(
+        version = await self._session.scalar(
+            select(ArtifactVersionRow).where(
                 ArtifactVersionRow.artifact_id == row.id,
                 ArtifactVersionRow.version == row.current_version,
             )
         )
-        if version_id is None:  # a current version should always exist
+        if version is None:  # a current version should always exist
             raise ValueError(f"artifact {row.id} has no row for version {row.current_version}")
         return ArtifactHead(
             artifact_id=row.id,
-            version_id=version_id,
+            version_id=version.id,
             version=row.current_version,
             content_hash=row.content_hash,
+            source_revision=version.source_revision,
+            source_updated_at=version.source_updated_at,
+            source_version_id=version.source_version_id,
+            observed_at=version.observed_at,
         )
 
     async def add_version(
@@ -159,10 +189,22 @@ class SqlAlchemyArtifactRepository:
         content_hash: str,
         s3_key: str,
         reference_time: datetime,
+        source_revision: int | None = None,
+        source_updated_at: datetime | None = None,
+        source_version_id: str | None = None,
+        observed_at: datetime | None = None,
     ) -> ArtifactRef:
         artifact = await self._session.get(ArtifactRow, artifact_id)
         if artifact is None:
             raise ValueError(f"artifact {artifact_id} not found")
+        head_version_id = await self._session.scalar(
+            select(ArtifactVersionRow.id).where(
+                ArtifactVersionRow.artifact_id == artifact_id,
+                ArtifactVersionRow.version == artifact.current_version,
+            )
+        )
+        if head_version_id is None:
+            raise ValueError(f"artifact {artifact_id} has no current version")
         next_version = artifact.current_version + 1
         artifact.current_version = next_version
         artifact.content_hash = content_hash
@@ -174,10 +216,24 @@ class SqlAlchemyArtifactRepository:
             content_hash=content_hash,
             s3_key=s3_key,
             reference_time=reference_time,
+            source_revision=source_revision,
+            source_updated_at=source_updated_at,
+            source_version_id=source_version_id,
+            observed_at=observed_at or reference_time,
+            predecessor_version_id=head_version_id,
         )
         self._session.add(version)
         await self._session.flush()
-        return ArtifactRef(artifact_id=artifact_id, version_id=version.id, version=next_version)
+        return ArtifactRef(
+            artifact_id=artifact_id,
+            version_id=version.id,
+            version=next_version,
+            source_revision=version.source_revision,
+            source_updated_at=version.source_updated_at,
+            source_version_id=version.source_version_id,
+            observed_at=version.observed_at,
+            predecessor_version_id=head_version_id,
+        )
 
 
 class SqlAlchemyCandidateClaimRepository:
@@ -185,7 +241,15 @@ class SqlAlchemyCandidateClaimRepository:
         self._session = session
 
     async def create(
-        self, *, artifact_version_id: UUID, group_id: str, claim: ExtractedClaim
+        self,
+        *,
+        artifact_version_id: UUID,
+        group_id: str,
+        claim: ExtractedClaim,
+        extraction_run_id: UUID | None = None,
+        chunk_id: UUID | None = None,
+        quote_hash: str | None = None,
+        needs_review: bool = False,
     ) -> ClaimRecord:
         row = CandidateClaimRow(
             artifact_version_id=artifact_version_id,
@@ -196,7 +260,17 @@ class SqlAlchemyCandidateClaimRepository:
             subject=claim.subject,
             predicate=claim.predicate,
             object=claim.object,
+            subject_entity_type=claim.subject_entity_type,
+            object_entity_type=claim.object_entity_type,
+            qualifiers=dict(claim.qualifiers),
             confidence=claim.confidence,
+            extraction_run_id=extraction_run_id,
+            chunk_id=chunk_id,
+            source_quote=claim.source_quote,
+            quote_start=claim.quote_start,
+            quote_end=claim.quote_end,
+            quote_hash=quote_hash,
+            needs_review=needs_review,
         )
         self._session.add(row)
         await self._session.flush()

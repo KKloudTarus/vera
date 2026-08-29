@@ -7,6 +7,9 @@ without duplicates. The scheduled-Confluence test is the phase's headline check.
 
 from __future__ import annotations
 
+import dataclasses
+from collections.abc import Callable
+
 import httpx
 import pytest
 import pytest_asyncio
@@ -16,10 +19,15 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from vera.adapters.connectors.confluence import ConfluenceConnector
 from vera.adapters.curation.extractor import StructuredClaimExtractor
+from vera.adapters.graph.null import NullMemoryEngine
 from vera.adapters.persistence.repositories.sync import SqlAlchemySyncStateStore
 from vera.adapters.persistence.unit_of_work import SqlAlchemyUnitOfWork
 from vera.application.connectors import SyncRegistration, SyncRunner, SyncScheduler
+from vera.bootstrap import Container
 from vera.domain.ports.connectors import ConnectorBatch, ConnectorRecord
+from vera.domain.ports.curation import ExtractedClaim
+from vera.entrypoints.worker.lane_pool import LanePool
+from vera.entrypoints.worker.main import run_until_empty
 from vera.shared.ids import uuid7
 from vera.shared.time import utc_now
 from vera.shared.types import JsonDict
@@ -40,6 +48,37 @@ class _FakeConnector:
         batch = self._batches[min(self._i, len(self._batches) - 1)]
         self._i += 1
         return batch
+
+
+class _ConfluenceFactExtractor:
+    @property
+    def provider(self) -> str:
+        return "acceptance"
+
+    @property
+    def model(self) -> str:
+        return "deterministic"
+
+    async def extract(
+        self, *, body: str, knowledge_type: str, metadata: JsonDict
+    ) -> list[ExtractedClaim]:
+        del knowledge_type, metadata
+        quote = body.strip()
+        if not quote:
+            return []
+        subject, obj = quote.split(" runs on ", maxsplit=1)
+        start = body.index(quote)
+        return [
+            ExtractedClaim(
+                statement=f"{subject} RUNS_ON {obj}",
+                subject=subject,
+                predicate="RUNS_ON",
+                object=obj,
+                source_quote=quote,
+                quote_start=start,
+                quote_end=start + len(quote),
+            )
+        ]
 
 
 @pytest_asyncio.fixture
@@ -70,6 +109,15 @@ def _runner(sessionmaker: async_sessionmaker[AsyncSession]) -> SyncRunner:
         extractor=StructuredClaimExtractor(),
         state=SqlAlchemySyncStateStore(sessionmaker),
     )
+
+
+async def _drain_worker(container: Container) -> None:
+    pool = LanePool(container, lanes=1, queue_maxsize=8)
+    pool.start()
+    try:
+        await run_until_empty(container, pool, batch_size=10)
+    finally:
+        await pool.stop()
 
 
 async def _episode_count(sessionmaker: async_sessionmaker[AsyncSession], group: str) -> int:
@@ -177,7 +225,12 @@ async def test_scheduled_confluence_sync_updates_without_duplicates(
         return int(count or 0)
 
     async with httpx.AsyncClient() as client:
-        connector = ConfluenceConnector(client, base_url="https://cf.example", space_key="ENG")
+        connector = ConfluenceConnector(
+            client,
+            base_url="https://cf.example",
+            space_key="ENG",
+            scan_tombstones=False,
+        )
         scheduler = SyncScheduler(
             runner=_runner(sessionmaker),
             state=SqlAlchemySyncStateStore(sessionmaker),
@@ -224,3 +277,254 @@ async def test_sync_drains_all_pages_in_one_run(
     # The persisted cursor is the last page's cursor (the new watermark), not the first page's.
     state = SqlAlchemySyncStateStore(sessionmaker)
     assert await state.get_cursor(source_id) == {"since": "final"}  # type: ignore[arg-type]
+
+
+async def test_sync_checkpoints_each_page_and_resumes_after_a_crash(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    source: tuple[str, object],
+) -> None:
+    group, source_id = source
+
+    class _CrashingConnector:
+        @property
+        def kind(self) -> str:
+            return "crashing"
+
+        async def fetch_changes(self, cursor: JsonDict | None) -> ConnectorBatch:
+            if cursor is None:
+                return ConnectorBatch(
+                    records=(_triple_record("cmdb:p1", "svc1", "eks"),),
+                    next_cursor={"start": 1, "until": "fixed"},
+                    has_more=True,
+                )
+            raise RuntimeError("simulated mid-space crash")
+
+    with pytest.raises(RuntimeError, match="mid-space crash"):
+        await _runner(sessionmaker).sync(
+            source_id=source_id,
+            group_id=group,
+            connector=_CrashingConnector(),  # type: ignore[arg-type]
+        )
+
+    state = SqlAlchemySyncStateStore(sessionmaker)
+    checkpoint = {"start": 1, "until": "fixed"}
+    assert await state.get_cursor(source_id) == checkpoint  # type: ignore[arg-type]
+
+    class _ResumingConnector:
+        @property
+        def kind(self) -> str:
+            return "resuming"
+
+        async def fetch_changes(self, cursor: JsonDict | None) -> ConnectorBatch:
+            assert cursor == checkpoint
+            return ConnectorBatch(
+                records=(_triple_record("cmdb:p2", "svc2", "ecs"),),
+                next_cursor={"since": "final"},
+            )
+
+    outcome = await _runner(sessionmaker).sync(
+        source_id=source_id,
+        group_id=group,
+        connector=_ResumingConnector(),  # type: ignore[arg-type]
+    )
+    assert outcome.processed == 1
+    assert await _episode_count(sessionmaker, group) == 2
+    assert await state.get_cursor(source_id) == {"since": "final"}  # type: ignore[arg-type]
+
+
+async def test_tombstone_creates_an_empty_reconciliation_version(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    source: tuple[str, object],
+) -> None:
+    group, source_id = source
+    live = _triple_record("cmdb:deleted", "paymentapi", "eks")
+    tombstone = ConnectorRecord(
+        external_id=live.external_id,
+        body="",
+        source_updated_at=utc_now(),
+        source_version_id="trashed:1",
+        tombstone=True,
+        metadata={"status": "trashed"},
+    )
+    connector = _FakeConnector(
+        [
+            ConnectorBatch(records=(live,), next_cursor={"since": "1"}),
+            ConnectorBatch(records=(tombstone,), next_cursor={"since": "2"}),
+        ]
+    )
+    runner = _runner(sessionmaker)
+
+    await runner.sync(source_id=source_id, group_id=group, connector=connector)  # type: ignore[arg-type]
+    outcome = await runner.sync(source_id=source_id, group_id=group, connector=connector)  # type: ignore[arg-type]
+
+    assert outcome.processed == 1
+    async with sessionmaker() as session:
+        versions = await session.scalar(
+            text(
+                "SELECT count(*) FROM artifact_versions av "
+                "JOIN artifacts a ON a.id = av.artifact_id "
+                "WHERE a.source_id = :source_id"
+            ),
+            {"source_id": source_id},
+        )
+        finalizers = await session.scalar(
+            text(
+                "SELECT count(*) FROM ingestion_jobs WHERE group_id = :group_id "
+                "AND payload->>'job_kind' = 'fabric_reconcile_version'"
+            ),
+            {"group_id": group},
+        )
+    assert versions == 2
+    assert finalizers == 1
+
+
+@respx.mock
+@pytest.mark.issue6_acceptance
+async def test_e2e_confluence_crash_resume_and_tombstone_retracts_fact(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    source: tuple[str, object],
+    make_container: Callable[[object], Container],
+) -> None:
+    group, source_id = source
+    base = make_container(NullMemoryEngine())
+    memory = base.settings.memory.model_copy(update={"fabric_write_mode": "fabric"})
+    container = dataclasses.replace(
+        base, settings=base.settings.model_copy(update={"memory": memory})
+    )
+    runner = SyncRunner(
+        uow_factory=lambda: SqlAlchemyUnitOfWork(sessionmaker),
+        extractor=_ConfluenceFactExtractor(),
+        state=SqlAlchemySyncStateStore(sessionmaker),
+    )
+    should_crash = {"value": True}
+
+    def page(page_id: str, title: str, body: str, when: str) -> dict[str, object]:
+        return {
+            "id": page_id,
+            "title": title,
+            "status": "current",
+            "version": {"number": 1, "when": when},
+            "body": {"storage": {"value": f"<p>{body}</p>"}},
+        }
+
+    def search_handler(request: httpx.Request) -> httpx.Response:
+        if request.url.params.get("cursor") == "next-page":
+            if should_crash["value"]:
+                raise httpx.TransportError("simulated mid-space crash", request=request)
+            return httpx.Response(
+                200,
+                json={
+                    "results": [
+                        page(
+                            "101",
+                            "Cache Runtime",
+                            "cacheapi runs on redis",
+                            "2026-01-02T11:00:00Z",
+                        )
+                    ],
+                    "_links": {},
+                },
+            )
+        return httpx.Response(
+            200,
+            json={
+                "results": [
+                    page(
+                        "100",
+                        "Payments Runtime",
+                        "paymentapi runs on eks",
+                        "2026-01-02T10:00:00Z",
+                    )
+                ],
+                "_links": {"next": "/rest/api/content/search?cursor=next-page"},
+            },
+        )
+
+    search = respx.get("https://cf.example/rest/api/content/search").mock(
+        side_effect=search_handler
+    )
+    async with httpx.AsyncClient() as client:
+        connector = ConfluenceConnector(
+            client,
+            base_url="https://cf.example",
+            space_key="ENG",
+            max_retries=0,
+            scan_tombstones=False,
+        )
+        with pytest.raises(httpx.TransportError, match="mid-space crash"):
+            await runner.sync(
+                source_id=source_id,
+                group_id=group,
+                connector=connector,  # type: ignore[arg-type]
+            )
+
+        state = SqlAlchemySyncStateStore(sessionmaker)
+        checkpoint = await state.get_cursor(source_id)  # type: ignore[arg-type]
+        assert checkpoint is not None and checkpoint["api_cursor"] == "next-page"
+        should_crash["value"] = False
+        resumed = await runner.sync(
+            source_id=source_id,
+            group_id=group,
+            connector=connector,  # type: ignore[arg-type]
+        )
+        assert resumed.processed == 1
+
+        await _drain_worker(container)
+        async with sessionmaker() as session:
+            active = await session.scalar(
+                text(
+                    "SELECT count(*) FROM facts WHERE group_id = :group "
+                    "AND lifecycle_state = 'active'"
+                ),
+                {"group": group},
+            )
+        assert active == 2
+
+        search.mock(return_value=httpx.Response(200, json={"results": [], "_links": {}}))
+        respx.get("https://cf.example/api/v2/spaces/space-1/pages").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "results": [
+                        {
+                            "id": "100",
+                            "title": "Payments Runtime",
+                            "status": "trashed",
+                            "version": {
+                                "number": 2,
+                                "createdAt": "2026-01-02T12:00:00Z",
+                            },
+                        }
+                    ],
+                    "_links": {},
+                },
+            )
+        )
+        tombstones = ConfluenceConnector(
+            client,
+            base_url="https://cf.example",
+            space_key="ENG",
+            space_id="space-1",
+            scan_tombstones=True,
+        )
+        deleted = await runner.sync(
+            source_id=source_id,
+            group_id=group,
+            connector=tombstones,  # type: ignore[arg-type]
+        )
+        assert deleted.processed == 1
+
+    await _drain_worker(container)
+    async with sessionmaker() as session:
+        rows = (
+            await session.execute(
+                text(
+                    "SELECT co.canonical_name AS object_name, f.lifecycle_state "
+                    "FROM facts f LEFT JOIN canonical_entities co ON co.id = f.object_entity_id "
+                    "WHERE f.group_id = :group ORDER BY object_name"
+                ),
+                {"group": group},
+            )
+        ).mappings()
+        states = {str(row["object_name"]): str(row["lifecycle_state"]) for row in rows}
+    assert states == {"eks": "retracted", "redis": "active"}

@@ -212,6 +212,7 @@ class MemorySettings(BaseModel):
     graph_backend: Literal["neo4j", "falkordb"] = "neo4j"
     embedder: Literal["deterministic", "openai", "voyage"] = "deterministic"
     embedding_model: str = "text-embedding-3-small"
+    embedding_model_version: str = "1"
     embedding_dim: int = 1536
     openai_api_key: SecretStr | None = None
     openai_base_url: str | None = None
@@ -224,20 +225,23 @@ class MemorySettings(BaseModel):
     # a key), so it stays inert in offline and unit runs. Run the embedding backfill for
     # pre-existing entities before relying on it, and watch vera_entity_resolution_total.
     semantic_dedup_enabled: bool = True
-    # pgvector passage retrieval: when on (and an embedder is configured, and the pgvector
-    # chunk embedding column exists), the passage candidate source uses approximate
-    # nearest-neighbor search instead of full-text. vector_dim must match the migration's
-    # frozen column dimension and the embedder's output length.
+    # pgvector passage retrieval adds dense candidates to the full-text result set.
     vector_search_enabled: bool = False
-    vector_dim: int = 1024
     # Phase 8 cutover: when on, the worker also reconciles each ingested episode's triples into
     # the authoritative fact store (Fact/Assertion/Evidence), so the /v2 knowledge surface
     # reflects live ingest. Off by default; the legacy published-episode path is unchanged.
     fabric_enabled: bool = False
+    fabric_write_mode: Literal["legacy", "dual", "fabric"] = "legacy"
     semantic_dedup_threshold: float = 0.86
     # Below the auto-link threshold, names this similar become candidates an LLM judge
     # confirms. Kept low, since embedding cosine over bare names is only a coarse blocker.
     semantic_dedup_block_threshold: float = 0.55
+
+    @property
+    def effective_fabric_write_mode(self) -> Literal["legacy", "dual", "fabric"]:
+        if self.fabric_write_mode == "legacy" and self.fabric_enabled:
+            return "dual"
+        return self.fabric_write_mode
 
 
 class Settings(BaseSettings):

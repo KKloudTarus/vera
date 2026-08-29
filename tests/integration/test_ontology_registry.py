@@ -24,6 +24,6 @@ async def test_persisted_ontology_has_no_drift_from_code(
     assert persisted is not None
     assert persisted.id is not None  # the active row carries a real version id
     assert persisted.version == code.version
-    # The migration froze v1's policies to the code's; startup would fail on any divergence.
+    # The migration froze v2's policies to the code's; startup would fail on any divergence.
     assert detect_drift(code, persisted) == []
     assert {p.predicate for p in persisted.predicate_policies}  # policies are persisted, not empty

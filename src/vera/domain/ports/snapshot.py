@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
+from types import TracebackType
 from typing import Protocol
 
 from vera.shared.types import JsonDict, empty_json
@@ -25,12 +26,17 @@ class Snapshot:
     id: str
     group_id: str
     created_at: datetime
-    as_of_system_time: datetime
+    frozen_at_system_time: datetime
+    as_of_valid_time: datetime
     policy_version: str
     fact_count: int
-    as_of_valid_time: datetime | None = None
+    retrieval_frozen: bool
     ontology_version_id: str | None = None
     source_boundaries: JsonDict = field(default_factory=empty_json)
+    embedding_version: JsonDict = field(default_factory=empty_json)
+    retrieval_index_version: str = "fts-v1"
+    assembler_version: str = "context-assembler-v2"
+    graph_projection_checkpoint: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,6 +50,11 @@ class ContextPack:
     omitted: int
     conflicts: int
     freshness_warnings: int
+    request_hash: str
+    result_references: list[str]
+    expires_at: datetime
+    assembler_version: str
+    request: JsonDict = field(default_factory=empty_json)
     snapshot_id: str | None = None
     results: list[JsonDict] = field(default_factory=_empty_results)
 
@@ -56,6 +67,9 @@ class SnapshotRepository(Protocol):
         policy_version: str,
         as_of: datetime | None = None,
         ontology_version_id: str | None = None,
+        embedding_version: JsonDict | None = None,
+        retrieval_index_version: str = "fts-v1",
+        assembler_version: str = "context-assembler-v2",
         actor: str | None = None,
     ) -> Snapshot:
         """Freeze the active fact set and record the snapshot; append SNAPSHOT_CREATED."""
@@ -78,6 +92,11 @@ class ContextPackRepository(Protocol):
         conflicts: int,
         freshness_warnings: int,
         results: list[JsonDict],
+        request_hash: str,
+        result_references: list[str],
+        expires_at: datetime,
+        assembler_version: str,
+        request: JsonDict,
         snapshot_id: str | None = None,
         hints: JsonDict | None = None,
         actor: str | None = None,
@@ -86,3 +105,25 @@ class ContextPackRepository(Protocol):
         ...
 
     async def get(self, *, group_id: str, pack_id: str) -> ContextPack | None: ...
+
+
+class SnapshotUnitOfWork(Protocol):
+    snapshots: SnapshotRepository
+    context_packs: ContextPackRepository
+
+    async def __aenter__(self) -> SnapshotUnitOfWork: ...
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None: ...
+
+    async def set_repeatable_read(self) -> None: ...
+
+    async def use_tenant(self, group_id: str) -> None: ...
+
+    async def commit(self) -> None: ...
+
+    async def rollback(self) -> None: ...

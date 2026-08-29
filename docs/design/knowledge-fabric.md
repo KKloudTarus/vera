@@ -60,11 +60,11 @@ never changes the key. See ADR-0002.
   heading path, char offsets, page number, code `symbol_name`/`start_line`/`end_line`,
   content hash, token count, `parent_chunk_id`, and the chunk `text` (so the passage index
   is rebuildable from Postgres). Unique on `(artifact_version_id, ordinal)` and `chunk_key`.
-- **facts** — one row per fact revision. Carries `fact_key`, `slot_key`, `subject_entity_id`,
+- **facts**: the authoritative current row for a fact identity. Carries `fact_key`, `slot_key`, `subject_entity_id`,
   `predicate`, object as either `object_entity_id` or `object_scalar` (+ `object_type`
   discriminator and `normalized_object`), `qualifiers`, `lifecycle_state`
   (proposed/active/disputed/superseded/retracted/expired), `authority`, `confidence`,
-  valid-time (`valid_from`/`valid_to`), system-time (`system_from`/`system_to`),
+  valid-time (`valid_from`/`valid_to`), system recording fields (`system_from`/`system_to`),
   `ontology_version_id`, and event references. A partial unique index enforces at most one
   **active** fact per `(group_id, fact_key)`.
 - **assertions** — a source-specific statement supporting or refuting a Fact. Carries
@@ -96,7 +96,7 @@ Phases are sequential where they share schema; independent within a phase.
 | 2 | structure-aware chunking, assertion diff, ontology-driven reconciliation, events | 1 | false contradictions | qualifier-aware slot_key; ontology conflict strategy |
 | 3 | full Graphiti projection + contract + rebuild-equivalence tests | 1 | Graphiti API drift | pin 0.29.x; contract tests; all use inside adapter |
 | 4 | PassageIndex/CodeIndex ports, parallel candidate retrieval | 1,2 | retrieval regression | golden-set thresholds from measured baseline |
-| 5 | KnowledgeSnapshot, ContextAssembler, ContextPack | 1-4 | snapshot reproducibility | as-of system-time filter; snapshot records revisions |
+| 5 | KnowledgeSnapshot, ContextAssembler, ContextPack | 1-4 | snapshot reproducibility | repeatable-read copy of retrieval inputs |
 | 6 | generic MCP `knowledge_*` + REST, versioned | 1-5 | consumer breakage | keep old tools until deprecation; version the surface |
 | 7 | review/conflict/timeline endpoints; DB role split; destructive authz | 1-6 | production role breakage | new roles behind migration; tests under real roles |
 | 8 | data migration, benchmarks, docs, runbooks | 1-7 | data loss | uncertain rows flagged for review; documented rollback |
@@ -109,10 +109,13 @@ passage/code/fact candidate sources over rebuildable `search_vector` columns, mi
 `a7c9e1f2b3d4`, and a `ContextAssembler` that fans out to them in parallel, dedups, scores
 with an explainable signal vector, applies source-diversity, annotates conflicts, cites
 every hit, and packs to a token budget with no LLM on the path), Phase 5 (immutable
-`KnowledgeSnapshot`s that freeze the active fact revisions with the ontology/policy versions
-and source boundaries, migration `b8d0f1a2c3e4`, snapshot-scoped retrieval that stays
+`KnowledgeSnapshot`s that freeze fact, provenance, chunk, and vector retrieval inputs with the
+ontology/policy versions, source boundaries, and retrieval/assembler contracts, migrations
+`b8d0f1a2c3e4`, `0b2c3d4e5f6a`, and `1c3d4e5f6a7b`,
+snapshot-scoped retrieval that stays
 reproducible after supersession, and persisted `ContextPack`s carrying the cited results and
-the conflict/freshness counts, both appending to the change ledger), and Phase 6 (a
+the canonical request plus conflict/freshness counts, both appending to the change ledger), and
+Phase 6 (a
 `KnowledgeService` behind a versioned REST surface `/v2/knowledge` and generic `knowledge_*`
 MCP tools with `knowledge_get_context` as the primary entry point: context, search,
 get_fact, explain_fact, changes, conflicts, snapshots, and propose, all with scopes resolved

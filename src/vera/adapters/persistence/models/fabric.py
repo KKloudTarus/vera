@@ -84,6 +84,24 @@ class ChunkRow(Base, UUIDPK):
     )
 
 
+class ExtractionRunRow(Base, UUIDPK):
+    __tablename__ = "extraction_runs"
+
+    group_id: Mapped[str] = mapped_column(String(256), nullable=False)
+    artifact_version_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("artifact_versions.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    model: Mapped[str] = mapped_column(String(256), nullable=False)
+    provider: Mapped[str] = mapped_column(String(128), nullable=False)
+    prompt_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    pipeline_version: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (Index("ix_extraction_runs_version", "artifact_version_id"),)
+
+
 class FactRow(Base, UUIDPK, Timestamps):
     __tablename__ = "facts"
 
@@ -110,6 +128,7 @@ class FactRow(Base, UUIDPK, Timestamps):
     confidence: Mapped[float] = mapped_column(Float, nullable=False, server_default="0")
     valid_from: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     valid_to: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     system_from: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -119,6 +138,7 @@ class FactRow(Base, UUIDPK, Timestamps):
     )
 
     __table_args__ = (
+        UniqueConstraint("id", "group_id", name="uq_facts_tenant_snapshot"),
         CheckConstraint(f"lifecycle_state IN ({_LIFECYCLE})", name="ck_fact_lifecycle"),
         CheckConstraint(f"object_type IN ({_OBJECT_TYPE})", name="ck_fact_object_type"),
         CheckConstraint(
@@ -136,6 +156,11 @@ class FactRow(Base, UUIDPK, Timestamps):
         ),
         Index("ix_facts_slot", "group_id", "slot_key"),
         Index("ix_facts_subject", "subject_entity_id"),
+        Index(
+            "ix_facts_expiry",
+            "expires_at",
+            postgresql_where=text("lifecycle_state = 'active' AND expires_at IS NOT NULL"),
+        ),
     )
 
 
@@ -167,7 +192,12 @@ class AssertionRow(Base, UUIDPK):
     recorded_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
-    extraction_run_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    extraction_run_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("extraction_runs.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    run_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
     state: Mapped[str] = mapped_column(
         String(16), nullable=False, server_default=AssertionState.ACTIVE.value
     )
@@ -181,6 +211,14 @@ class AssertionRow(Base, UUIDPK):
         CheckConstraint(f"state IN ({_ASSERTION_STATE})", name="ck_assertion_state"),
         # One assertion per (fact, source version, polarity): re-ingest reaffirms in place.
         UniqueConstraint("fact_id", "artifact_version_id", "polarity", name="uq_assertion_source"),
+        Index(
+            "uq_assertion_run_key",
+            "fact_id",
+            "run_key",
+            "polarity",
+            unique=True,
+            postgresql_where=text("run_key IS NOT NULL"),
+        ),
         Index("ix_assertions_fact", "group_id", "fact_id"),
     )
 
@@ -201,6 +239,15 @@ class EvidenceRow(Base, UUIDPK):
     structured_record: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     excerpt: Mapped[str | None] = mapped_column(Text, nullable=True)
     citation_uri: Mapped[str | None] = mapped_column(Text, nullable=True)
+    quote_start: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    quote_end: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    quote_hash: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    citation_override: Mapped[str | None] = mapped_column(Text, nullable=True)
+    extraction_run_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("extraction_runs.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     content_hash: Mapped[str] = mapped_column(String(128), nullable=False)
     source_coordinates: Mapped[dict[str, Any]] = mapped_column(
         JSONB, nullable=False, server_default=text("'{}'::jsonb")
@@ -214,6 +261,11 @@ class EvidenceRow(Base, UUIDPK):
 
     __table_args__ = (
         UniqueConstraint("assertion_id", "content_hash", name="uq_evidence_hash"),
+        CheckConstraint(
+            "(quote_start IS NULL AND quote_end IS NULL AND quote_hash IS NULL) OR "
+            "(quote_start >= 0 AND quote_end > quote_start AND quote_hash IS NOT NULL)",
+            name="ck_evidence_quote_offsets",
+        ),
         Index("ix_evidence_assertion", "group_id", "assertion_id"),
     )
 

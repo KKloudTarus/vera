@@ -10,7 +10,23 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Protocol
+from typing import Literal, Protocol
+
+from vera.shared.types import JsonDict
+
+
+@dataclass(frozen=True, slots=True)
+class RetrievalFilters:
+    repository: str | None = None
+    branch: str | None = None
+    code_path: str | None = None
+    document_type: str | None = None
+    source_type: str | None = None
+    include_predicates: tuple[str, ...] = field(default_factory=tuple)
+    exclude_predicates: tuple[str, ...] = field(default_factory=tuple)
+    min_authority: float | None = None
+    max_trust_tier: int | None = None
+    conflict_handling: Literal["include", "exclude", "only"] = "include"
 
 
 @dataclass(frozen=True, slots=True)
@@ -19,6 +35,7 @@ class PassageHit:
     artifact_version_id: str
     text: str
     score: float
+    content_hash: str | None = None
     heading_path: str | None = None
     symbol_name: str | None = None
     start_offset: int | None = None
@@ -42,6 +59,20 @@ class FactHit:
     score: float
     valid_from: datetime | None = None
     supporting_source_ids: tuple[str, ...] = field(default_factory=tuple)
+    evidence_id: str | None = None
+    evidence_assertion_id: str | None = None
+    evidence_source_id: str | None = None
+    evidence_excerpt: str | None = None
+    evidence_chunk_id: str | None = None
+    evidence_artifact_version_id: str | None = None
+    evidence_start_offset: int | None = None
+    evidence_end_offset: int | None = None
+    evidence_quote_hash: str | None = None
+    evidence_content_hash: str | None = None
+    evidence_extraction_run_id: str | None = None
+    evidence_source_coordinates: JsonDict | None = None
+    evidence_structured_record: JsonDict | None = None
+    evidence_citation_uri: str | None = None
 
 
 class PassageIndex(Protocol):
@@ -52,10 +83,11 @@ class PassageIndex(Protocol):
         query: str,
         limit: int,
         created_before: datetime | None = None,
+        snapshot_id: str | None = None,
+        filters: RetrievalFilters | None = None,
     ) -> list[PassageHit]:
-        """Search passages. When ``created_before`` is given (a snapshot's freeze time), only
-        chunks ingested at or before it are returned, so a pack against a snapshot reproduces
-        the passages that existed when it was taken.
+        """Search passages. ``snapshot_id`` selects copied immutable retrieval rows;
+        ``created_before`` limits a live search to an ingestion boundary.
         """
         ...
 
@@ -68,6 +100,8 @@ class CodeIndex(Protocol):
         query: str,
         limit: int,
         created_before: datetime | None = None,
+        snapshot_id: str | None = None,
+        filters: RetrievalFilters | None = None,
     ) -> list[PassageHit]: ...
 
 
@@ -80,9 +114,12 @@ class FactCandidateSource(Protocol):
         limit: int,
         as_of: datetime | None = None,
         restrict_fact_ids: set[str] | None = None,
+        snapshot_id: str | None = None,
+        filters: RetrievalFilters | None = None,
     ) -> list[FactHit]:
         """Search active facts, or, when ``restrict_fact_ids`` is given (a snapshot's frozen
         membership), only those facts regardless of their current lifecycle, for reproducible
-        snapshot retrieval.
+        snapshot retrieval. ``snapshot_id`` reads the fact, source, and citation values frozen
+        by that snapshot rather than mutable live rows.
         """
         ...

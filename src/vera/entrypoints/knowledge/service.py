@@ -10,10 +10,13 @@ from __future__ import annotations
 
 import hashlib
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
-from vera.adapters.persistence.repositories import SqlAlchemyCanonicalEntityRepository
+from vera.adapters.persistence.repositories import (
+    SqlAlchemyCanonicalEntityRepository,
+    SqlAlchemyCommunityLineageRepository,
+)
 from vera.adapters.persistence.repositories.fabric import (
     SqlAlchemyAssertionRepository,
     SqlAlchemyEvidenceRepository,
@@ -31,13 +34,9 @@ from vera.adapters.persistence.repositories.pgvector_index import (
     PgVectorCodeIndex,
     PgVectorPassageIndex,
 )
-from vera.adapters.persistence.repositories.snapshot import (
-    SqlAlchemyContextPackRepository,
-    SqlAlchemySnapshotRepository,
-)
 from vera.adapters.persistence.unit_of_work import SqlAlchemyUnitOfWork
-from vera.application.retrieval import ContextAssembler
-from vera.application.snapshot import ContextPackService, SnapshotService
+from vera.application.retrieval import ContextAssembler, HybridPassageIndex
+from vera.application.snapshot import ContextPackService, SnapshotService, serialize_candidate
 from vera.bootstrap import Container
 from vera.domain.identity.models import Role, role_at_least
 from vera.domain.identity.scopes import ScopeKind, scope_kind
@@ -54,12 +53,13 @@ from vera.domain.knowledge.fabric import (
     normalize_object,
     slot_key,
 )
-from vera.domain.ontology import current_descriptor
+from vera.domain.ontology import current_descriptor, diff_descriptors
 from vera.domain.ports.identity import ResolvedScope, ScopeResolver
-from vera.domain.ports.retrieval_index import CodeIndex, PassageIndex
+from vera.domain.ports.retrieval_index import CodeIndex, PassageIndex, RetrievalFilters
+from vera.domain.ports.snapshot import ContextPack
 from vera.shared.ids import uuid7
 from vera.shared.time import utc_now
-from vera.shared.types import JsonDict
+from vera.shared.types import GroupId, JsonDict
 
 _PROPOSAL_AUTHORITY = 0.4  # tier 4 (unverified) authority; proposals never outrank real facts
 
@@ -68,27 +68,69 @@ class ScopeError(Exception):
     """The principal has no resolvable scope, or requested a scope it may not access."""
 
 
+def _context_pack_payload(pack: ContextPack) -> JsonDict:
+    return {
+        "pack_id": pack.id,
+        "scope_id": pack.group_id,
+        "snapshot_id": pack.snapshot_id,
+        "query": pack.query,
+        "created_at": pack.created_at.isoformat(),
+        "expires_at": pack.expires_at.isoformat(),
+        "request_hash": pack.request_hash,
+        "result_references": pack.result_references,
+        "assembler_version": pack.assembler_version,
+        "request": pack.request,
+        "token_estimate": pack.token_estimate,
+        "result_count": pack.result_count,
+        "omitted": pack.omitted,
+        "conflicts": pack.conflicts,
+        "freshness_warnings": pack.freshness_warnings,
+        "results": pack.results,
+    }
+
+
 class KnowledgeService:
     def __init__(self, container: Container, scope_resolver: ScopeResolver) -> None:
         self._c = container
         self._scopes = scope_resolver
-        # Read repos run on the cross-scope read path (vera_trusted when enforced); writes go
-        # through a UnitOfWork on the base factory (vera_app + RLS via use_tenant).
         sm = container.reads
         self._read = SqlAlchemyKnowledgeReadModel(sm)
-        self._snapshots = SqlAlchemySnapshotRepository(sm)
-        self._packs = SqlAlchemyContextPackRepository(sm)
+        self._uow_factory = lambda: SqlAlchemyUnitOfWork(container.sessionmaker)
+        self._community_lineage = SqlAlchemyCommunityLineageRepository(sm)
         passages: PassageIndex
         code: CodeIndex
         if container.settings.memory.vector_search_enabled and container.embedder is not None:
-            # ANN over chunk embeddings; the query is embedded per call through the embedder.
-            passages = PgVectorPassageIndex(sm, container.embedder)
-            code = PgVectorCodeIndex(sm, container.embedder)
+            passages = HybridPassageIndex(
+                SqlAlchemyPassageIndex(sm),
+                PgVectorPassageIndex(
+                    sm,
+                    container.embedder,
+                    provider=container.settings.memory.embedder,
+                    model=container.settings.memory.embedding_model,
+                    model_version=container.settings.memory.embedding_model_version,
+                    dimension=container.settings.memory.embedding_dim,
+                ),
+            )
+            code = HybridPassageIndex(
+                SqlAlchemyCodeIndex(sm),
+                PgVectorCodeIndex(
+                    sm,
+                    container.embedder,
+                    provider=container.settings.memory.embedder,
+                    model=container.settings.memory.embedding_model,
+                    model_version=container.settings.memory.embedding_model_version,
+                    dimension=container.settings.memory.embedding_dim,
+                ),
+            )
         else:
             passages = SqlAlchemyPassageIndex(sm)
             code = SqlAlchemyCodeIndex(sm)
         self._assembler = ContextAssembler(
             facts=SqlAlchemyFactCandidateSource(sm), passages=passages, code=code
+        )
+        self._snapshot_service = SnapshotService(uow_factory=self._uow_factory)
+        self._context_pack_service = ContextPackService(
+            assembler=self._assembler, uow_factory=self._uow_factory
         )
 
     async def _resolve(self, principal_id: UUID) -> ResolvedScope:
@@ -97,12 +139,16 @@ class KnowledgeService:
             raise ScopeError(f"principal {principal_id} has no scope")
         return scope
 
-    @staticmethod
-    def _target_group(scope: ResolvedScope, project: str | None) -> str:
+    async def _target_group(self, scope: ResolvedScope, project: str | None) -> str:
         if project is not None:
-            if project not in scope.group_ids:
-                raise ScopeError("project is outside the caller's resolved scopes")
-            return project
+            if project in scope.group_ids:
+                return project
+            resolved = await self._read.resolve_project(
+                group_ids=list(scope.group_ids), project=project
+            )
+            if resolved is not None:
+                return resolved
+            raise ScopeError("project is outside the caller's resolved scopes")
         shared = [g for g in scope.group_ids if scope_kind(g) is not ScopeKind.PERSONAL]
         if len(shared) == 1:
             return shared[0]
@@ -123,13 +169,44 @@ class KnowledgeService:
         token_budget: int = 2000,
         as_of: datetime | None = None,
         hints: JsonDict | None = None,
+        repository: str | None = None,
+        branch: str | None = None,
+        code_path: str | None = None,
+        document_type: str | None = None,
+        source_type: str | None = None,
+        include_predicates: tuple[str, ...] = (),
+        exclude_predicates: tuple[str, ...] = (),
+        min_authority: float | None = None,
+        max_trust_tier: int | None = None,
+        citation_mode: Literal["full", "compact"] = "full",
+        conflict_handling: Literal["include", "exclude", "only"] = "include",
     ) -> JsonDict:
         scope = await self._resolve(principal_id)
-        group = self._target_group(scope, project)
-        service = ContextPackService(
-            assembler=self._assembler, snapshots=self._snapshots, packs=self._packs
+        group = await self._target_group(scope, project)
+        embedding_version: JsonDict = {}
+        retrieval_index_version = "fts-v1"
+        if self._c.settings.memory.vector_search_enabled and self._c.embedder is not None:
+            memory = self._c.settings.memory
+            embedding_version = {
+                "provider": memory.embedder,
+                "model": memory.embedding_model,
+                "model_version": memory.embedding_model_version,
+                "dimension": memory.embedding_dim,
+            }
+            retrieval_index_version = "hybrid-rrf-v1"
+        filters = RetrievalFilters(
+            repository=repository,
+            branch=branch,
+            code_path=code_path,
+            document_type=document_type,
+            source_type=source_type,
+            include_predicates=tuple(predicate.upper() for predicate in include_predicates),
+            exclude_predicates=tuple(predicate.upper() for predicate in exclude_predicates),
+            min_authority=min_authority,
+            max_trust_tier=max_trust_tier,
+            conflict_handling=conflict_handling,
         )
-        pack = await service.create(
+        pack = await self._context_pack_service.create(
             group_id=group,
             query=query,
             snapshot_id=snapshot_id,
@@ -137,19 +214,25 @@ class KnowledgeService:
             limit=limit,
             token_budget=token_budget,
             as_of=as_of,
+            filters=filters,
+            citation_mode=citation_mode,
+            active_embedding_version=embedding_version,
+            active_retrieval_index_version=retrieval_index_version,
             actor=str(principal_id),
         )
-        return {
-            "pack_id": pack.id,
-            "snapshot_id": pack.snapshot_id,
-            "query": pack.query,
-            "token_estimate": pack.token_estimate,
-            "result_count": pack.result_count,
-            "omitted": pack.omitted,
-            "conflicts": pack.conflicts,
-            "freshness_warnings": pack.freshness_warnings,
-            "results": pack.results,
-        }
+        return _context_pack_payload(pack)
+
+    async def get_context_pack(self, principal_id: UUID, *, pack_id: str) -> JsonDict | None:
+        try:
+            pack_id = str(UUID(pack_id))
+        except ValueError:
+            return None
+        scope = await self._resolve(principal_id)
+        for group_id in scope.group_ids:
+            pack = await self._context_pack_service.get(group_id=group_id, pack_id=pack_id)
+            if pack is not None:
+                return _context_pack_payload(pack)
+        return None
 
     async def search(
         self,
@@ -161,7 +244,7 @@ class KnowledgeService:
         as_of: datetime | None = None,
     ) -> JsonDict:
         scope = await self._resolve(principal_id)
-        group = self._target_group(scope, project)
+        group = await self._target_group(scope, project)
         assembled = await self._assembler.assemble(
             query=query, group_id=group, limit=limit, as_of=as_of
         )
@@ -171,21 +254,74 @@ class KnowledgeService:
             "freshness_warnings": assembled.freshness_warnings,
             "omitted": assembled.omitted,
             "results": [
-                {
-                    "kind": r.kind,
-                    "ref": r.ref,
-                    "text": r.text,
-                    "score": r.score,
-                    "conflict": r.conflict,
-                    "reason": r.reason,
-                    "citation": {
-                        "kind": r.citation.kind,
-                        "ref": r.citation.ref,
-                        "excerpt": r.citation.excerpt,
-                    },
-                }
-                for r in assembled.results
+                serialize_candidate(result, citation_mode="full") for result in assembled.results
             ],
+        }
+
+    async def communities(
+        self,
+        principal_id: UUID,
+        *,
+        project: str | None = None,
+        query: str | None = None,
+        limit: int = 20,
+    ) -> list[JsonDict]:
+        scope = await self._resolve(principal_id)
+        group = await self._target_group(scope, project)
+        communities = await self._c.memory.search_communities(
+            group_ids=(GroupId(group),), query=query, limit=limit
+        )
+        return [
+            {
+                "kind": "community_summary",
+                "community_id": community.community_id,
+                "name": community.name,
+                "summary": community.summary,
+                "derived": True,
+                "authoritative": False,
+                "evidence": None,
+                "derivation_run_id": community.derivation_run_id,
+                "source_fact_set_hash": community.source_fact_set_hash,
+                "projection_checkpoint": community.projection_checkpoint,
+            }
+            for community in communities
+        ]
+
+    async def community_lineage(
+        self,
+        principal_id: UUID,
+        *,
+        community_id: str,
+        derivation_run_id: str | None = None,
+        cursor: str | None = None,
+        limit: int = 50,
+    ) -> JsonDict | None:
+        scope = await self._resolve(principal_id)
+        page = await self._community_lineage.page(
+            group_ids=tuple(scope.group_ids),
+            community_id=UUID(community_id),
+            derivation_run_id=UUID(derivation_run_id) if derivation_run_id else None,
+            cursor=UUID(cursor) if cursor else None,
+            limit=limit,
+        )
+        if not page.items:
+            return None
+        return {
+            "community_id": community_id,
+            "derivation_run_id": str(page.items[0].derivation_run_id),
+            "derived": True,
+            "items": [
+                {
+                    "fact_id": str(item.fact_id),
+                    "fact_key": item.fact_key,
+                    "subject": item.subject_name,
+                    "predicate": item.predicate,
+                    "object": item.object_name,
+                    "created_at": item.created_at.isoformat(),
+                }
+                for item in page.items
+            ],
+            "next_cursor": page.next_cursor,
         }
 
     # ------------------------------------------------------------------- reads ---
@@ -193,6 +329,18 @@ class KnowledgeService:
     async def get_fact(self, principal_id: UUID, *, fact_key: str) -> dict[str, Any] | None:
         scope = await self._resolve(principal_id)
         return await self._read.get_fact(group_ids=list(scope.group_ids), fact_key=fact_key)
+
+    async def get_entity(
+        self, principal_id: UUID, *, entity_id: str, limit: int = 100
+    ) -> dict[str, Any] | None:
+        scope = await self._resolve(principal_id)
+        return await self._read.get_entity(
+            group_ids=list(scope.group_ids), entity_id=entity_id, limit=limit
+        )
+
+    async def get_source(self, principal_id: UUID, *, source_id: str) -> dict[str, Any] | None:
+        scope = await self._resolve(principal_id)
+        return await self._read.get_source(group_ids=list(scope.group_ids), source_id=source_id)
 
     async def explain_fact(self, principal_id: UUID, *, fact_key: str) -> dict[str, Any] | None:
         scope = await self._resolve(principal_id)
@@ -248,28 +396,63 @@ class KnowledgeService:
         self, principal_id: UUID, *, project: str | None = None, as_of: datetime | None = None
     ) -> JsonDict:
         scope = await self._resolve(principal_id)
-        group = self._target_group(scope, project)
-        snap = await SnapshotService(snapshots=self._snapshots).create(
-            group_id=group, as_of=as_of, actor=str(principal_id)
+        group = await self._target_group(scope, project)
+        embedding_version: JsonDict = {}
+        retrieval_index_version = "fts-v1"
+        if self._c.settings.memory.vector_search_enabled and self._c.embedder is not None:
+            memory = self._c.settings.memory
+            embedding_version = {
+                "provider": memory.embedder,
+                "model": memory.embedding_model,
+                "model_version": memory.embedding_model_version,
+                "dimension": memory.embedding_dim,
+            }
+            retrieval_index_version = "hybrid-rrf-v1"
+        snap = await self._snapshot_service.create(
+            group_id=group,
+            as_of=as_of,
+            embedding_version=embedding_version,
+            retrieval_index_version=retrieval_index_version,
+            actor=str(principal_id),
         )
         return {
             "snapshot_id": snap.id,
             "fact_count": snap.fact_count,
             "created_at": snap.created_at.isoformat(),
+            "as_of_valid_time": snap.as_of_valid_time.isoformat(),
+            "frozen_at_system_time": snap.frozen_at_system_time.isoformat(),
+            "embedding_version": snap.embedding_version,
+            "retrieval_index_version": snap.retrieval_index_version,
+            "assembler_version": snap.assembler_version,
+            "graph_projection_checkpoint": snap.graph_projection_checkpoint,
             "policy_version": snap.policy_version,
+            "ontology_version_id": snap.ontology_version_id,
+            "retrieval_frozen": snap.retrieval_frozen,
         }
 
     async def get_snapshot(self, principal_id: UUID, *, snapshot_id: str) -> JsonDict | None:
+        try:
+            snapshot_id = str(UUID(snapshot_id))
+        except ValueError:
+            return None
         scope = await self._resolve(principal_id)
         for group in scope.group_ids:
-            snap = await self._snapshots.get(group_id=group, snapshot_id=snapshot_id)
+            snap = await self._snapshot_service.get(group_id=group, snapshot_id=snapshot_id)
             if snap is not None:
                 return {
                     "snapshot_id": snap.id,
                     "group_id": snap.group_id,
                     "fact_count": snap.fact_count,
                     "created_at": snap.created_at.isoformat(),
+                    "as_of_valid_time": snap.as_of_valid_time.isoformat(),
+                    "frozen_at_system_time": snap.frozen_at_system_time.isoformat(),
+                    "embedding_version": snap.embedding_version,
+                    "retrieval_index_version": snap.retrieval_index_version,
+                    "assembler_version": snap.assembler_version,
+                    "graph_projection_checkpoint": snap.graph_projection_checkpoint,
                     "policy_version": snap.policy_version,
+                    "ontology_version_id": snap.ontology_version_id,
+                    "retrieval_frozen": snap.retrieval_frozen,
                     "source_boundaries": snap.source_boundaries,
                 }
         return None
@@ -342,7 +525,7 @@ class KnowledgeService:
                     verification_state="pending",
                     observed_at=utc_now(),
                     recorded_at=utc_now(),
-                    extraction_run_id=f"proposal:{principal_id}",
+                    run_key=f"proposal:{principal_id}",
                 )
             )
             if evidence_text:
@@ -458,7 +641,38 @@ class KnowledgeService:
                     "cardinality": p.cardinality.value,
                     "absence_semantics": p.absence_semantics.value,
                     "conflict_strategy": p.conflict_strategy.value,
+                    "subject_types": list(p.subject_types),
+                    "object_types": list(p.object_types),
+                    "object_kind": p.object_kind.value,
+                    "qualifier_schema": {
+                        rule.name: {
+                            "type": rule.value_type.value,
+                            "required": rule.required,
+                        }
+                        for rule in p.qualifier_schema
+                    },
+                    "allow_additional_qualifiers": p.allow_additional_qualifiers,
+                    "minimum_source_authority": p.minimum_source_authority,
+                    "ttl_seconds": p.ttl_seconds,
+                    "deprecated": p.deprecated,
+                    "replacement_predicate": p.replacement_predicate,
                 }
                 for p in active.predicate_policies
             ],
         }
+
+    async def ontology_diff(self, *, from_version: int, to_version: int | None = None) -> JsonDict:
+        async with self._c.reads() as session:
+            repository = SqlAlchemyOntologyRepository(session)
+            previous = await repository.get_version(from_version)
+            current = (
+                await repository.get_version(to_version)
+                if to_version is not None
+                else await repository.get_active()
+            )
+        if previous is None:
+            raise ValueError(f"ontology version {from_version} was not found")
+        if current is None:
+            requested = to_version if to_version is not None else "active"
+            raise ValueError(f"ontology version {requested} was not found")
+        return diff_descriptors(previous, current)

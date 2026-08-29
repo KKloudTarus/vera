@@ -15,6 +15,12 @@ import sys
 
 from sqlalchemy import text
 
+from vera.adapters.persistence.repositories.community import (
+    SqlAlchemyCommunityLineageRepository,
+)
+from vera.adapters.persistence.repositories.projection import SqlAlchemyProjectionSource
+from vera.application.community import CommunityLineageService
+from vera.application.projection import FactProjectionService
 from vera.bootstrap import Container, build_container, dispose_container
 from vera.config.settings import get_settings
 from vera.observability import configure_logging, get_logger
@@ -29,9 +35,27 @@ async def _group_ids(container: Container) -> list[str]:
 
 
 async def build_group(container: Container, group_id: str) -> int:
-    built = await container.memory.build_communities(group_id=group_id)
-    log.info("communities.built", group_id=group_id, communities=built)
-    return built
+    if container.fact_projection is None:
+        log.info("communities.built", group_id=group_id, communities=0)
+        return 0
+    # Rebuild first so clustering and summaries consume only PostgreSQL's active fact set.
+    await FactProjectionService(
+        source=SqlAlchemyProjectionSource(container.reads),
+        projection=container.fact_projection,
+    ).rebuild_group(group_id)
+    report = await CommunityLineageService(
+        memory=container.memory,
+        lineage=SqlAlchemyCommunityLineageRepository(container.workers),
+    ).build(group_id=group_id)
+    log.info(
+        "communities.built",
+        group_id=group_id,
+        communities=report.communities,
+        lineage_rows=report.lineage_rows,
+        derivation_run_id=str(report.derivation_run_id),
+        projection_checkpoint=report.projection_checkpoint,
+    )
+    return report.communities
 
 
 async def _run(target: str) -> None:

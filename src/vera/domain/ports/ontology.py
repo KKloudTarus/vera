@@ -17,6 +17,10 @@ class OntologyRepository(Protocol):
         """The full descriptor of the highest-numbered version, or None if none exist."""
         ...
 
+    async def get_version(self, version: int) -> OntologyDescriptor | None:
+        """A specific immutable ontology descriptor, or None when absent."""
+        ...
+
     async def ensure(
         self, *, version: int, name: str, entity_types: list[str], edge_types: list[str]
     ) -> UUID:

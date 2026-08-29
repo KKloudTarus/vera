@@ -50,13 +50,16 @@ class SlackConnector:
             text = str(message.get("text", ""))
             if not ts or not text:
                 continue
+            updated_at = datetime.fromtimestamp(float(ts), tz=UTC)
             records.append(
                 ConnectorRecord(
                     external_id=f"slack:{self._channel}:{ts}",
                     body=text,
                     knowledge_type="text",
                     metadata={"channel": self._channel, "user": str(message.get("user", ""))},
-                    reference_time=datetime.fromtimestamp(float(ts), tz=UTC),
+                    reference_time=updated_at,
+                    source_updated_at=updated_at,
+                    source_version_id=ts,
                 )
             )
             if ts > latest:

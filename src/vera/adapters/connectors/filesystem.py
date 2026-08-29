@@ -48,6 +48,7 @@ class FilesystemConnector:
                 continue
             body = path.read_text(encoding="utf-8", errors="replace")[: self._max_bytes]
             rel = path.relative_to(self._root).as_posix()
+            updated_at = datetime.fromtimestamp(mtime, tz=UTC)
             records.append(
                 ConnectorRecord(
                     external_id=f"fs:{rel}",
@@ -55,7 +56,9 @@ class FilesystemConnector:
                     body=body,
                     knowledge_type="text",
                     metadata={"path": rel},
-                    reference_time=datetime.fromtimestamp(mtime, tz=UTC),
+                    reference_time=updated_at,
+                    source_updated_at=updated_at,
+                    source_version_id=str(mtime),
                 )
             )
             latest = max(latest, mtime)

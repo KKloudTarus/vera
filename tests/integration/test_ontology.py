@@ -105,7 +105,7 @@ async def test_published_episode_carries_ontology_and_pipeline_versions(
     assert row is not None
     ontology_version_id, pipeline = row
     assert ontology_version_id is not None  # references the active ontology
-    assert pipeline.get("ontology") == "1"
+    assert pipeline.get("ontology") == "2"
     assert pipeline.get("model")  # a model version is recorded
 
 

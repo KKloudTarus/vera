@@ -12,11 +12,13 @@ from typing import Any
 from uuid import UUID
 
 from sqlalchemy import (
+    BigInteger,
     Boolean,
     CheckConstraint,
     DateTime,
     Float,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
@@ -92,11 +94,34 @@ class ArtifactVersionRow(Base, UUIDPK):
     content_hash: Mapped[str] = mapped_column(String(128), nullable=False)
     s3_key: Mapped[str] = mapped_column(String(1024), nullable=False)
     reference_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    source_revision: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    source_updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    source_version_id: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    observed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    predecessor_version_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("artifact_versions.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
 
-    __table_args__ = (UniqueConstraint("artifact_id", "version", name="uq_artifact_version"),)
+    __table_args__ = (
+        UniqueConstraint("artifact_id", "version", name="uq_artifact_version"),
+        Index(
+            "uq_artifact_source_revision",
+            "artifact_id",
+            "source_revision",
+            unique=True,
+            postgresql_where=text("source_revision IS NOT NULL"),
+        ),
+        Index("ix_artifact_versions_predecessor", "predecessor_version_id"),
+    )
 
 
 class CandidateClaimRow(Base, UUIDPK, Timestamps):
@@ -116,7 +141,23 @@ class CandidateClaimRow(Base, UUIDPK, Timestamps):
     subject: Mapped[str | None] = mapped_column(String(512), nullable=True)
     predicate: Mapped[str | None] = mapped_column(String(256), nullable=True)
     object: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    subject_entity_type: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    object_entity_type: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    qualifiers: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
     confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    extraction_run_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("extraction_runs.id", ondelete="SET NULL"), nullable=True
+    )
+    chunk_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("chunks.id", ondelete="SET NULL"), nullable=True
+    )
+    source_quote: Mapped[str | None] = mapped_column(Text, nullable=True)
+    quote_start: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    quote_end: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    quote_hash: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    needs_review: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
     version_id: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1")
 
     __mapper_args__ = {"version_id_col": version_id}  # noqa: RUF012  SQLAlchemy config dict

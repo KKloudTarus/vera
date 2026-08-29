@@ -19,7 +19,7 @@ from vera.domain.ports.retrieval_index import FactHit, PassageHit
 from vera.shared.time import utc_now
 
 
-def _sc(ref: str, source: str, score: float) -> ScoredCandidate:
+def _sc(ref: str, source: str, score: float, *, excerpt: str | None = None) -> ScoredCandidate:
     sig = Signals(relevance=score, authority=1.0, verification=1.0, recency=0.5, confidence=0.5)
     from vera.application.retrieval.context_assembler import Citation
 
@@ -29,7 +29,7 @@ def _sc(ref: str, source: str, score: float) -> ScoredCandidate:
         text="x " * 10,
         score=score,
         signals=sig,
-        citation=Citation(kind="passage", ref=ref),
+        citation=Citation(kind="passage", ref=ref, excerpt=excerpt),
         source_key=source,
         conflict=False,
         reason="",
@@ -61,12 +61,31 @@ def test_diversity_penalizes_repeated_source() -> None:
     assert out[1].ref == "b1"
 
 
+def test_diversity_breaks_score_ties_by_stable_identity() -> None:
+    candidates = [_sc("c", "C", 1.0), _sc("a", "A", 1.0), _sc("b", "B", 1.0)]
+
+    assert [candidate.ref for candidate in _diversify(candidates, decay=0.5)] == ["a", "b", "c"]
+
+
 def test_pack_respects_limit_and_token_budget() -> None:
     cands = [_sc(f"c{i}", "A", 1.0 - i * 0.01) for i in range(10)]
     packed, omitted, _ = _pack(cands, limit=3, token_budget=10_000)
     assert len(packed) == 3 and omitted == 7
     tiny, tiny_omitted, tokens = _pack(cands, limit=100, token_budget=10)
-    assert len(tiny) >= 1 and tiny_omitted > 0 and tokens <= 10 + 100  # budget-bounded
+    assert len(tiny) >= 1 and tiny_omitted > 0 and tokens <= 10
+
+
+def test_pack_accounts_for_full_citation_excerpts() -> None:
+    candidates = [_sc("quoted", "A", 1.0, excerpt="q" * 400), _sc("next", "B", 0.9)]
+
+    full, omitted, full_tokens = _pack(candidates, limit=2, token_budget=50)
+    compact, _, compact_tokens = _pack(
+        candidates, limit=2, token_budget=50, include_citation_excerpts=False
+    )
+
+    assert [candidate.ref for candidate in full] == ["next"]
+    assert omitted == 1 and full_tokens <= 50
+    assert len(compact) == 2 and compact_tokens <= 50
 
 
 # --------------------------------------------------------- assembler with fakes ---
@@ -76,7 +95,17 @@ class _FakeFacts:
     def __init__(self, hits: list[FactHit]) -> None:
         self._hits = hits
 
-    async def search(self, *, group_id, query, limit, as_of=None, restrict_fact_ids=None):
+    async def search(
+        self,
+        *,
+        group_id,
+        query,
+        limit,
+        as_of=None,
+        restrict_fact_ids=None,
+        snapshot_id=None,
+        filters=None,
+    ):
         return self._hits
 
 
@@ -84,7 +113,9 @@ class _FakePassages:
     def __init__(self, hits: list[PassageHit]) -> None:
         self._hits = hits
 
-    async def search(self, *, group_id, query, limit, created_before=None):
+    async def search(
+        self, *, group_id, query, limit, created_before=None, snapshot_id=None, filters=None
+    ):
         return self._hits
 
 
@@ -124,6 +155,9 @@ async def test_assemble_combines_sources_annotates_conflict_and_cites() -> None:
     assert result.conflicts == 1  # the disputed fact is flagged
     assert all(r.citation.ref for r in result.results)  # every hit is cited
     assert all(r.reason for r in result.results)  # and carries a reason
+    assert all(
+        r.citation.excerpt is None for r in result.results if r.kind == "fact"
+    )  # never synthesize evidence when no exact quote exists
     # The five same-version passages do not fill every slot: the facts still surface.
     kinds = [r.kind for r in result.results]
     assert "fact" in kinds

@@ -21,13 +21,19 @@ supersession creates a new Fact revision and links the old one with a `SUPERSEDE
 `fact_relation`, moving the old revision to `superseded`. Assertion withdrawal sets
 `state=withdrawn` and appends `ASSERTION_WITHDRAWN`; it does not delete the row.
 
-The ledger is a projection-friendly source of the semantic change feed but is not itself the
-authoritative Fact state; the `facts`, `assertions`, and `evidence` tables are.
+The ledger feeds the semantic change projection. The `facts`, `assertions`, and `evidence`
+tables hold authoritative Fact state.
+
+## Implementation status
+
+The event ledger is append-only. Current lifecycle and aggregate fields are updated in place,
+so the ledger lacks enough row data to reconstruct arbitrary earlier system states. Knowledge
+snapshots provide reproducibility from their creation boundary by copying fact, provenance,
+chunk, and vector retrieval inputs. Full immutable Fact revisions remain future work.
 
 ## Consequences
 
 - Full auditability and a semantic change feed for the Workbench.
-- Reproducible as-of queries: system-time intervals plus the ledger reconstruct any past
-  state.
+- Reproducible retrieval from an explicitly created snapshot boundary.
 - Write amplification on hot facts; bounded by monthly partitioning and by emitting one event
   per semantic transition, not per row touch.

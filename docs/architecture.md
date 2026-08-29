@@ -165,12 +165,16 @@ model occasionally makes a corrupting false merge.
 
 ## Temporal model
 
-Facts are bi-temporal (`valid_at`, `invalid_at`). A search defaults to "as of now", hiding
-superseded and retracted facts; an explicit `as_of` returns the memory as it stood at that
-instant.
+Facts carry valid-time boundaries. A search defaults to "as of now", hiding superseded and
+retracted facts; an explicit `as_of` filters the authoritative revisions currently stored.
+Knowledge snapshots add the system-time boundary by copying retrieval inputs in one
+repeatable-read transaction. They pin the retrieval index, embedding, ontology, policy, and
+assembler contract; the assembler version includes its scoring weights and packing behavior.
+Writers from the preceding release may finish an unsealed snapshot during a rolling deploy,
+but current readers fail closed rather than treating its incomplete inputs as reproducible.
 
-**Supersession** invalidates the old fact rather than deleting it, so history stays
-queryable. One policy governs both the structured and free-text paths: a functional predicate
+**Supersession** retains the old fact row and changes its lifecycle. One policy governs both
+the structured and free-text paths: a functional predicate
 (one value at a time, e.g. `RUNS_ON`) supersedes every earlier value; a multi-valued
 predicate keeps coexisting values unless an LLM contradiction judge marks one as replaced.
 
@@ -178,8 +182,9 @@ predicate keeps coexisting values unless an LLM contradiction judge marks one as
 
 A published source can be withdrawn end to end (edges removed from the graph, graph maps
 cleared, episode marked retracted and skipped by a rebuild). Erasure additionally deletes the
-episode row and its raw artifact bytes for data-subject requests. Every retraction is
-audited; Postgres commits first, then the graph and object store.
+episode row, its raw artifact bytes, live chunks and evidence, and any immutable snapshot or
+context-pack copies that cite those inputs. Every retraction is audited; Postgres commits
+first, then the graph and object store.
 
 That post-commit cleanup is made durable so a crash cannot strand a graph edge or, worse,
 leave erased bytes behind. The same transaction that commits the retraction also enqueues a

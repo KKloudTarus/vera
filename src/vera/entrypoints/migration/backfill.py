@@ -210,7 +210,7 @@ class FabricBackfillService:
         # a NULL version as distinct, so guard on the per-episode extraction run id instead.
         run_id = f"backfill:{row['source_id']}"
         already = await self._assertions.active_for_fact(group_id=group_id, fact_id=str(fact.id))
-        if any(a.extraction_run_id == run_id for a in already):
+        if any(a.run_key == run_id for a in already):
             return
 
         version_id = UUID(str(row["artifact_version_id"])) if row["artifact_version_id"] else None
@@ -226,7 +226,7 @@ class FabricBackfillService:
                 verification_state=row["verification"],
                 observed_at=now,
                 recorded_at=now,
-                extraction_run_id=run_id,
+                run_key=run_id,
             )
         )
         report.assertions_created += 1

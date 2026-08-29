@@ -22,7 +22,14 @@ _EXPECTED = {
     "memory_feedback",
     # Generic knowledge_* contracts (Phase 6).
     "knowledge_get_context",
+    "knowledge_get_context_pack",
+    "knowledge_get_community_lineage",
     "knowledge_search",
+    "knowledge_search_communities",
+    "knowledge_get_fact",
+    "knowledge_get_entity",
+    "knowledge_get_source",
+    "knowledge_explore",
     "knowledge_explain_fact",
     "knowledge_get_evidence",
     "knowledge_feedback",
@@ -54,6 +61,12 @@ def test_local_server_uses_stable_principal_without_jwt() -> None:
     )
 
     assert mcp_main._principal_id(settings) == principal_id
+
+
+def test_mcp_timestamps_require_an_offset() -> None:
+    with pytest.raises(ValueError, match="UTC offset"):
+        mcp_main._parse_instant("2026-01-02T03:04:05")
+    assert mcp_main._parse_instant("2026-01-02T03:04:05Z") is not None
 
 
 def test_jwt_server_never_falls_back_to_local_principal(

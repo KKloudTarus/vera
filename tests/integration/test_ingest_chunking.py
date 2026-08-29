@@ -35,17 +35,31 @@ class _PerChunkExtractor:
     def __init__(self) -> None:
         self.bodies: list[str] = []
 
+    @property
+    def provider(self) -> str:
+        return "test"
+
+    @property
+    def model(self) -> str:
+        return "per-chunk"
+
     async def extract(
         self, *, body: str, knowledge_type: str, metadata: object
     ) -> list[ExtractedClaim]:
         self.bodies.append(body)
         n = len(self.bodies)
+        lines = body.strip().splitlines()
+        quote = lines[-1] if lines else None
+        start = body.index(quote) if quote is not None else None
         return [
             ExtractedClaim(
                 statement=f"svc{n} RUNS_ON obj{n}",
                 subject=f"svc{n}",
                 predicate="RUNS_ON",
                 object=f"obj{n}",
+                source_quote=quote,
+                quote_start=start,
+                quote_end=start + len(quote) if start is not None and quote is not None else None,
             )
         ]
 
@@ -157,3 +171,45 @@ async def test_structured_ingest_extracts_once_from_metadata(
         await uow.commit()
     # Structured triples come from metadata: one whole-payload extract call, no chunk loop.
     assert len(extractor.bodies) == 1
+
+
+async def test_structured_document_quote_is_rebased_to_its_chunk(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    group = f"p:i-{uuid7().hex[:12]}"
+    source_id = await _source(sessionmaker, group, tier=3)
+    extractor = _PerChunkExtractor()
+    body = "# Runtime\n\nVera stores facts in PostgreSQL.\n"
+    async with SqlAlchemyUnitOfWork(sessionmaker) as uow:
+        await uow.use_tenant(group)
+        result = await CurationService(uow, extractor).ingest_artifact(
+            IngestArtifact(
+                source_id=source_id,
+                group_id=group,
+                external_id="cmdb-cited",
+                body=body,
+                knowledge_type="fact_triple",
+                metadata={"triples": [{"subject": "a", "predicate": "RUNS_ON", "object": "b"}]},
+            )
+        )
+        await uow.commit()
+
+    async with _tenant(sessionmaker, group) as s:
+        row = (
+            (
+                await s.execute(
+                    text(
+                        "SELECT cc.source_quote, cc.quote_start, cc.quote_end, cc.quote_hash, "
+                        "cc.needs_review, c.text FROM candidate_claims cc "
+                        "JOIN chunks c ON c.id = cc.chunk_id "
+                        "WHERE cc.group_id = :g AND cc.id = :id"
+                    ),
+                    {"g": group, "id": result.value.claim_ids[0]},
+                )
+            )
+            .mappings()
+            .one()
+        )
+    assert row["text"][row["quote_start"] : row["quote_end"]] == row["source_quote"]
+    assert row["quote_hash"] is not None
+    assert row["needs_review"] is False

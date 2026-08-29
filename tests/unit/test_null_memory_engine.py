@@ -9,5 +9,5 @@ from vera.adapters.graph.null import NullMemoryEngine
 pytestmark = pytest.mark.asyncio
 
 
-async def test_build_communities_is_a_noop_returning_zero() -> None:
-    assert await NullMemoryEngine().build_communities(group_id="p:x") == 0
+async def test_build_communities_is_a_noop_returning_no_rows() -> None:
+    assert await NullMemoryEngine().build_communities(group_id="p:x") == ()

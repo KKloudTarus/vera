@@ -14,6 +14,7 @@ import asyncio
 import math
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Literal
 
 from vera.domain.ports.retrieval_index import (
     CodeIndex,
@@ -21,8 +22,10 @@ from vera.domain.ports.retrieval_index import (
     FactHit,
     PassageHit,
     PassageIndex,
+    RetrievalFilters,
 )
 from vera.shared.time import utc_now
+from vera.shared.types import JsonDict
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,11 +43,21 @@ class RetrievalWeights:
 class Citation:
     kind: str  # 'fact' | 'passage' | 'code'
     ref: str  # fact_key or chunk_id
+    evidence_id: str | None = None
+    assertion_id: str | None = None
+    source_id: str | None = None
     excerpt: str | None = None
+    chunk_id: str | None = None
     heading_path: str | None = None
     artifact_version_id: str | None = None
     start_offset: int | None = None
     end_offset: int | None = None
+    quote_hash: str | None = None
+    content_hash: str | None = None
+    extraction_run_id: str | None = None
+    source_coordinates: JsonDict | None = None
+    structured_record: JsonDict | None = None
+    citation_uri: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,7 +126,24 @@ def _from_fact(hit: FactHit) -> _Candidate:
         confidence=hit.confidence,
         source_key=source_key,
         conflict=hit.lifecycle_state == "disputed",
-        citation=Citation(kind="fact", ref=hit.fact_key, excerpt=hit.text),
+        citation=Citation(
+            kind="fact",
+            ref=hit.fact_key,
+            evidence_id=hit.evidence_id,
+            assertion_id=hit.evidence_assertion_id,
+            source_id=hit.evidence_source_id,
+            excerpt=hit.evidence_excerpt,
+            chunk_id=hit.evidence_chunk_id,
+            artifact_version_id=hit.evidence_artifact_version_id,
+            start_offset=hit.evidence_start_offset,
+            end_offset=hit.evidence_end_offset,
+            quote_hash=hit.evidence_quote_hash,
+            content_hash=hit.evidence_content_hash,
+            extraction_run_id=hit.evidence_extraction_run_id,
+            source_coordinates=hit.evidence_source_coordinates,
+            structured_record=hit.evidence_structured_record,
+            citation_uri=hit.evidence_citation_uri,
+        ),
         recency_ts=hit.valid_from,
     )
 
@@ -135,10 +165,12 @@ def _from_passage(hit: PassageHit, kind: str) -> _Candidate:
             kind=kind,
             ref=hit.chunk_id,
             excerpt=excerpt,
+            chunk_id=hit.chunk_id,
             heading_path=hit.heading_path,
             artifact_version_id=hit.artifact_version_id,
             start_offset=hit.start_offset,
             end_offset=hit.end_offset,
+            content_hash=hit.content_hash,
         ),
     )
 
@@ -218,7 +250,7 @@ def _diversify(scored: list[ScoredCandidate], decay: float) -> list[ScoredCandid
     """
     seen: dict[str, int] = {}
     adjusted: list[ScoredCandidate] = []
-    for c in sorted(scored, key=lambda x: x.score, reverse=True):
+    for c in sorted(scored, key=lambda x: (-x.score, x.kind, x.ref)):
         n = seen.get(c.source_key, 0)
         factor = decay**n
         seen[c.source_key] = n + 1
@@ -235,20 +267,27 @@ def _diversify(scored: list[ScoredCandidate], decay: float) -> list[ScoredCandid
                 reason=c.reason,
             )
         )
-    return sorted(adjusted, key=lambda x: x.score, reverse=True)
+    return sorted(adjusted, key=lambda x: (-x.score, x.kind, x.ref))
 
 
 def _pack(
-    scored: list[ScoredCandidate], limit: int, token_budget: int
+    scored: list[ScoredCandidate],
+    limit: int,
+    token_budget: int,
+    *,
+    include_citation_excerpts: bool = True,
 ) -> tuple[list[ScoredCandidate], int, int]:
     packed: list[ScoredCandidate] = []
     tokens = 0
     for c in scored:
         if len(packed) >= limit:
             break
-        cost = _estimate_tokens(c.text)
-        if packed and tokens + cost > token_budget:
-            break
+        content = c.text
+        if include_citation_excerpts and c.citation.excerpt:
+            content = f"{content}\n{c.citation.excerpt}"
+        cost = _estimate_tokens(content)
+        if tokens + cost > token_budget:
+            continue
         packed.append(c)
         tokens += cost
     return packed, len(scored) - len(packed), tokens
@@ -277,35 +316,74 @@ class ContextAssembler:
         token_budget: int = 2000,
         as_of: datetime | None = None,
         snapshot_fact_ids: set[str] | None = None,
+        snapshot_id: str | None = None,
         passage_cutoff: datetime | None = None,
+        filters: RetrievalFilters | None = None,
+        citation_mode: Literal["full", "compact"] = "full",
     ) -> AssembledContext:
         k = max(limit * 4, 20)
-        fact_hits, passage_hits, code_hits = await asyncio.gather(
-            self._facts.search(
-                group_id=group_id,
-                query=query,
-                limit=k,
-                as_of=as_of,
-                restrict_fact_ids=snapshot_fact_ids,
-            ),
-            self._passages.search(
-                group_id=group_id, query=query, limit=k, created_before=passage_cutoff
-            ),
-            self._code.search(
-                group_id=group_id, query=query, limit=k, created_before=passage_cutoff
-            ),
-        )
+        async with asyncio.TaskGroup() as group:
+            facts_task = group.create_task(
+                self._facts.search(
+                    group_id=group_id,
+                    query=query,
+                    limit=k,
+                    as_of=as_of,
+                    restrict_fact_ids=snapshot_fact_ids,
+                    snapshot_id=snapshot_id,
+                    filters=filters,
+                )
+            )
+            passages_task = group.create_task(
+                self._passages.search(
+                    group_id=group_id,
+                    query=query,
+                    limit=k,
+                    created_before=passage_cutoff,
+                    snapshot_id=snapshot_id,
+                    filters=filters,
+                )
+            )
+            code_task = group.create_task(
+                self._code.search(
+                    group_id=group_id,
+                    query=query,
+                    limit=k,
+                    created_before=passage_cutoff,
+                    snapshot_id=snapshot_id,
+                    filters=filters,
+                )
+            )
+        fact_hits = facts_task.result()
+        passage_hits = passages_task.result()
+        code_hits = code_task.result()
         candidates = [
             *(_from_fact(h) for h in fact_hits),
             *(_from_passage(h, "passage") for h in passage_hits),
             *(_from_passage(h, "code") for h in code_hits),
         ]
+        if filters is not None:
+            if filters.min_authority is not None:
+                candidates = [
+                    candidate
+                    for candidate in candidates
+                    if candidate.authority >= filters.min_authority
+                ]
+            if filters.conflict_handling == "exclude":
+                candidates = [candidate for candidate in candidates if not candidate.conflict]
+            elif filters.conflict_handling == "only":
+                candidates = [candidate for candidate in candidates if candidate.conflict]
         candidates = _dedup(candidates)
-        now = utc_now()
+        now = passage_cutoff or utc_now()
         scored = _diversify(
             _score_all(candidates, self._weights, now=now), self._weights.diversity_decay
         )
-        packed, omitted, tokens = _pack(scored, limit, token_budget)
+        packed, omitted, tokens = _pack(
+            scored,
+            limit,
+            token_budget,
+            include_citation_excerpts=citation_mode == "full",
+        )
         return AssembledContext(
             query=query,
             results=packed,

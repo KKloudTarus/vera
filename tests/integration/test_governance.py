@@ -183,6 +183,33 @@ async def test_ontology_lists_predicate_policies(
     assert body["ontology_version"] >= 1
     runs_on = next(p for p in body["predicates"] if p["predicate"] == "RUNS_ON")
     assert runs_on["cardinality"] == "one_per_qualifier_set"
+    assert runs_on["subject_types"] == ["Service"]
+    assert runs_on["object_types"] == ["Environment"]
+    assert runs_on["minimum_source_authority"] == 0.7
+
+    diff = await app_client.get("/v2/knowledge/ontology/diff?from=1&to=2", headers=_auth(admin_key))
+    assert diff.status_code == 200
+    report = diff.json()
+    assert report["from_version"] == 1
+    assert report["to_version"] == 2
+    assert "RUNS_ON" in report["predicate_policies_changed"]
+
+
+async def test_community_reads_are_scoped_and_missing_lineage_is_not_found(
+    app_client: AsyncClient,
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    group, admin_key, _ = await _tenancy(sessionmaker)
+    summaries = await app_client.get(
+        f"/v2/knowledge/communities?project={group}", headers=_auth(admin_key)
+    )
+    assert summaries.status_code == 200
+    assert summaries.json() == []
+
+    lineage = await app_client.get(
+        f"/v2/knowledge/communities/{uuid4()}/lineage", headers=_auth(admin_key)
+    )
+    assert lineage.status_code == 404
 
 
 async def test_get_evidence_endpoint(

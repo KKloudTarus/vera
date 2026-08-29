@@ -6,14 +6,14 @@ in the adapters layer.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Protocol
 from uuid import UUID
 
 from vera.domain.curation.models import ArtifactHead, ArtifactRef, ClaimRecord
 from vera.domain.knowledge.models import ClaimType, VerificationStatus
-from vera.shared.types import JsonDict
+from vera.shared.types import JsonDict, empty_json
 
 
 @dataclass(frozen=True, slots=True)
@@ -23,7 +23,13 @@ class ExtractedClaim:
     subject: str | None = None
     predicate: str | None = None
     object: str | None = None
+    subject_entity_type: str | None = None
+    object_entity_type: str | None = None
+    qualifiers: JsonDict = field(default_factory=empty_json)
     confidence: float | None = None
+    source_quote: str | None = None
+    quote_start: int | None = None
+    quote_end: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,6 +40,12 @@ class SourceRecord:
 
 
 class ClaimExtractor(Protocol):
+    @property
+    def provider(self) -> str: ...
+
+    @property
+    def model(self) -> str: ...
+
     async def extract(
         self, *, body: str, knowledge_type: str, metadata: JsonDict
     ) -> list[ExtractedClaim]:
@@ -88,6 +100,10 @@ class ArtifactRepository(Protocol):
         content_hash: str,
         s3_key: str,
         reference_time: datetime,
+        source_revision: int | None = None,
+        source_updated_at: datetime | None = None,
+        source_version_id: str | None = None,
+        observed_at: datetime | None = None,
     ) -> ArtifactRef: ...
 
     async def get_head(self, *, source_id: UUID, external_id: str) -> ArtifactHead | None:
@@ -101,6 +117,10 @@ class ArtifactRepository(Protocol):
         content_hash: str,
         s3_key: str,
         reference_time: datetime,
+        source_revision: int | None = None,
+        source_updated_at: datetime | None = None,
+        source_version_id: str | None = None,
+        observed_at: datetime | None = None,
     ) -> ArtifactRef:
         """Append a new version to an existing artifact and make it current."""
         ...
@@ -108,7 +128,15 @@ class ArtifactRepository(Protocol):
 
 class CandidateClaimRepository(Protocol):
     async def create(
-        self, *, artifact_version_id: UUID, group_id: str, claim: ExtractedClaim
+        self,
+        *,
+        artifact_version_id: UUID,
+        group_id: str,
+        claim: ExtractedClaim,
+        extraction_run_id: UUID | None = None,
+        chunk_id: UUID | None = None,
+        quote_hash: str | None = None,
+        needs_review: bool = False,
     ) -> ClaimRecord: ...
 
     async def get(self, claim_id: UUID) -> ClaimRecord | None: ...

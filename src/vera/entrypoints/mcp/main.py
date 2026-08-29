@@ -14,7 +14,8 @@ from __future__ import annotations
 
 import contextlib
 from collections.abc import AsyncGenerator
-from typing import Any
+from datetime import datetime
+from typing import Any, Literal
 from uuid import UUID
 
 from mcp.server.auth.middleware.auth_context import get_access_token
@@ -39,6 +40,15 @@ from vera.entrypoints.mcp.service import VeraMcpService
 from vera.observability import configure_logging, get_logger
 
 log = get_logger(__name__)
+
+
+def _parse_instant(value: str | None) -> datetime | None:
+    if value is None:
+        return None
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.utcoffset() is None:
+        raise ValueError("timestamp must include a UTC offset")
+    return parsed
 
 
 def _uses_local_principal(settings: Settings) -> bool:
@@ -204,18 +214,48 @@ def build_server(container: Container, settings: Settings) -> MCPServer:
 
     @server.tool()
     async def knowledge_get_context(
-        query: str, project: str | None = None, snapshot_id: str | None = None, limit: int = 10
+        query: str,
+        project: str | None = None,
+        snapshot_id: str | None = None,
+        as_of: str | None = None,
+        repository: str | None = None,
+        branch: str | None = None,
+        code_path: str | None = None,
+        document_type: str | None = None,
+        source_type: str | None = None,
+        include_predicates: list[str] | None = None,
+        exclude_predicates: list[str] | None = None,
+        min_authority: float | None = None,
+        max_trust_tier: int | None = None,
+        citation_mode: Literal["full", "compact"] = "full",
+        conflict_handling: Literal["include", "exclude", "only"] = "include",
+        limit: int = 10,
+        token_budget: int = 2000,
     ) -> dict[str, Any]:
         """Primary tool: assemble a bounded, cited context pack for a task from the caller's
-        scopes. Pass `snapshot_id` for a reproducible view; `project` selects among the
-        caller's scopes when they span more than one.
+        scopes. `project` accepts a resolved group id or project slug. Snapshot and valid-time
+        boundaries, code/source filters, predicate and trust policy, citation detail, and
+        conflict handling are persisted in the immutable pack request.
         """
         return await get_knowledge().get_context(
             _principal_id(settings),
             query=query,
             project=project,
             snapshot_id=snapshot_id,
+            as_of=_parse_instant(as_of),
+            repository=repository,
+            branch=branch,
+            code_path=code_path,
+            document_type=document_type,
+            source_type=source_type,
+            include_predicates=tuple(include_predicates or ()),
+            exclude_predicates=tuple(exclude_predicates or ()),
+            min_authority=min_authority,
+            max_trust_tier=max_trust_tier,
+            citation_mode=citation_mode,
+            conflict_handling=conflict_handling,
             limit=limit,
+            token_budget=token_budget,
         )
 
     @server.tool()
@@ -225,6 +265,66 @@ def build_server(container: Container, settings: Settings) -> MCPServer:
         """Combined, cited search over facts and passages in the caller's scopes."""
         return await get_knowledge().search(
             _principal_id(settings), query=query, project=project, limit=limit
+        )
+
+    @server.tool()
+    async def knowledge_search_communities(
+        query: str = "", project: str | None = None, limit: int = 20
+    ) -> list[dict[str, Any]]:
+        """Search LLM-derived community summaries. Results are explicitly non-authoritative;
+        use their PostgreSQL lineage to inspect the supporting facts.
+        """
+        return await get_knowledge().communities(
+            _principal_id(settings), project=project, query=query or None, limit=limit
+        )
+
+    @server.tool()
+    async def knowledge_get_community_lineage(
+        community_id: str,
+        derivation_run_id: str | None = None,
+        cursor: str | None = None,
+        limit: int = 50,
+    ) -> dict[str, Any] | None:
+        """Return a page of authoritative facts behind a derived community summary."""
+        return await get_knowledge().community_lineage(
+            _principal_id(settings),
+            community_id=community_id,
+            derivation_run_id=derivation_run_id,
+            cursor=cursor,
+            limit=limit,
+        )
+
+    @server.tool()
+    async def knowledge_get_context_pack(pack_id: str) -> dict[str, Any] | None:
+        """Retrieve a previously persisted immutable context pack. This tool never creates or
+        recomputes a pack.
+        """
+        return await get_knowledge().get_context_pack(_principal_id(settings), pack_id=pack_id)
+
+    @server.tool()
+    async def knowledge_get_fact(fact_key: str) -> dict[str, Any] | None:
+        """Return one authoritative fact in the caller's server-resolved scopes."""
+        return await get_knowledge().get_fact(_principal_id(settings), fact_key=fact_key)
+
+    @server.tool()
+    async def knowledge_get_entity(entity_id: str, limit: int = 100) -> dict[str, Any] | None:
+        """Return an entity, its aliases, and related facts."""
+        return await get_knowledge().get_entity(
+            _principal_id(settings), entity_id=entity_id, limit=limit
+        )
+
+    @server.tool()
+    async def knowledge_get_source(source_id: str) -> dict[str, Any] | None:
+        """Return a source, artifact versions, and freshness metadata."""
+        return await get_knowledge().get_source(_principal_id(settings), source_id=source_id)
+
+    @server.tool()
+    async def knowledge_explore(
+        entity: str, depth: int = 2, limit: int = 20
+    ) -> list[dict[str, Any]]:
+        """Traverse the entity's graph neighborhood with provenance."""
+        return await get_service().explore(
+            _principal_id(settings), entity=entity, depth=depth, limit=limit
         )
 
     @server.tool()

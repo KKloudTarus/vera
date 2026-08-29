@@ -21,13 +21,15 @@ artifact so removing this artifact's support never touches another artifact's as
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass, field
-from datetime import datetime
+import json
+from dataclasses import dataclass, field, replace
+from datetime import datetime, timedelta
 from uuid import UUID
 
 from vera.domain.curation.trust import TrustAction, action_for_tier
 from vera.domain.knowledge.fabric import (
     Assertion,
+    AssertionState,
     Evidence,
     Fact,
     FactLifecycle,
@@ -41,10 +43,17 @@ from vera.domain.knowledge.fabric import (
     normalize_object,
     slot_key,
 )
-from vera.domain.ontology.policy import AbsenceSemantics, Cardinality, policy_for
+from vera.domain.ontology.policy import (
+    AbsenceSemantics,
+    Cardinality,
+    governance_violations,
+    policy_for,
+)
+from vera.domain.ontology.registry import ONTOLOGY_VERSION
 from vera.domain.ports.fabric import (
     AssertionRepository,
     EvidenceRepository,
+    FactExpiryRepository,
     FactRelationRepository,
     FactRepository,
     KnowledgeEventLog,
@@ -53,7 +62,7 @@ from vera.shared.ids import uuid7
 from vera.shared.time import utc_now
 from vera.shared.types import JsonDict, empty_json
 
-_POLICY_VERSION = "ontology-v1"
+_POLICY_VERSION = f"ontology-v{ONTOLOGY_VERSION}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,12 +74,19 @@ class ResolvedProposition:
     polarity: Polarity = Polarity.SUPPORTS
     object_entity_id: UUID | None = None
     object_scalar: str | None = None
+    subject_entity_type: str | None = None
+    object_entity_type: str | None = None
     qualifiers: JsonDict = field(default_factory=empty_json)
     extractor_confidence: float = 0.0
     chunk_id: UUID | None = None
     excerpt: str | None = None
     citation_uri: str | None = None
     evidence_content_hash: str | None = None
+    structured_record: JsonDict | None = None
+    quote_start: int | None = None
+    quote_end: int | None = None
+    needs_review: bool = False
+    governance_errors: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,13 +95,12 @@ class ArtifactReconciliation:
     source_authority: float
     trust_tier: int
     propositions: list[ResolvedProposition]
-    # Optional: a live episode with no materialized artifact version leaves this None and
-    # dedups its assertions by extraction_run_id instead of the (fact, version) key.
     artifact_version_id: UUID | None = None
     knowledge_source_id: UUID | None = None
     artifact_id: UUID | None = None
     ontology_version_id: UUID | None = None
-    extraction_run_id: str | None = None
+    extraction_run_id: UUID | None = None
+    run_key: str | None = None
     actor: str | None = None
     trace_id: str | None = None
 
@@ -96,10 +111,43 @@ class ReconciliationReport:
     facts_disputed: int = 0
     facts_superseded: int = 0
     facts_retracted: int = 0
+    facts_expired: int = 0
     assertions_added: int = 0
     assertions_reaffirmed: int = 0
     assertions_withdrawn: int = 0
     evidence_added: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class FactExpiryReport:
+    expired: int
+    group_ids: tuple[str, ...]
+
+
+class FactExpiryService:
+    def __init__(self, *, facts: FactExpiryRepository, events: KnowledgeEventLog) -> None:
+        self._facts = facts
+        self._events = events
+
+    async def run(self, *, at: datetime | None = None, limit: int = 1000) -> FactExpiryReport:
+        now = at or utc_now()
+        expired = await self._facts.expire_due(at=now, limit=limit)
+        for fact in expired:
+            await self._events.append(
+                KnowledgeEvent(
+                    id=uuid7(),
+                    group_id=fact.group_id,
+                    event_type=KnowledgeEventType.FACT_EXPIRED,
+                    occurred_at=now,
+                    actor="ontology-ttl",
+                    fact_id=fact.id,
+                    reason="ontology freshness TTL elapsed",
+                    policy_version=_POLICY_VERSION,
+                )
+            )
+        return FactExpiryReport(
+            expired=len(expired), group_ids=tuple(sorted({fact.group_id for fact in expired}))
+        )
 
 
 class ReconciliationService:
@@ -119,14 +167,33 @@ class ReconciliationService:
         self._events = events
 
     async def reconcile(self, req: ArtifactReconciliation) -> ReconciliationReport:
+        req = replace(
+            req,
+            propositions=[self._governed(req, proposition) for proposition in req.propositions],
+        )
         report = ReconciliationReport()
         now = utc_now()
+        advances_source = not req.propositions or any(
+            not prop.needs_review for prop in req.propositions
+        )
+        if action_for_tier(req.trust_tier) is TrustAction.AUTO_PUBLISH and advances_source:
+            reaffirmed_fact_ids: set[UUID] = set()
+            for prop in req.propositions:
+                if prop.needs_review or prop.polarity is not Polarity.SUPPORTS:
+                    continue
+                existing = await self._facts.active_by_fact_key(
+                    group_id=req.group_id, fact_key=_fact_key(req.group_id, prop)
+                )
+                if existing is not None:
+                    reaffirmed_fact_ids.add(existing.id)
+            touched = await self._withdraw_dropped(req, now, report)
+            for fact_id in touched - reaffirmed_fact_ids:
+                await self._transition_if_unsupported(req, fact_id, now, report)
         for prop in req.propositions:
             if prop.polarity is Polarity.REFUTES:
                 await self._handle_refute(req, prop, now, report)
             else:
                 await self._handle_support(req, prop, now, report)
-        await self._withdraw_dropped(req, now, report)
         return report
 
     # ---------------------------------------------------------------- support ---
@@ -145,6 +212,13 @@ class ReconciliationService:
         else:
             fact = await self._create_fact(req, prop, fk, now, report)
         await self._attach_assertion(req, fact, prop, Polarity.SUPPORTS, now, report)
+        ttl = policy_for(prop.predicate).ttl_seconds
+        if ttl is not None and not prop.needs_review:
+            await self._facts.set_expiry(
+                group_id=req.group_id,
+                fact_id=str(fact.id),
+                expires_at=now + timedelta(seconds=ttl),
+            )
         await self._recompute_aggregates(req, fact.id, now)
 
     async def _create_fact(
@@ -156,7 +230,7 @@ class ReconciliationService:
         report: ReconciliationReport,
     ) -> Fact:
         policy = policy_for(prop.predicate)
-        auto = action_for_tier(req.trust_tier) is TrustAction.AUTO_PUBLISH
+        auto = action_for_tier(req.trust_tier) is TrustAction.AUTO_PUBLISH and not prop.needs_review
         sk = _slot_key(req.group_id, prop)
         lifecycle = FactLifecycle.ACTIVE if auto else FactLifecycle.PROPOSED
 
@@ -172,7 +246,7 @@ class ReconciliationService:
                     req, rivals, now, report
                 )
 
-        fact = self._new_fact(req, prop, fk, sk, lifecycle)
+        fact = self._new_fact(req, prop, fk, sk, lifecycle, now)
         if lifecycle is FactLifecycle.ACTIVE:
             fact = await self._facts.upsert(fact)
             await self._emit(req, KnowledgeEventType.FACT_ACTIVATED, now, fact_id=fact.id)
@@ -241,7 +315,9 @@ class ReconciliationService:
         fk: str,
         sk: str,
         lifecycle: FactLifecycle,
+        now: datetime,
     ) -> Fact:
+        ttl = policy_for(prop.predicate).ttl_seconds
         return Fact(
             id=uuid7(),
             group_id=req.group_id,
@@ -257,6 +333,9 @@ class ReconciliationService:
             lifecycle_state=lifecycle,
             authority=req.source_authority,
             confidence=prop.extractor_confidence,
+            expires_at=(
+                now + timedelta(seconds=ttl) if ttl is not None and not prop.needs_review else None
+            ),
             ontology_version_id=req.ontology_version_id,
         )
 
@@ -274,6 +353,8 @@ class ReconciliationService:
         if target is None:
             return  # nothing to refute; a refutation does not fabricate the fact it denies
         await self._attach_assertion(req, target, prop, Polarity.REFUTES, now, report)
+        if prop.needs_review:
+            return
         if req.source_authority >= target.authority:
             await self._facts.set_lifecycle(
                 group_id=req.group_id, fact_id=str(target.id), state=FactLifecycle.DISPUTED
@@ -319,6 +400,8 @@ class ReconciliationService:
                 observed_at=now,
                 recorded_at=now,
                 extraction_run_id=req.extraction_run_id,
+                run_key=req.run_key,
+                state=(AssertionState.NEEDS_REVIEW if prop.needs_review else AssertionState.ACTIVE),
             )
         )
         if prior:
@@ -328,6 +411,7 @@ class ReconciliationService:
                 now,
                 fact_id=fact.id,
                 assertion_id=assertion.id,
+                reason="; ".join(prop.governance_errors) or None,
             )
             report.assertions_reaffirmed += 1
         else:
@@ -337,6 +421,7 @@ class ReconciliationService:
                 now,
                 fact_id=fact.id,
                 assertion_id=assertion.id,
+                reason="; ".join(prop.governance_errors) or None,
             )
             report.assertions_added += 1
         await self._add_evidence(req, assertion.id, prop, now, report)
@@ -349,10 +434,26 @@ class ReconciliationService:
         now: datetime,
         report: ReconciliationReport,
     ) -> None:
-        content = prop.excerpt or (str(prop.chunk_id) if prop.chunk_id else None)
-        if content is None:
+        if prop.needs_review:
             return
-        content_hash = prop.evidence_content_hash or hashlib.sha256(content.encode()).hexdigest()
+        content = prop.excerpt
+        if content is None and prop.structured_record is None and prop.citation_uri is None:
+            return
+        if prop.chunk_id is not None and (
+            prop.quote_start is None or prop.quote_end is None or prop.evidence_content_hash is None
+        ):
+            return
+        if content is not None:
+            evidence_bytes = content.encode()
+        elif prop.structured_record is not None:
+            evidence_bytes = json.dumps(
+                prop.structured_record, sort_keys=True, separators=(",", ":")
+            ).encode()
+        else:
+            if prop.citation_uri is None:
+                return
+            evidence_bytes = prop.citation_uri.encode()
+        content_hash = prop.evidence_content_hash or hashlib.sha256(evidence_bytes).hexdigest()
         before = await self._evidence.for_assertion(
             group_id=req.group_id, assertion_id=str(assertion_id)
         )
@@ -364,8 +465,14 @@ class ReconciliationService:
                 content_hash=content_hash,
                 chunk_id=prop.chunk_id,
                 artifact_version_id=req.artifact_version_id,
+                structured_record=prop.structured_record,
                 excerpt=prop.excerpt,
                 citation_uri=prop.citation_uri,
+                quote_start=prop.quote_start,
+                quote_end=prop.quote_end,
+                quote_hash=prop.evidence_content_hash,
+                citation_override=prop.citation_uri,
+                extraction_run_id=req.extraction_run_id,
             )
         )
         if all(e.id != added.id for e in before):
@@ -395,12 +502,10 @@ class ReconciliationService:
 
     async def _withdraw_dropped(
         self, req: ArtifactReconciliation, now: datetime, report: ReconciliationReport
-    ) -> None:
-        """Withdraw this artifact's assertions from earlier versions (a new version supersedes
-        an old one), then transition any fact left with no active support per its policy.
-        """
+    ) -> set[UUID]:
+        """Withdraw prior versions before evaluating the incoming version's propositions."""
         if req.artifact_id is None:
-            return
+            return set()
         stale = [
             a
             for a in await self._assertions.active_for_artifact(
@@ -420,8 +525,7 @@ class ReconciliationService:
             )
             report.assertions_withdrawn += 1
             touched.add(assertion.fact_id)
-        for fact_id in touched:
-            await self._transition_if_unsupported(req, fact_id, now, report)
+        return touched
 
     async def _transition_if_unsupported(
         self,
@@ -450,20 +554,39 @@ class ReconciliationService:
             AbsenceSemantics.REVIEW: FactLifecycle.DISPUTED,
         }[semantics]
         await self._facts.set_lifecycle(group_id=req.group_id, fact_id=str(fact_id), state=state)
-        event = (
-            KnowledgeEventType.FACT_DISPUTED
-            if state is FactLifecycle.DISPUTED
-            else KnowledgeEventType.FACT_RETRACTED
-        )
+        event = {
+            FactLifecycle.DISPUTED: KnowledgeEventType.FACT_DISPUTED,
+            FactLifecycle.EXPIRED: KnowledgeEventType.FACT_EXPIRED,
+            FactLifecycle.RETRACTED: KnowledgeEventType.FACT_RETRACTED,
+        }[state]
         await self._emit(
             req, event, now, fact_id=fact_id, reason="final supporting assertion withdrawn"
         )
         if state is FactLifecycle.DISPUTED:
             report.facts_disputed += 1
+        elif state is FactLifecycle.EXPIRED:
+            report.facts_expired += 1
         else:
             report.facts_retracted += 1
 
     # ------------------------------------------------------------------ utils ---
+
+    @staticmethod
+    def _governed(req: ArtifactReconciliation, prop: ResolvedProposition) -> ResolvedProposition:
+        violations = governance_violations(
+            policy_for(prop.predicate),
+            subject_type=prop.subject_entity_type,
+            object_type=prop.object_entity_type,
+            qualifiers=prop.qualifiers,
+            source_authority=req.source_authority,
+        )
+        if not violations:
+            return prop
+        return replace(
+            prop,
+            needs_review=True,
+            governance_errors=tuple(dict.fromkeys((*prop.governance_errors, *violations))),
+        )
 
     async def _emit(
         self,

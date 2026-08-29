@@ -10,17 +10,20 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import timedelta
 from uuid import UUID
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import exc, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from vera.adapters.persistence.models.knowledge import ArtifactRow, ArtifactVersionRow
 from vera.adapters.persistence.repositories import (
     SqlAlchemyAssertionRepository,
     SqlAlchemyCanonicalEntityRepository,
+    SqlAlchemyCommunityLineageRepository,
     SqlAlchemyEvidenceRepository,
+    SqlAlchemyFactExpiryRepository,
     SqlAlchemyFactRelationRepository,
     SqlAlchemyFactRepository,
     SqlAlchemyKnowledgeEventLog,
@@ -28,6 +31,7 @@ from vera.adapters.persistence.repositories import (
 from vera.adapters.persistence.unit_of_work import SqlAlchemyUnitOfWork
 from vera.application.curation.reconciliation import (
     ArtifactReconciliation,
+    FactExpiryService,
     ReconciliationService,
     ResolvedProposition,
 )
@@ -125,6 +129,8 @@ def _runs_on(
         subject_entity_id=subject,
         predicate="RUNS_ON",
         object_scalar=obj,
+        subject_entity_type="Service",
+        object_entity_type="Environment",
         qualifiers={"environment": env},
         extractor_confidence=conf,
         excerpt=f"runs on {obj} in {env}",
@@ -136,6 +142,8 @@ def _depends_on(subject: UUID, obj: str) -> ResolvedProposition:
         subject_entity_id=subject,
         predicate="DEPENDS_ON",
         object_scalar=obj,
+        subject_entity_type="Service",
+        object_entity_type="Datastore",
         extractor_confidence=0.8,
         excerpt=f"depends on {obj}",
     )
@@ -201,6 +209,46 @@ async def test_repeated_proposition_reaffirms_and_does_not_duplicate(
     assert await _count(sessionmaker, group, "SELECT count(*) FROM evidence") == 1
 
 
+async def test_uri_only_evidence_survives_live_and_snapshot_retrieval(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    from vera.adapters.persistence.repositories.passage_index import SqlAlchemyFactCandidateSource
+
+    group = f"p:uri-{uuid7().hex[:12]}"
+    source, artifact, version, _ = await _bootstrap(sessionmaker, group)
+    subject = await _subject(sessionmaker, group)
+    citation_uri = "confluence://space/runtime#paymentapi"
+    proposition = ResolvedProposition(
+        subject_entity_id=subject,
+        predicate="RUNS_ON",
+        object_scalar="eks",
+        subject_entity_type="Service",
+        object_entity_type="Environment",
+        qualifiers={"environment": "prod"},
+        extractor_confidence=0.9,
+        citation_uri=citation_uri,
+    )
+    async with _tenant(sessionmaker, group) as session:
+        report = await _service(session).reconcile(
+            _req(group, artifact, version, source, 1, [proposition])
+        )
+    assert report.evidence_added == 1
+
+    candidates = SqlAlchemyFactCandidateSource(sessionmaker)
+    live = await candidates.search(group_id=group, query="eks", limit=10)
+    assert live[0].evidence_citation_uri == citation_uri
+    assert live[0].evidence_id is not None
+
+    async with SqlAlchemyUnitOfWork(sessionmaker) as uow:
+        await uow.set_repeatable_read()
+        await uow.use_tenant(group)
+        snapshot = await uow.snapshots.create(group_id=group, policy_version="ontology-v2")
+        await uow.commit()
+    frozen = await candidates.search(group_id=group, query="eks", limit=10, snapshot_id=snapshot.id)
+    assert frozen[0].evidence_citation_uri == citation_uri
+    assert frozen[0].evidence_id == live[0].evidence_id
+
+
 async def test_new_version_reaffirms_same_fact_and_withdraws_prior_assertion(
     sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -227,6 +275,27 @@ async def test_new_version_reaffirms_same_fact_and_withdraws_prior_assertion(
         == 1
     )
     assert (await _fact_states(sessionmaker, group))["scalar:eks"] == "active"
+
+
+async def test_newer_same_artifact_value_replaces_without_equal_authority_dispute(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    group = f"p:b2-{uuid7().hex[:12]}"
+    source, artifact, v1, v2 = await _bootstrap(sessionmaker, group)
+    subject = await _subject(sessionmaker, group)
+    async with _tenant(sessionmaker, group) as s:
+        await _service(s).reconcile(
+            _req(group, artifact, v1, source, 1, [_runs_on(subject, "eks")])
+        )
+    async with _tenant(sessionmaker, group) as s:
+        await _service(s).reconcile(
+            _req(group, artifact, v2, source, 1, [_runs_on(subject, "ecs")])
+        )
+
+    states = await _fact_states(sessionmaker, group)
+    assert states["scalar:ecs"] == "active"
+    assert states["scalar:eks"] == "retracted"
+    assert "disputed" not in states.values()
 
 
 async def test_single_valued_higher_authority_supersedes(
@@ -416,6 +485,35 @@ async def test_refutation_disputes_the_fact_and_is_not_a_supporting_edge(
     )
 
 
+async def test_unverified_refutation_does_not_dispute_an_active_fact(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    group = f"p:k-{uuid7().hex[:12]}"
+    source_a, art_a, va, _ = await _bootstrap(sessionmaker, group, external_id="A")
+    source_b, art_b, vb, _ = await _bootstrap_second_artifact(sessionmaker, group)
+    subject = await _subject(sessionmaker, group)
+    async with _tenant(sessionmaker, group) as s:
+        await _service(s).reconcile(_req(group, art_a, va, source_a, 1, [_runs_on(subject, "eks")]))
+    refute = ResolvedProposition(
+        subject_entity_id=subject,
+        predicate="RUNS_ON",
+        object_scalar="eks",
+        qualifiers={"environment": "prod"},
+        polarity=Polarity.REFUTES,
+        needs_review=True,
+    )
+    async with _tenant(sessionmaker, group) as s:
+        await _service(s).reconcile(_req(group, art_b, vb, source_b, 1, [refute]))
+
+    assert (await _fact_states(sessionmaker, group))["scalar:eks"] == "active"
+    assert (
+        await _count(
+            sessionmaker, group, "SELECT count(*) FROM assertions WHERE state='needs_review'"
+        )
+        == 1
+    )
+
+
 async def _bootstrap_second_artifact(
     sessionmaker: async_sessionmaker[AsyncSession], group: str
 ) -> tuple[UUID, UUID, UUID, UUID]:
@@ -441,3 +539,188 @@ async def _bootstrap_second_artifact(
         s.add(v)
         await s.flush()
         return source_id, artifact.id, v.id, v.id  # type: ignore[return-value]
+
+
+async def test_type_and_qualifier_violations_are_routed_to_review(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    group = f"p:govern-{uuid7().hex[:12]}"
+    source, artifact, version, _ = await _bootstrap(sessionmaker, group)
+    subject = await _subject(sessionmaker, group)
+    invalid_type = ResolvedProposition(
+        subject_entity_id=subject,
+        predicate="RUNS_ON",
+        object_scalar="payments-repo",
+        subject_entity_type="Team",
+        object_entity_type="Repository",
+    )
+    missing_qualifier = ResolvedProposition(
+        subject_entity_id=subject,
+        predicate="HAS_STATUS",
+        object_scalar="degraded",
+        subject_entity_type="Service",
+    )
+
+    async with _tenant(sessionmaker, group) as session:
+        await _service(session).reconcile(
+            _req(group, artifact, version, source, 1, [invalid_type, missing_qualifier])
+        )
+
+    async with _tenant(sessionmaker, group) as session:
+        states = list(
+            await session.scalars(
+                text("SELECT state FROM assertions WHERE group_id = :group ORDER BY created_at"),
+                {"group": group},
+            )
+        )
+        lifecycles = list(
+            await session.scalars(
+                text(
+                    "SELECT lifecycle_state FROM facts WHERE group_id = :group ORDER BY created_at"
+                ),
+                {"group": group},
+            )
+        )
+        reasons = list(
+            await session.scalars(
+                text(
+                    "SELECT reason FROM knowledge_events WHERE group_id = :group "
+                    "AND reason IS NOT NULL ORDER BY occurred_at"
+                ),
+                {"group": group},
+            )
+        )
+    assert states == ["needs_review", "needs_review"]
+    assert lifecycles == ["proposed", "proposed"]
+    assert any("subject type Team" in reason for reason in reasons)
+    assert any("required qualifier environment" in reason for reason in reasons)
+
+
+async def test_ttl_freshness_expires_active_fact_and_emits_event(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    group = f"p:ttl-{uuid7().hex[:12]}"
+    source, artifact, version, _ = await _bootstrap(sessionmaker, group)
+    subject = await _subject(sessionmaker, group)
+    status = ResolvedProposition(
+        subject_entity_id=subject,
+        predicate="HAS_STATUS",
+        object_scalar="healthy",
+        subject_entity_type="Service",
+        qualifiers={"environment": "prod"},
+    )
+
+    async with _tenant(sessionmaker, group) as session:
+        await _service(session).reconcile(_req(group, artifact, version, source, 1, [status]))
+        expires_at = await session.scalar(
+            text("SELECT expires_at FROM facts WHERE group_id = :group"), {"group": group}
+        )
+        assert expires_at is not None
+        report = await FactExpiryService(
+            facts=SqlAlchemyFactExpiryRepository(session),
+            events=SqlAlchemyKnowledgeEventLog(session),
+        ).run(at=expires_at + timedelta(seconds=1))
+
+    assert report.expired == 1
+    assert report.group_ids == (group,)
+    async with _tenant(sessionmaker, group) as session:
+        lifecycle = await session.scalar(
+            text("SELECT lifecycle_state FROM facts WHERE group_id = :group"), {"group": group}
+        )
+        event = await session.scalar(
+            text(
+                "SELECT event_type FROM knowledge_events WHERE group_id = :group "
+                "ORDER BY occurred_at DESC LIMIT 1"
+            ),
+            {"group": group},
+        )
+    assert lifecycle == "expired"
+    assert event == "FACT_EXPIRED"
+
+
+async def test_community_fact_lineage_is_scope_safe_and_paginated(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    group = f"p:community-{uuid7().hex[:12]}"
+    source, artifact, version, _ = await _bootstrap(sessionmaker, group)
+    subject = await _subject(sessionmaker, group)
+    async with _tenant(sessionmaker, group) as session:
+        await _service(session).reconcile(
+            _req(
+                group,
+                artifact,
+                version,
+                source,
+                1,
+                [_depends_on(subject, "postgres"), _depends_on(subject, "redis")],
+            )
+        )
+        fact_ids = tuple(
+            await session.scalars(
+                text("SELECT id FROM facts WHERE group_id = :group ORDER BY id"),
+                {"group": group},
+            )
+        )
+
+    community_id = uuid7()
+    run_id = uuid7()
+    repository = SqlAlchemyCommunityLineageRepository(sessionmaker)
+    await repository.record(
+        group_id=group,
+        community_id=community_id,
+        derivation_run_id=run_id,
+        fact_ids=fact_ids,
+    )
+    first = await repository.page(
+        group_ids=(group,),
+        community_id=community_id,
+        derivation_run_id=run_id,
+        cursor=None,
+        limit=1,
+    )
+    assert len(first.items) == 1
+    assert first.next_cursor is not None
+    second = await repository.page(
+        group_ids=(group,),
+        community_id=community_id,
+        derivation_run_id=run_id,
+        cursor=UUID(first.next_cursor),
+        limit=1,
+    )
+    assert len(second.items) == 1
+    assert second.items[0].fact_id != first.items[0].fact_id
+    hidden = await repository.page(
+        group_ids=("p:other",),
+        community_id=community_id,
+        derivation_run_id=run_id,
+        cursor=None,
+        limit=10,
+    )
+    assert hidden.items == ()
+
+    other_group = f"p:community-{uuid7().hex[:12]}"
+    other_source, other_artifact, other_version, _ = await _bootstrap(sessionmaker, other_group)
+    other_subject = await _subject(sessionmaker, other_group)
+    async with _tenant(sessionmaker, other_group) as session:
+        await _service(session).reconcile(
+            _req(
+                other_group,
+                other_artifact,
+                other_version,
+                other_source,
+                1,
+                [_depends_on(other_subject, "secret")],
+            )
+        )
+        foreign_fact_id = await session.scalar(
+            text("SELECT id FROM facts WHERE group_id = :group"),
+            {"group": other_group},
+        )
+    assert foreign_fact_id is not None
+    with pytest.raises(exc.IntegrityError):
+        await repository.record(
+            group_id=group,
+            community_id=community_id,
+            derivation_run_id=uuid7(),
+            fact_ids=(foreign_fact_id,),
+        )
