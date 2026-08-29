@@ -14,6 +14,7 @@ from uuid import UUID
 
 from sqlalchemy import (
     CheckConstraint,
+    Computed,
     DateTime,
     Float,
     ForeignKey,
@@ -26,7 +27,7 @@ from sqlalchemy import (
     func,
     text,
 )
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR
 from sqlalchemy.dialects.postgresql import UUID as PgUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -76,11 +77,23 @@ class ChunkRow(Base, UUIDPK):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+    # Generated full-text vector (migration a7c9e1f2b3d4). Declared here so it is part of the
+    # ORM metadata and alembic autogenerate does not propose dropping it.
+    search_vector: Mapped[str | None] = mapped_column(
+        TSVECTOR,
+        Computed(
+            "to_tsvector('english', "
+            "coalesce(heading_path,'') || ' ' || coalesce(symbol_name,'') || ' ' || text)",
+            persisted=True,
+        ),
+        nullable=True,
+    )
 
     __table_args__ = (
         UniqueConstraint("group_id", "chunk_key", name="uq_chunk_key"),
         UniqueConstraint("artifact_version_id", "ordinal", name="uq_chunk_ordinal"),
         Index("ix_chunks_version", "artifact_version_id"),
+        Index("ix_chunks_fts", "search_vector", postgresql_using="gin"),
     )
 
 
@@ -136,6 +149,16 @@ class FactRow(Base, UUIDPK, Timestamps):
     ontology_version_id: Mapped[UUID | None] = mapped_column(
         PgUUID(as_uuid=True), ForeignKey("ontology_versions.id", ondelete="SET NULL"), nullable=True
     )
+    # Generated full-text vector (migration a7c9e1f2b3d4); declared for ORM/alembic parity.
+    search_vector: Mapped[str | None] = mapped_column(
+        TSVECTOR,
+        Computed(
+            "to_tsvector('english', "
+            "predicate || ' ' || normalized_object || ' ' || coalesce(object_scalar,''))",
+            persisted=True,
+        ),
+        nullable=True,
+    )
 
     __table_args__ = (
         UniqueConstraint("id", "group_id", name="uq_facts_tenant_snapshot"),
@@ -161,6 +184,7 @@ class FactRow(Base, UUIDPK, Timestamps):
             "expires_at",
             postgresql_where=text("lifecycle_state = 'active' AND expires_at IS NOT NULL"),
         ),
+        Index("ix_facts_fts", "search_vector", postgresql_using="gin"),
     )
 
 
@@ -220,6 +244,7 @@ class AssertionRow(Base, UUIDPK):
             postgresql_where=text("run_key IS NOT NULL"),
         ),
         Index("ix_assertions_fact", "group_id", "fact_id"),
+        Index("ix_assertions_extraction_run", "extraction_run_id"),
     )
 
 
@@ -267,6 +292,7 @@ class EvidenceRow(Base, UUIDPK):
             name="ck_evidence_quote_offsets",
         ),
         Index("ix_evidence_assertion", "group_id", "assertion_id"),
+        Index("ix_evidence_extraction_run", "extraction_run_id"),
     )
 
 

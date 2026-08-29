@@ -59,11 +59,6 @@ review.
 - **Backfilled legacy objects remain scalar values.** The backfill does not reconstruct the
   object side of historical entity-to-entity graph edges. Re-ingestion is required where that
   relationship structure matters.
-- **Alembic autogenerate reports legacy FTS model drift.** Migration upgrade, downgrade, and
-  re-upgrade pass, but `alembic check` currently proposes removal of generated
-  `search_vector` columns and related historical indexes that are not represented in ORM
-  metadata. Do not apply that generated diff without reconciling the model declarations.
-
 ## Production operations
 
 - **No production-scale benchmark or recovery drill has been run here.** The
