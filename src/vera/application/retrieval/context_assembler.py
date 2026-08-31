@@ -18,6 +18,8 @@ from typing import Literal
 
 from vera.domain.ports.retrieval_index import (
     CodeIndex,
+    ContentAvailability,
+    ContentAvailabilitySource,
     FactCandidateSource,
     FactHit,
     PassageHit,
@@ -300,11 +302,13 @@ class ContextAssembler:
         facts: FactCandidateSource,
         passages: PassageIndex,
         code: CodeIndex,
+        content_availability: ContentAvailabilitySource | None = None,
         weights: RetrievalWeights | None = None,
     ) -> None:
         self._facts = facts
         self._passages = passages
         self._code = code
+        self._content_availability = content_availability
         self._weights = weights or RetrievalWeights()
 
     async def assemble(
@@ -315,6 +319,7 @@ class ContextAssembler:
         limit: int = 10,
         token_budget: int = 2000,
         as_of: datetime | None = None,
+        known_as_of: datetime | None = None,
         snapshot_fact_ids: set[str] | None = None,
         snapshot_id: str | None = None,
         passage_cutoff: datetime | None = None,
@@ -322,6 +327,9 @@ class ContextAssembler:
         citation_mode: Literal["full", "compact"] = "full",
     ) -> AssembledContext:
         k = max(limit * 4, 20)
+        available = ContentAvailability(passages=True, code=True)
+        passages_task: asyncio.Task[list[PassageHit]] | None = None
+        code_task: asyncio.Task[list[PassageHit]] | None = None
         async with asyncio.TaskGroup() as group:
             facts_task = group.create_task(
                 self._facts.search(
@@ -329,34 +337,42 @@ class ContextAssembler:
                     query=query,
                     limit=k,
                     as_of=as_of,
+                    known_as_of=known_as_of,
                     restrict_fact_ids=snapshot_fact_ids,
                     snapshot_id=snapshot_id,
                     filters=filters,
                 )
             )
-            passages_task = group.create_task(
-                self._passages.search(
-                    group_id=group_id,
-                    query=query,
-                    limit=k,
-                    created_before=passage_cutoff,
-                    snapshot_id=snapshot_id,
-                    filters=filters,
+            if self._content_availability is not None:
+                availability_task = group.create_task(
+                    self._content_availability.get(group_id=group_id, snapshot_id=snapshot_id)
                 )
-            )
-            code_task = group.create_task(
-                self._code.search(
-                    group_id=group_id,
-                    query=query,
-                    limit=k,
-                    created_before=passage_cutoff,
-                    snapshot_id=snapshot_id,
-                    filters=filters,
+                available = await availability_task
+            if available.passages:
+                passages_task = group.create_task(
+                    self._passages.search(
+                        group_id=group_id,
+                        query=query,
+                        limit=k,
+                        created_before=passage_cutoff or known_as_of,
+                        snapshot_id=snapshot_id,
+                        filters=filters,
+                    )
                 )
-            )
+            if available.code:
+                code_task = group.create_task(
+                    self._code.search(
+                        group_id=group_id,
+                        query=query,
+                        limit=k,
+                        created_before=passage_cutoff or known_as_of,
+                        snapshot_id=snapshot_id,
+                        filters=filters,
+                    )
+                )
         fact_hits = facts_task.result()
-        passage_hits = passages_task.result()
-        code_hits = code_task.result()
+        passage_hits = passages_task.result() if passages_task is not None else []
+        code_hits = code_task.result() if code_task is not None else []
         candidates = [
             *(_from_fact(h) for h in fact_hits),
             *(_from_passage(h, "passage") for h in passage_hits),

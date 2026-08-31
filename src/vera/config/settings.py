@@ -144,6 +144,9 @@ class RerankSettings(BaseModel):
     cross_encoder_enabled: bool = False
     cross_encoder_weight: float = 0.5
     cross_encoder_top_n: int = 20
+    # Semantic fact retrieval fails closed below this relevance score, preserving abstention
+    # when dense nearest-neighbor search has no genuinely relevant fact.
+    cross_encoder_min_score: float = Field(default=0.35, ge=0.0, le=1.0)
     # Which reranker backs stage 3: "llm" (an LLM scores relevance) or "voyage" (a
     # purpose-built reranker, cheaper and faster). Needs the matching provider's key.
     cross_encoder_provider: Literal["llm", "voyage"] = "llm"

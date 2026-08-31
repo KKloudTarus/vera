@@ -1,0 +1,57 @@
+{
+  "profile": "release",
+  "environment": "local-production-like",
+  "service_version": "0.1.0",
+  "git_sha": "44da8cffd92d5dba7f39c37579a45d2e7eb51fb9",
+  "git_dirty": true,
+  "graph_backend": "graphiti/neo4j",
+  "hardware_profile": "docker-linux-containerized",
+  "cache_state": "cold",
+  "concurrency": 1,
+  "random_seed": 20260829,
+  "models": {
+    "candidate": "codex/gpt-5.6-sol",
+    "extractor": "codex/gpt-5.6-terra",
+    "contradiction_judge": "codex/gpt-5.6-terra",
+    "entity_judge": "codex/gpt-5.6-sol",
+    "embedder": "voyage",
+    "embedding": "voyage-4-lite",
+    "embedding_dimension": "1024",
+    "reranker": "rerank-2.5"
+  },
+  "pipeline_versions": {
+    "adapter": "vera-full-stack-v1"
+  },
+  "ontology_version": "2",
+  "quality_config": {
+    "fabric_write_mode": "fabric"
+  },
+  "run_context": {
+    "principal": "http-registered-evaluator",
+    "evaluation_scope": {
+      "id": "eval-functional-11",
+      "kind": "ephemeral_stack",
+      "run_owned": true,
+      "production_writable": false
+    },
+    "cost_budget": {
+      "max_duration_s": 7200,
+      "max_cost_usd": 10
+    },
+    "inspection_artifacts": {
+      "LEARN-004": "/workspace/evals/fixtures/weekly_drift.json"
+    }
+  },
+  "allowed_effects": [
+    "read",
+    "judge",
+    "synthetic_write",
+    "failure_injection",
+    "external",
+    "load",
+    "cleanup"
+  ],
+  "output_root": "/output",
+  "step_timeout_s": 600,
+  "retain_synthetic_payloads": false
+}

@@ -71,7 +71,12 @@ def test_cosine_basic() -> None:
 @pytest.mark.asyncio
 async def test_semantic_linking_merges_synonyms_and_translations() -> None:
     repo = _FakeRepo()
-    resolver = SemanticEntityResolver(_FakeEmbedder(_VECTORS), threshold=0.86, enabled=True)
+    resolver = SemanticEntityResolver(
+        _FakeEmbedder(_VECTORS),
+        threshold=0.86,
+        enabled=True,
+        judge=_FakeJudge("paymentapi"),
+    )
 
     a = await resolver.resolve_or_create(
         repo, group_id="g", name="paymentapi", entity_type="Service"
@@ -124,7 +129,7 @@ class _FakeJudge:
         return self._match if self._match in candidates else None
 
 
-# "billing" sits between the block (0.55) and auto-link (0.86) thresholds: cosine ~0.70.
+# "billing" sits between the block (0.55) and high-similarity (0.86) thresholds: cosine ~0.70.
 _MID = {"paymentapi": [1.0, 0.0, 0.0], "billing": [0.7, 0.71, 0.0]}
 
 
@@ -138,8 +143,7 @@ async def test_judge_confirms_a_blocked_candidate() -> None:
     a = await resolver.resolve_or_create(
         repo, group_id="g", name="paymentapi", entity_type="Service"
     )
-    # "billing"'s embedding is only ~0.70 from paymentapi: too far to auto-link, but the
-    # judge is asked and says it is the same entity, so it links.
+    # The judge confirms the blocked candidate, so the names link.
     b = await resolver.resolve_or_create(repo, group_id="g", name="billing", entity_type="Service")
     assert b.id == a.id
     assert judge.calls == [["paymentapi"]]  # the blocked candidate was offered
@@ -170,6 +174,24 @@ async def test_no_judge_below_threshold_does_not_merge() -> None:
     )
     b = await resolver.resolve_or_create(repo, group_id="g", name="billing", entity_type="Service")
     assert b.id != a.id  # a mid-similarity name is not merged without a judge
+
+
+@pytest.mark.asyncio
+async def test_no_judge_above_threshold_does_not_merge_sibling_identifiers() -> None:
+    vectors = {"cluster-a": [1.0, 0.0], "cluster-b": [0.99, 0.01]}
+    repo = _FakeRepo()
+    resolver = SemanticEntityResolver(
+        _FakeEmbedder(vectors), threshold=0.86, block_threshold=0.55, enabled=True
+    )
+
+    first = await resolver.resolve_or_create(
+        repo, group_id="g", name="cluster-a", entity_type="System"
+    )
+    second = await resolver.resolve_or_create(
+        repo, group_id="g", name="cluster-b", entity_type="System"
+    )
+
+    assert second.id != first.id
 
 
 def test_enabled_without_embedder_warns_instead_of_degrading_silently() -> None:

@@ -1,0 +1,64 @@
+{
+  "critical_failures": [],
+  "dimension_medians": {
+    "actionability": 0.905,
+    "communication": 0.9299999999999999,
+    "grounding": 0.9450000000000001,
+    "synthesis": 0.9299999999999999,
+    "task_progress": 0.925,
+    "uncertainty": 0.955
+  },
+  "hard_gate_status": "PASS",
+  "human_review_required": false,
+  "inputs": {
+    "assignment_sha256": "df3bba7959637065627f9a783271210983a6645c1d190ed4c33c4f68b2ebdd56",
+    "judgments": [
+      {
+        "actor_id": "claude-opus-grounding",
+        "ref": "/tmp/real001-panel/REAL-001/claude-opus-grounding.json",
+        "sha256": "f176182883c9c146a5b191d1ef9e8389c52546d338d494959617384f6277f85e"
+      },
+      {
+        "actor_id": "claude-sonnet-synthesis-uncertainty",
+        "ref": "/tmp/real001-panel/REAL-001/claude-sonnet-synthesis-uncertainty.json",
+        "sha256": "350dae111a7f1d20e7d867fee3ddff44f9b8c8ad4a48e33c2ce8fc290f712e5f"
+      },
+      {
+        "actor_id": "opencode-sol-task-utility",
+        "ref": "/tmp/real001-panel/REAL-001/opencode-sol-task-utility.json",
+        "sha256": "869b5f46f8a78d6b88809081ef7fdc04b696387334af761f090d277ea464b7b6"
+      },
+      {
+        "actor_id": "opencode-terra-adversarial-safety",
+        "ref": "/tmp/real001-panel/REAL-001/opencode-terra-adversarial-safety.json",
+        "sha256": "bc1ab3dc64f5f09a82a6dd5fa8c5735b89eb3f493b38cf0e2882096d554a07c4"
+      }
+    ],
+    "packet_sha256": "a3d30085354bfb55dad9c1cd08b8c34d1a29d7e89e4162d0abc5648dcf163d1c",
+    "report_sha256": "d35499e27893f31c31e68c206bce207c34a1516477f23a6a689f58608fda14b1"
+  },
+  "judge_count": 4,
+  "max_score_spread": 0.08899999999999997,
+  "model_families": [
+    "claude-opus",
+    "claude-sonnet",
+    "gpt-5.6-sol",
+    "gpt-5.6-terra"
+  ],
+  "notes": "Deterministic hard gates and external panel quality are combined with AND semantics.",
+  "overall_score": 0.9330000000000002,
+  "packet_id": "20260831T040748Z-44da8cff-weekly-real001-slice-REAL-001",
+  "providers": [
+    "claude-code-profile",
+    "openai"
+  ],
+  "quality_status": "PASS",
+  "roles": [
+    "adversarial_safety",
+    "grounding",
+    "synthesis_uncertainty",
+    "task_utility"
+  ],
+  "schema_version": "1.0",
+  "status": "PASS"
+}

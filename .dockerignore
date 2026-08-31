@@ -11,8 +11,8 @@
 CLAUDE.md
 BUILD_CHECKLIST.md
 
-# Tests and dev tooling are not part of the runtime image
-tests
+# Generated evaluator data and dev tooling are not part of any image
+evals/runs
 .pre-commit-config.yaml
 
 # Caches and build artifacts

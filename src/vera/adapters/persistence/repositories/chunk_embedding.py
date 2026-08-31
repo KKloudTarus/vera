@@ -16,8 +16,7 @@ _UPSERT = text(
         :id, :group_id, :chunk_id, :provider, :model, :model_version, :dimension,
         CAST(:embedding AS vector), :content_hash, :created_at, :active
     )
-    ON CONFLICT (chunk_id, provider, model, model_version) DO UPDATE SET
-        dimension = EXCLUDED.dimension,
+    ON CONFLICT (chunk_id, provider, model, model_version, dimension) DO UPDATE SET
         embedding = EXCLUDED.embedding,
         content_hash = EXCLUDED.content_hash,
         created_at = EXCLUDED.created_at,
@@ -59,6 +58,7 @@ class SqlAlchemyChunkEmbeddingRepository:
         provider: str,
         model: str,
         model_version: str,
+        dimension: int,
     ) -> None:
         await self._session.execute(
             text("UPDATE chunk_embeddings SET active = false WHERE group_id = :g"),
@@ -67,12 +67,14 @@ class SqlAlchemyChunkEmbeddingRepository:
         await self._session.execute(
             text(
                 "UPDATE chunk_embeddings SET active = true WHERE group_id = :g "
-                "AND provider = :provider AND model = :model AND model_version = :version"
+                "AND provider = :provider AND model = :model AND model_version = :version "
+                "AND dimension = :dimension"
             ),
             {
                 "g": group_id,
                 "provider": provider,
                 "model": model,
                 "version": model_version,
+                "dimension": dimension,
             },
         )

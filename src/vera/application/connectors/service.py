@@ -8,6 +8,7 @@ an API page commits, so a crash replays at most one page and never skips one.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 from uuid import UUID
 
@@ -17,12 +18,16 @@ from vera.domain.ports.curation import ClaimExtractor, ContradictionJudge
 from vera.domain.ports.embedder import Embedder
 from vera.domain.ports.object_store import ObjectStore
 from vera.domain.ports.unit_of_work import UnitOfWork
-from vera.shared.errors import is_ok
+from vera.shared.errors import Err, VeraError, is_ok
 
 UnitOfWorkFactory = Callable[[], UnitOfWork]
 
 # A safety bound so a misbehaving connector that always reports has_more cannot loop forever.
 _MAX_PAGES_PER_SYNC = 10_000
+
+
+class SyncRecordRejected(VeraError):
+    """A domain-rejected connector record that must remain before the cursor."""
 
 
 class SyncRunner:
@@ -93,6 +98,11 @@ class SyncRunner:
                                 tombstone=record.tombstone,
                             )
                         )
+                        if isinstance(result, Err):
+                            raise SyncRecordRejected(
+                                f"record {record.external_id} rejected: "
+                                f"{result.error.code}: {result.error.message}"
+                            )
                         await uow.commit()
                     if is_ok(result) and result.value.action in {"unchanged", "stale"}:
                         unchanged += 1
@@ -107,6 +117,9 @@ class SyncRunner:
                     break
             await self._state.finish_job(job_id, processed=processed, unchanged=unchanged)
             return SyncOutcome(processed=processed, unchanged=unchanged, cursor=cursor)
+        except asyncio.CancelledError:
+            await self._state.fail_job(job_id, error="sync cancelled")
+            raise
         except Exception as exc:
             await self._state.fail_job(job_id, error=str(exc))
             raise

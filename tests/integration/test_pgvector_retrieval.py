@@ -162,12 +162,14 @@ async def test_hybrid_retrieval_and_model_rollback(
             provider="test",
             model="deterministic",
             model_version="2",
+            dimension=_DIM,
         )
         await embedding_repo.set_active_model(
             group_id=group,
             provider="test",
             model="deterministic",
             model_version="1",
+            dimension=_DIM,
         )
         rows = (
             (

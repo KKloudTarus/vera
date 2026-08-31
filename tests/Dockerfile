@@ -1,0 +1,30 @@
+# syntax=docker/dockerfile:1
+
+FROM python:3.11-slim-bookworm@sha256:0bee7276f83efd4a1ee05bbbf4281d95ed28e079220a9457f25a93e3f1e3c31b
+
+ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_DEFAULT_TIMEOUT=30 \
+    PIP_RETRIES=5 \
+    PIP_CONSTRAINT=/workspace/constraints.lock \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+WORKDIR /workspace
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libatomic1 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY pyproject.toml constraints.lock README.md LICENSE NOTICE ./
+COPY src ./src
+COPY tests ./tests
+COPY evals ./evals
+COPY migrations ./migrations
+COPY datasets ./datasets
+COPY alembic.ini ./
+
+RUN --mount=type=cache,id=vera-pip,target=/root/.cache/pip \
+    python -m pip install pip==26.2 setuptools==84.0.0 wheel==0.48.0 \
+    && python -m pip install --constraint constraints.lock -e ".[all]"
+
+CMD ["python", "-m", "pytest"]

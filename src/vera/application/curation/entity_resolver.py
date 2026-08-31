@@ -1,16 +1,16 @@
 """SemanticEntityResolver: resolve a surface name to a canonical entity.
 
-Order: exact-normalized, then pg_trgm fuzzy (both in the repository), then, on a miss, an
-optional semantic step. Embedding cosine over bare names is a weak signal (short names put
-sibling services as close as true synonyms, and translations far apart), so it is used two
-ways: a high-similarity match links straight away, and otherwise it blocks a small
-candidate set that an LLM equivalence judge confirms. The semantic step is off unless
-enabled with an embedder, and runs only on a miss, so the hot path rarely pays for it.
+Order: exact-normalized in the repository, then, on a miss, an optional semantic step.
+Embedding cosine over bare names is only a candidate generator because short sibling names
+can score as highly as true synonyms. An equivalence judge must confirm every semantic link.
+The semantic step is off unless enabled with an embedder, and runs only on a miss, so the hot
+path rarely pays for it.
 """
 
 from __future__ import annotations
 
 import math
+import re
 
 from vera.domain.knowledge.models import CanonicalEntity
 from vera.domain.ports.curation import EntityResolutionJudge
@@ -18,8 +18,20 @@ from vera.domain.ports.embedder import Embedder
 from vera.domain.ports.repositories import CanonicalEntityRepository
 from vera.observability import get_logger
 from vera.observability.metrics import record_entity_resolution
+from vera.shared.text import normalize_name
 
 log = get_logger(__name__)
+_ACRONYM_TOKEN = re.compile(r"^[A-Z0-9]{2,8}$")
+
+
+def _identifier_aliases(name: str) -> list[str]:
+    """Return compact aliases for names containing an acronym-like identifier token."""
+    tokens = name.split()
+    if len(tokens) < 2 or not any(_ACRONYM_TOKEN.fullmatch(token) for token in tokens):
+        return []
+    normalized = normalize_name(name)
+    compact = normalized.replace(" ", "")
+    return [compact] if compact != normalized else []
 
 
 def cosine(a: list[float], b: list[float]) -> float:
@@ -69,6 +81,11 @@ class SemanticEntityResolver:
         existing = await repo.resolve(group_id=group_id, name=name)
         if existing is not None:
             return existing
+        identifier_aliases = _identifier_aliases(name)
+        for alias in identifier_aliases:
+            existing = await repo.resolve(group_id=group_id, name=alias)
+            if existing is not None:
+                return existing
 
         embedding: list[float] | None = None
         if self._enabled and self._embedder is not None:
@@ -91,7 +108,7 @@ class SemanticEntityResolver:
             group_id=group_id,
             entity_type=entity_type,
             canonical_name=name,
-            aliases=[],
+            aliases=identifier_aliases,
             embedding=embedding,
         )
 
@@ -104,15 +121,11 @@ class SemanticEntityResolver:
     ) -> CanonicalEntity | None:
         if not scored:
             return None
-        # A very close name is a synonym/spelling variant: link without spending an LLM call.
-        best_score, best = scored[0]
-        if best_score >= self._threshold:
-            record_entity_resolution("linked_cosine")
-            return best
+        best_score = scored[0][0]
         if self._judge is None:
             return None
-        # Otherwise let the judge confirm one of the blocked (plausibly similar) candidates.
-        blocked = [entity for score, entity in scored if score >= self._block_threshold]
+        cutoff = self._threshold if best_score >= self._threshold else self._block_threshold
+        blocked = [entity for score, entity in scored if score >= cutoff]
         blocked = blocked[: self._max_candidates]
         if not blocked:
             return None

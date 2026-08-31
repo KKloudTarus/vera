@@ -98,6 +98,24 @@ def canonical_qualifiers(qualifiers: JsonDict | None) -> str:
     return json.dumps(ordered, separators=(",", ":"), ensure_ascii=False)
 
 
+def fact_semantic_text(
+    *,
+    subject_name: str,
+    predicate: str,
+    object_name: str,
+    object_type: ObjectType | str,
+    qualifiers: JsonDict | None = None,
+) -> str:
+    """Canonical document used for fact embeddings and cross-encoder scoring."""
+    kind = object_type.value if isinstance(object_type, ObjectType) else object_type
+    base = " ".join((subject_name.strip(), predicate.strip().upper(), object_name.strip()))
+    qualifier_text = canonical_qualifiers(qualifiers)
+    metadata = f"object_type={kind}"
+    if qualifier_text:
+        metadata += f" qualifiers={qualifier_text}"
+    return f"{base} [{metadata}]"
+
+
 def normalize_object(
     *, object_entity_id: UUID | None = None, object_scalar: str | None = None
 ) -> str:
@@ -185,6 +203,21 @@ class ChunkEmbedding:
     id: UUID
     group_id: str
     chunk_id: UUID
+    provider: str
+    model: str
+    model_version: str
+    dimension: int
+    embedding: list[float]
+    content_hash: str
+    created_at: datetime
+    active: bool = True
+
+
+@dataclass(frozen=True, slots=True)
+class FactEmbedding:
+    id: UUID
+    group_id: str
+    fact_id: UUID
     provider: str
     model: str
     model_version: str

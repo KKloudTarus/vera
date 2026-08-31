@@ -7,7 +7,7 @@ services:
     # pgvector's image is the official postgres:18 plus the `vector` extension, so the data
     # layout is identical and enabling pgvector needs no data migration. Stock postgres:18 also
     # works: the vector migration is a no-op when the extension is unavailable.
-    image: pgvector/pgvector:pg18
+    image: pgvector/pgvector:pg18@sha256:2ba9ca5f2e7daa0f0e7723cba1ee9167bab54efd3640516a44ac1a928dd67e7a
     environment:
       POSTGRES_USER: vera
       POSTGRES_PASSWORD: vera
@@ -22,7 +22,7 @@ services:
       retries: 10
 
   neo4j:
-    image: neo4j:5.26
+    image: neo4j:5.26@sha256:037cf5756f0135cbfd66b739b6df7c7c4bb100f9ce11602f6f9538e17e02c74d
     environment:
       NEO4J_AUTH: neo4j/vera-local-pass
       NEO4J_PLUGINS: '["apoc"]'
@@ -30,20 +30,20 @@ services:
     volumes: ["./.data/neo4j:/data"]
 
   valkey:
-    image: valkey/valkey:8
+    image: valkey/valkey:8@sha256:f0ba225266310efba5fb33383e21c64fbd07907304224786c780606e7ebd7327
     command: ["valkey-server", "--save", "", "--appendonly", "no"]
     ports: ["6379:6379"]
 
   # Optional alternative graph backend to Neo4j (VERA_MEMORY__GRAPH_BACKEND=falkordb).
   # Host port 6380 avoids the Valkey 6379 clash; container speaks Redis on 6379.
   falkordb:
-    image: falkordb/falkordb:latest
+    image: falkordb/falkordb@sha256:adbddd418916c25618564ff8597a919b08bc76452ebeb74eb985c38d7281df62
     profiles: ["falkordb"]
     ports: ["6380:6379"]
     volumes: ["./.data/falkordb:/data"]
 
   minio:
-    image: minio/minio:latest
+    image: minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
     command: server /data --console-address ":9001"
     environment:
       MINIO_ROOT_USER: minioadmin

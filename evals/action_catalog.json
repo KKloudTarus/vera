@@ -1,0 +1,763 @@
+{
+  "schema_version": "1.0",
+  "purpose": "Allowlisted evaluator actions. A scenario step is invalid unless its action appears here.",
+  "runner_maturity": "implemented",
+  "reference_resolution": {
+    "fixture": "A dot path into the case fixture object.",
+    "fixture_file": "A repository-relative JSON fixture path, fingerprinted before execution.",
+    "suffix_ref": "Keys ending in _ref resolve a dot path against the fixture, run context, or a prior step observation.",
+    "run_context": "Principal, group, source, model, and trace values may only be injected from the frozen run context, never guessed."
+  },
+  "availability_semantics": {
+    "existing_surface": "VERA already exposes the capability. If the declared surface is absent or behaves incorrectly, record FAIL.",
+    "harness_required": "The capability exists below a public boundary or needs deterministic orchestration. If the evaluation harness is unavailable, record BLOCKED and name the missing adapter.",
+    "external_runner_required": "The capability belongs to the consuming agent or load environment, not VERA. Missing runner means NOT_APPLICABLE only when the assertion activation allows it; otherwise BLOCKED.",
+    "product_capability_missing": "The scenario intentionally probes a known product gap. Absence is an observed FAIL, never BLOCKED."
+  },
+  "observation_path": {
+    "syntax": "dot path rooted at the case observation envelope; zero-based array indexes use [n]",
+    "examples": [
+      "artifact.version_count",
+      "search.current.results[0].fact",
+      "lineage.assertion.fact_key"
+    ],
+    "reference_value": "Use an expected object of the form {\"observation_ref\": \"path.to.value\"}; strings are always literals."
+  },
+  "operators": {
+    "eq": "Observed value deep-equals expected value or the value at expected.observation_ref.",
+    "neq": "Observed value does not deep-equal expected value or referenced observation.",
+    "contains": "Observed string contains expected string case-insensitively; collections and mappings recursively apply contains to their items and values.",
+    "not_contains": "Inverse of contains.",
+    "exists": "Target resolves and is not null. Expected must be true.",
+    "absent": "Target does not resolve or resolves to null. Expected must be true.",
+    "gte": "Observed numeric value is greater than or equal to expected numeric value.",
+    "lte": "Observed numeric value is less than or equal to expected numeric value.",
+    "lt": "Observed numeric value is less than expected numeric value.",
+    "gt": "Observed numeric value is greater than expected numeric value.",
+    "all": "Every expected item is present in the observed collection.",
+    "none": "No expected item is present in the observed collection.",
+    "unchanged": "Canonical before and after snapshots are deep-equal; expected must be true.",
+    "equivalent": "Domain-normalized values are semantically equal under the named comparison adapter; expected must be true."
+  },
+  "actions": [
+    {
+      "name": "source.create",
+      "effect": "synthetic_write",
+      "availability": "existing_surface",
+      "maps_to": [
+        "python -m vera.entrypoints.create_source"
+      ],
+      "required_inputs": [
+        "fixture"
+      ],
+      "outputs": [
+        "source_id"
+      ],
+      "allowed_isolation": [
+        "dedicated_synthetic_scope",
+        "ephemeral_stack"
+      ]
+    },
+    {
+      "name": "source.sync",
+      "effect": "synthetic_write",
+      "availability": "harness_required",
+      "maps_to": [
+        "vera.application.connectors.service.SyncRunner.sync"
+      ],
+      "required_inputs": [
+        "fixture"
+      ],
+      "outputs": [
+        "cursor_before",
+        "cursor_after",
+        "sync_job_id",
+        "record_outcomes"
+      ],
+      "allowed_isolation": [
+        "dedicated_synthetic_scope",
+        "ephemeral_stack"
+      ]
+    },
+    {
+      "name": "source.tombstone",
+      "effect": "synthetic_write",
+      "availability": "existing_surface",
+      "maps_to": [
+        "CurationService.ingest_artifact(tombstone=True)"
+      ],
+      "required_inputs": [
+        "external_id",
+        "source_event_time"
+      ],
+      "outputs": [
+        "lifecycle_event_id"
+      ],
+      "allowed_isolation": [
+        "dedicated_synthetic_scope",
+        "ephemeral_stack"
+      ]
+    },
+    {
+      "name": "source.retract",
+      "effect": "synthetic_write",
+      "availability": "existing_surface",
+      "maps_to": [
+        "DELETE /memory/sources/{source_id}"
+      ],
+      "required_inputs": [
+        "source_ref",
+        "erase"
+      ],
+      "outputs": [
+        "http_status",
+        "audit_event_id"
+      ],
+      "allowed_isolation": [
+        "dedicated_synthetic_scope",
+        "ephemeral_stack"
+      ]
+    },
+    {
+      "name": "record.ingest",
+      "effect": "synthetic_write",
+      "availability": "harness_required",
+      "maps_to": [
+        "vera.application.curation.service.CurationService.ingest_artifact"
+      ],
+      "required_inputs": [
+        "fixture"
+      ],
+      "outputs": [
+        "artifact_version_id",
+        "chunk_ids",
+        "assertion_ids",
+        "fact_keys",
+        "ingest_action"
+      ],
+      "allowed_isolation": [
+        "dedicated_synthetic_scope",
+        "ephemeral_stack"
+      ]
+    },
+    {
+      "name": "extractor.configure",
+      "effect": "failure_injection",
+      "availability": "harness_required",
+      "maps_to": [
+        "Ephemeral container composition or test double"
+      ],
+      "required_inputs": [
+        "state",
+        "extractor_version"
+      ],
+      "outputs": [
+        "effective_state"
+      ],
+      "allowed_isolation": [
+        "ephemeral_stack"
+      ]
+    },
+    {
+      "name": "artifact.reextract",
+      "effect": "synthetic_write",
+      "availability": "harness_required",
+      "maps_to": [
+        "CurationService.reextract_artifact"
+      ],
+      "required_inputs": [
+        "artifact_version_ref",
+        "extractor_version"
+      ],
+      "outputs": [
+        "claim_ids",
+        "episode_ids"
+      ],
+      "allowed_isolation": [
+        "dedicated_synthetic_scope",
+        "ephemeral_stack"
+      ]
+    },
+    {
+      "name": "claim.review",
+      "effect": "synthetic_write",
+      "availability": "harness_required",
+      "maps_to": [
+        "vera.application.curation.service.CurationService.review_claim"
+      ],
+      "required_inputs": [
+        "claim_ref",
+        "approve",
+        "notes"
+      ],
+      "outputs": [
+        "claim_status",
+        "review_id",
+        "publish_status"
+      ],
+      "allowed_isolation": [
+        "dedicated_synthetic_scope",
+        "ephemeral_stack"
+      ]
+    },
+    {
+      "name": "projection.wait",
+      "effect": "read",
+      "availability": "harness_required",
+      "maps_to": [
+        "Bounded polling of queue state plus authorized search"
+      ],
+      "required_inputs": [
+        "condition",
+        "timeout_s"
+      ],
+      "outputs": [
+        "condition_met",
+        "searchable_at",
+        "queue_state"
+      ],
+      "allowed_isolation": [
+        "dedicated_synthetic_scope",
+        "ephemeral_stack"
+      ]
+    },
+    {
+      "name": "projection.rebuild",
+      "effect": "synthetic_write",
+      "availability": "existing_surface",
+      "maps_to": [
+        "python -m vera.entrypoints.build_communities <group_id>"
+      ],
+      "required_inputs": [
+        "group_ref"
+      ],
+      "outputs": [
+        "rebuild_report",
+        "verification_report"
+      ],
+      "allowed_isolation": [
+        "ephemeral_stack"
+      ]
+    },
+    {
+      "name": "search.http",
+      "effect": "read",
+      "availability": "existing_surface",
+      "maps_to": [
+        "POST /v2/knowledge/search"
+      ],
+      "required_inputs": [
+        "query|queries_ref"
+      ],
+      "outputs": [
+        "status",
+        "results",
+        "latency_ms",
+        "trace_id"
+      ],
+      "allowed_isolation": [
+        "dedicated_synthetic_scope",
+        "ephemeral_stack",
+        "none"
+      ]
+    },
+    {
+      "name": "search.mcp",
+      "effect": "read",
+      "availability": "existing_surface",
+      "maps_to": [
+        "knowledge_search"
+      ],
+      "required_inputs": [
+        "query|queries_ref"
+      ],
+      "outputs": [
+        "results",
+        "latency_ms",
+        "trace_id"
+      ],
+      "allowed_isolation": [
+        "dedicated_synthetic_scope",
+        "ephemeral_stack",
+        "none"
+      ]
+    },
+    {
+      "name": "search.transaction_as_of",
+      "effect": "read",
+      "availability": "existing_surface",
+      "maps_to": [
+        "POST /v2/knowledge/search with independent as_of and known_as_of"
+      ],
+      "required_inputs": [
+        "fixture",
+        "query"
+      ],
+      "outputs": [
+        "results"
+      ],
+      "allowed_isolation": [
+        "dedicated_synthetic_scope",
+        "ephemeral_stack"
+      ]
+    },
+    {
+      "name": "agent.run",
+      "effect": "external",
+      "availability": "external_runner_required",
+      "maps_to": [
+        "Consuming agent harness configured with VERA MCP"
+      ],
+      "required_inputs": [
+        "question|question_ref|questions_ref"
+      ],
+      "outputs": [
+        "answer",
+        "tool_calls",
+        "used_result_ids",
+        "citations",
+        "latency_ms",
+        "cost_usd",
+        "model_id",
+        "prompt_version"
+      ],
+      "allowed_isolation": [
+        "dedicated_synthetic_scope",
+        "ephemeral_stack",
+        "none"
+      ]
+    },
+    {
+      "name": "feedback.submit",
+      "effect": "synthetic_write",
+      "availability": "existing_surface",
+      "maps_to": [
+        "memory_feedback"
+      ],
+      "required_inputs": [
+        "group_ids_ref",
+        "retrieval_events_ref",
+        "labels_ref"
+      ],
+      "outputs": [
+        "feedback_status",
+        "feedback_id"
+      ],
+      "allowed_isolation": [
+        "dedicated_synthetic_scope",
+        "ephemeral_stack"
+      ]
+    },
+    {
+      "name": "calibration.evaluate",
+      "effect": "read",
+      "availability": "harness_required",
+      "maps_to": [
+        "Evaluation-only adapter over CalibrationService; it must reject empty group_ids, never apply weights, and score holdout queries independently"
+      ],
+      "required_inputs": [
+        "group_ids_ref",
+        "train_feedback_ids_ref",
+        "holdout_query_ids_ref",
+        "apply"
+      ],
+      "outputs": [
+        "candidate_weights",
+        "sample_count",
+        "train_metrics",
+        "holdout_metrics"
+      ],
+      "allowed_isolation": [
+        "dedicated_synthetic_scope",
+        "ephemeral_stack"
+      ]
+    },
+    {
+      "name": "dependency.configure",
+      "effect": "failure_injection",
+      "availability": "harness_required",
+      "maps_to": [
+        "Ephemeral stack dependency control"
+      ],
+      "required_inputs": [
+        "dependency",
+        "state"
+      ],
+      "outputs": [
+        "effective_state",
+        "changed_at"
+      ],
+      "allowed_isolation": [
+        "ephemeral_stack"
+      ]
+    },
+    {
+      "name": "fixture.seed",
+      "effect": "synthetic_write",
+      "availability": "harness_required",
+      "maps_to": [
+        "Evaluation fixture adapter using source.create and record.ingest"
+      ],
+      "required_inputs": [
+        "fixture|fixture_file",
+        "seed"
+      ],
+      "outputs": [
+        "dataset_sha256",
+        "created_resource_ids"
+      ],
+      "allowed_isolation": [
+        "dedicated_synthetic_scope",
+        "ephemeral_stack"
+      ]
+    },
+    {
+      "name": "state.snapshot",
+      "effect": "read",
+      "availability": "harness_required",
+      "maps_to": [
+        "Authorized test read models for Postgres, queue, object store, graph, metrics, and traces"
+      ],
+      "required_inputs": [
+        "views"
+      ],
+      "outputs": [
+        "snapshot",
+        "evidence_id"
+      ],
+      "allowed_isolation": [
+        "dedicated_synthetic_scope",
+        "ephemeral_stack",
+        "none"
+      ]
+    },
+    {
+      "name": "result.score",
+      "effect": "judge",
+      "availability": "harness_required",
+      "maps_to": [
+        "Deterministic metric calculator plus versioned semantic rubric"
+      ],
+      "required_inputs": [
+        "rubric_version"
+      ],
+      "outputs": [
+        "assertion_results",
+        "metrics",
+        "labels"
+      ],
+      "allowed_isolation": [
+        "dedicated_synthetic_scope",
+        "ephemeral_stack",
+        "none"
+      ]
+    },
+    {
+      "name": "parity.verify",
+      "effect": "read",
+      "availability": "harness_required",
+      "maps_to": [
+        "Evaluation comparator over normalized snapshots"
+      ],
+      "required_inputs": [
+        "before_ref|before_snapshot",
+        "after_ref|after_snapshot",
+        "comparison_policy"
+      ],
+      "outputs": [
+        "equivalent",
+        "diff"
+      ],
+      "allowed_isolation": [
+        "dedicated_synthetic_scope",
+        "ephemeral_stack"
+      ]
+    },
+    {
+      "name": "load.search",
+      "effect": "load",
+      "availability": "harness_required",
+      "maps_to": [
+        "deploy/load/search_load.js extended with deterministic fixture/profile export"
+      ],
+      "required_inputs": [
+        "matrix_ref"
+      ],
+      "outputs": [
+        "latency_distribution",
+        "error_rate",
+        "throughput",
+        "quality_metrics",
+        "usage_metrics"
+      ],
+      "allowed_isolation": [
+        "ephemeral_stack"
+      ]
+    },
+    {
+      "name": "load.ingestion",
+      "effect": "load",
+      "availability": "harness_required",
+      "maps_to": [
+        "Evaluation ingestion load adapter over CurationService and durable projection state"
+      ],
+      "required_inputs": [
+        "matrix_ref"
+      ],
+      "outputs": [
+        "throughput",
+        "queue_distribution",
+        "visibility_distribution",
+        "parity",
+        "usage_metrics"
+      ],
+      "allowed_isolation": [
+        "ephemeral_stack"
+      ]
+    },
+    {
+      "name": "safety.preflight",
+      "effect": "read",
+      "availability": "harness_required",
+      "maps_to": [
+        "Environment adapter scope, cost, and cleanup attestation"
+      ],
+      "required_inputs": [
+        "evaluation_scope",
+        "cost_budget",
+        "selected_effects",
+        "cleanup_action"
+      ],
+      "outputs": [
+        "scope_run_owned",
+        "production_writable",
+        "cost_bounded",
+        "cleanup_supported"
+      ],
+      "allowed_isolation": [
+        "dedicated_synthetic_scope",
+        "ephemeral_stack"
+      ]
+    },
+    {
+      "name": "cleanup.run_scope",
+      "effect": "cleanup",
+      "availability": "harness_required",
+      "maps_to": [
+        "Evaluation resource ledger; remove only IDs created by the run"
+      ],
+      "required_inputs": [
+        "run_id",
+        "created_resource_ids"
+      ],
+      "outputs": [
+        "removed_resource_ids",
+        "remaining_resource_ids",
+        "health_snapshot"
+      ],
+      "allowed_isolation": [
+        "dedicated_synthetic_scope",
+        "ephemeral_stack"
+      ]
+    },
+    {
+      "name": "load.soak",
+      "effect": "load",
+      "availability": "harness_required",
+      "maps_to": [
+        "Production-readiness load and soak runner"
+      ],
+      "required_inputs": [
+        "matrix_ref",
+        "targets_ref"
+      ],
+      "outputs": [
+        "slo",
+        "profiles",
+        "resources",
+        "correctness"
+      ],
+      "allowed_isolation": [
+        "ephemeral_stack"
+      ]
+    },
+    {
+      "name": "security.database_roles",
+      "effect": "failure_injection",
+      "availability": "harness_required",
+      "maps_to": [
+        "Production-readiness PostgreSQL RLS and role-matrix adapter"
+      ],
+      "required_inputs": [
+        "matrix_ref"
+      ],
+      "outputs": [
+        "role_matrix",
+        "audit"
+      ],
+      "allowed_isolation": [
+        "ephemeral_stack"
+      ]
+    },
+    {
+      "name": "security.mcp_authorization",
+      "effect": "failure_injection",
+      "availability": "harness_required",
+      "maps_to": [
+        "Production-readiness authenticated MCP transport and abuse-control adapter"
+      ],
+      "required_inputs": [
+        "matrix_ref"
+      ],
+      "outputs": [
+        "authorization",
+        "rate_limits",
+        "audit"
+      ],
+      "allowed_isolation": [
+        "ephemeral_stack"
+      ]
+    },
+    {
+      "name": "security.content_attacks",
+      "effect": "failure_injection",
+      "availability": "harness_required",
+      "maps_to": [
+        "Production-readiness poisoning and prompt-injection corpus runner"
+      ],
+      "required_inputs": [
+        "fixture"
+      ],
+      "outputs": [
+        "attacks",
+        "facts",
+        "retrieval",
+        "agent"
+      ],
+      "allowed_isolation": [
+        "ephemeral_stack"
+      ]
+    },
+    {
+      "name": "governance.retention_drill",
+      "effect": "failure_injection",
+      "availability": "harness_required",
+      "maps_to": [
+        "Production-readiness retention, deletion, legal-hold, and audit drill"
+      ],
+      "required_inputs": [
+        "matrix_ref",
+        "targets_ref"
+      ],
+      "outputs": [
+        "stores",
+        "holds",
+        "audit"
+      ],
+      "allowed_isolation": [
+        "ephemeral_stack"
+      ]
+    },
+    {
+      "name": "recovery.backup_restore",
+      "effect": "failure_injection",
+      "availability": "harness_required",
+      "maps_to": [
+        "Production-readiness PostgreSQL, object-store, graph, and Valkey recovery drill"
+      ],
+      "required_inputs": [
+        "matrix_ref",
+        "targets_ref"
+      ],
+      "outputs": [
+        "backup",
+        "restore",
+        "parity",
+        "timing"
+      ],
+      "allowed_isolation": [
+        "ephemeral_stack"
+      ]
+    },
+    {
+      "name": "observability.exercise",
+      "effect": "failure_injection",
+      "availability": "harness_required",
+      "maps_to": [
+        "Production-readiness signal, dashboard, alert, and runbook verifier"
+      ],
+      "required_inputs": [
+        "matrix_ref"
+      ],
+      "outputs": [
+        "signals",
+        "alerts",
+        "runbooks"
+      ],
+      "allowed_isolation": [
+        "ephemeral_stack"
+      ]
+    },
+    {
+      "name": "incident.recovery_drill",
+      "effect": "failure_injection",
+      "availability": "harness_required",
+      "maps_to": [
+        "Production-readiness incident-response and disaster-recovery exercise"
+      ],
+      "required_inputs": [
+        "matrix_ref",
+        "targets_ref"
+      ],
+      "outputs": [
+        "incidents",
+        "roles",
+        "recovery",
+        "followups"
+      ],
+      "allowed_isolation": [
+        "ephemeral_stack"
+      ]
+    },
+    {
+      "name": "rollout.exercise",
+      "effect": "failure_injection",
+      "availability": "harness_required",
+      "maps_to": [
+        "Production-readiness Fabric, role, vector, and community rollout/rollback runner"
+      ],
+      "required_inputs": [
+        "matrix_ref"
+      ],
+      "outputs": [
+        "transitions",
+        "parity",
+        "retrieval"
+      ],
+      "allowed_isolation": [
+        "ephemeral_stack"
+      ]
+    },
+    {
+      "name": "benchmark.production",
+      "effect": "load",
+      "availability": "harness_required",
+      "maps_to": [
+        "Production-readiness retrieval quality and latency benchmark"
+      ],
+      "required_inputs": [
+        "matrix_ref",
+        "targets_ref"
+      ],
+      "outputs": [
+        "quality",
+        "latency",
+        "capacity",
+        "decision"
+      ],
+      "allowed_isolation": [
+        "ephemeral_stack"
+      ]
+    }
+  ]
+}

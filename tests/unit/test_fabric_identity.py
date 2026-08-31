@@ -8,6 +8,7 @@ from vera.domain.knowledge.fabric import (
     canonical_qualifiers,
     chunk_key,
     fact_key,
+    fact_semantic_text,
     normalize_object,
     slot_key,
 )
@@ -151,3 +152,31 @@ def test_chunk_key_is_deterministic() -> None:
 
 def test_canonical_qualifiers_empty_is_stable() -> None:
     assert canonical_qualifiers(None) == canonical_qualifiers({}) == ""
+
+
+def test_fact_semantic_text_is_stable_and_preserves_qualifier_identity() -> None:
+    prod = fact_semantic_text(
+        subject_name=" Payment API ",
+        predicate="runs_on",
+        object_name="EKS",
+        object_type="scalar",
+        qualifiers={"region": "EU", "environment": "prod"},
+    )
+    reordered = fact_semantic_text(
+        subject_name="Payment API",
+        predicate="RUNS_ON",
+        object_name="EKS",
+        object_type="scalar",
+        qualifiers={"environment": "prod", "region": "eu"},
+    )
+    dev = fact_semantic_text(
+        subject_name="Payment API",
+        predicate="RUNS_ON",
+        object_name="EKS",
+        object_type="scalar",
+        qualifiers={"environment": "dev", "region": "eu"},
+    )
+
+    assert prod == reordered
+    assert prod != dev
+    assert "qualifiers=" in prod

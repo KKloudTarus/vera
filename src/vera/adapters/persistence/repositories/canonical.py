@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from sqlalchemy import func, select, update
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from vera.adapters.persistence.models.canonical import CanonicalEntityRow, EntityAliasRow
@@ -68,21 +68,6 @@ class SqlAlchemyCanonicalEntityRepository:
             .limit(1)
         )
         row = (await self._session.execute(exact)).scalars().first()
-        if row is not None:
-            return _to_entity(row)
-
-        # Fuzzy fallback for near misses only (pg_trgm similarity).
-        fuzzy = (
-            select(CanonicalEntityRow)
-            .join(EntityAliasRow, EntityAliasRow.canonical_entity_id == CanonicalEntityRow.id)
-            .where(
-                EntityAliasRow.group_id == group_id,
-                EntityAliasRow.alias_norm.op("%")(norm),
-            )
-            .order_by(func.similarity(EntityAliasRow.alias_norm, norm).desc())
-            .limit(1)
-        )
-        row = (await self._session.execute(fuzzy)).scalars().first()
         return _to_entity(row) if row is not None else None
 
     async def add_alias(self, *, entity_id: UUID, group_id: str, alias: str) -> None:

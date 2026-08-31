@@ -1,9 +1,8 @@
 """LLM cross-encoder: score query-fact relevance for stage-3 reranking.
 
 One call scores the whole head: the model sees the query and the numbered candidate facts
-and returns a relevance score in [0, 1] for each. A short, bounded head keeps the cost and
-latency low. On any parse problem it returns a neutral 0.5 for every fact, so a bad
-response degrades to the stage-2 order rather than failing the search.
+and returns a relevance score in [0, 1] for each. A short, bounded head limits cost and
+latency. Malformed responses leave lexical retrieval available.
 """
 
 from __future__ import annotations
@@ -14,6 +13,7 @@ from typing import Any
 
 from openai import AsyncOpenAI
 
+from vera.domain.ports.reranker import RerankerUnavailableError
 from vera.observability import get_logger
 
 log = get_logger(__name__)
@@ -42,7 +42,6 @@ class LlmReranker:
     async def rerank(self, *, query: str, facts: Sequence[str]) -> list[float]:
         if not facts:
             return []
-        neutral = [0.5] * len(facts)
         user = json.dumps({"query": query, "facts": list(facts)})
         response = await self._client.chat.completions.create(
             model=self._model,
@@ -59,8 +58,8 @@ class LlmReranker:
             scores = [float(s) for s in parsed["scores"]]
         except (json.JSONDecodeError, KeyError, TypeError, ValueError):
             log.warning("reranker.bad_response")
-            return neutral
+            raise RerankerUnavailableError("reranker returned malformed scores") from None
         if len(scores) != len(facts):
             log.warning("reranker.length_mismatch", got=len(scores), want=len(facts))
-            return neutral
+            raise RerankerUnavailableError("reranker returned the wrong score count")
         return [min(1.0, max(0.0, s)) for s in scores]

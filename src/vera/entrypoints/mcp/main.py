@@ -231,6 +231,7 @@ def build_server(container: Container, settings: Settings) -> MCPServer:
         conflict_handling: Literal["include", "exclude", "only"] = "include",
         limit: int = 10,
         token_budget: int = 2000,
+        usage_ref: str | None = None,
     ) -> dict[str, Any]:
         """Primary tool: assemble a bounded, cited context pack for a task from the caller's
         scopes. `project` accepts a resolved group id or project slug. Snapshot and valid-time
@@ -256,15 +257,25 @@ def build_server(container: Container, settings: Settings) -> MCPServer:
             conflict_handling=conflict_handling,
             limit=limit,
             token_budget=token_budget,
+            usage_ref=usage_ref,
         )
 
     @server.tool()
     async def knowledge_search(
-        query: str, project: str | None = None, limit: int = 10
+        query: str,
+        project: str | None = None,
+        limit: int = 10,
+        as_of: str | None = None,
+        known_as_of: str | None = None,
     ) -> dict[str, Any]:
-        """Combined, cited search over facts and passages in the caller's scopes."""
+        """Combined, cited search with independent valid-time and transaction-time bounds."""
         return await get_knowledge().search(
-            _principal_id(settings), query=query, project=project, limit=limit
+            _principal_id(settings),
+            query=query,
+            project=project,
+            limit=limit,
+            as_of=_parse_instant(as_of),
+            known_as_of=_parse_instant(known_as_of),
         )
 
     @server.tool()

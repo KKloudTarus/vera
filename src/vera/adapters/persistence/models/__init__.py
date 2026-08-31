@@ -1,6 +1,4 @@
-"""ORM tables. Importing this package registers every table on ``Base.metadata``,
-which is what Alembic autogenerate and the app rely on.
-"""
+"""Register every ORM table on the metadata used by Alembic and the application."""
 
 from vera.adapters.persistence.models.canonical import (
     CanonicalEntityRow,
@@ -15,6 +13,7 @@ from vera.adapters.persistence.models.fabric import (
     EvidenceRow,
     ExtractionRunRow,
     FactRelationRow,
+    FactRevisionRow,
     FactRow,
     KnowledgeEventRow,
 )
@@ -61,6 +60,7 @@ __all__ = [
     "EvidenceRow",
     "ExtractionRunRow",
     "FactRelationRow",
+    "FactRevisionRow",
     "FactRow",
     "GraphEdgeMapRow",
     "GraphNodeMapRow",

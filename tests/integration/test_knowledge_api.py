@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from uuid import uuid4
 
 import pytest
@@ -145,7 +146,9 @@ async def test_knowledge_contracts_end_to_end(
         )
     group = project.value.group_id
 
+    before_recording = datetime.now(UTC)
     fact_key = await _seed(sessionmaker, group)
+    after_recording = datetime.now(UTC)
     alice = _auth(alice_key.api_key)
 
     # get_context resolves the caller's scope; the project hint picks the right one.
@@ -170,6 +173,35 @@ async def test_knowledge_contracts_end_to_end(
         headers=alice,
     )
     assert naive_as_of.status_code == 422
+
+    unknown_then = await app_client.post(
+        "/v2/knowledge/search",
+        json={
+            "query": "eks",
+            "project": group,
+            "known_as_of": before_recording.isoformat(),
+        },
+        headers=alice,
+    )
+    known_now = await app_client.post(
+        "/v2/knowledge/search",
+        json={
+            "query": "eks",
+            "project": group,
+            "known_as_of": after_recording.isoformat(),
+        },
+        headers=alice,
+    )
+    assert unknown_then.status_code == 200, unknown_then.text
+    assert known_now.status_code == 200, known_now.text
+    assert not any(result["ref"] == fact_key for result in unknown_then.json()["results"])
+    assert any(result["ref"] == fact_key for result in known_now.json()["results"])
+    naive_known_as_of = await app_client.post(
+        "/v2/knowledge/search",
+        json={"query": "eks", "known_as_of": "2026-01-02T03:04:05"},
+        headers=alice,
+    )
+    assert naive_known_as_of.status_code == 422
 
     # explain_fact returns the supporting assertions.
     explain = await app_client.get(f"/v2/knowledge/facts/{fact_key}/explain", headers=alice)

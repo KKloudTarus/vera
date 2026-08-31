@@ -1,0 +1,28 @@
+{
+  "schema_version": "1.0",
+  "dataset_id": "vera-retrieval-seed-v1",
+  "facts": [
+    {"fact_id": "f-payment-owner", "source_event_time": "2026-05-01T09:00:00Z", "triple": {"subject": "Platform Team", "predicate": "OWNS", "object": "Payment API"}},
+    {"fact_id": "f-payment-runtime", "source_event_time": "2026-05-01T09:05:00Z", "triple": {"subject": "Payment API", "predicate": "RUNS_ON", "object": "prod-cluster"}},
+    {"fact_id": "f-checkout-inventory", "source_event_time": "2026-05-01T09:10:00Z", "triple": {"subject": "Checkout Service", "predicate": "DEPENDS_ON", "object": "Inventory API"}},
+    {"fact_id": "f-checkout-tax", "source_event_time": "2026-05-01T09:15:00Z", "triple": {"subject": "Checkout Service", "predicate": "DEPENDS_ON", "object": "Tax API"}},
+    {"fact_id": "f-inventory-runtime", "source_event_time": "2026-05-01T09:20:00Z", "triple": {"subject": "Inventory API", "predicate": "RUNS_ON", "object": "inventory-cluster"}},
+    {"fact_id": "f-platform-repo", "source_event_time": "2026-05-01T09:25:00Z", "triple": {"subject": "Platform Team", "predicate": "OWNS", "object": "payments-repository"}},
+    {"fact_id": "f-payment-checkout", "source_event_time": "2026-05-01T09:30:00Z", "triple": {"subject": "Payment API", "predicate": "DEPENDS_ON", "object": "Checkout Service"}},
+    {"fact_id": "f-checkout-runtime", "source_event_time": "2026-05-01T09:35:00Z", "triple": {"subject": "Checkout Service", "predicate": "DEPLOYED_TO", "object": "prod-east"}}
+  ],
+  "queries": [
+    {"query_id": "q-owner-en-1", "text": "Who owns Payment API?", "expected": "Platform Team", "relevance": {"f-payment-owner": 3}},
+    {"query_id": "q-owner-en-2", "text": "Which team is responsible for the payment service?", "expected": "Platform Team", "relevance": {"f-payment-owner": 3}},
+    {"query_id": "q-owner-vi-1", "text": "Doi nao phu trach dich vu thanh toan?", "expected": "Platform Team", "relevance": {"f-payment-owner": 3}},
+    {"query_id": "q-runtime-en-1", "text": "Where does Payment API run?", "expected": "prod-cluster", "relevance": {"f-payment-runtime": 3}},
+    {"query_id": "q-runtime-en-2", "text": "What is the production cluster for payments?", "expected": "prod-cluster", "relevance": {"f-payment-runtime": 3}},
+    {"query_id": "q-checkout-deps-1", "text": "What does Checkout Service depend on?", "expected": ["Inventory API", "Tax API"], "relevance": {"f-checkout-inventory": 3, "f-checkout-tax": 3}},
+    {"query_id": "q-checkout-deps-2", "text": "List Checkout downstream APIs", "expected": ["Inventory API", "Tax API"], "relevance": {"f-checkout-inventory": 3, "f-checkout-tax": 3}},
+    {"query_id": "q-inventory-runtime", "text": "Which cluster hosts Inventory API?", "expected": "inventory-cluster", "relevance": {"f-inventory-runtime": 3}},
+    {"query_id": "q-repository", "text": "What repository does Platform Team own?", "expected": "payments-repository", "relevance": {"f-platform-repo": 3}},
+    {"query_id": "q-payment-dependency", "text": "Does Payment API use Checkout Service?", "expected": "Checkout Service", "relevance": {"f-payment-checkout": 3}},
+    {"query_id": "q-checkout-deployment", "text": "Where is Checkout deployed?", "expected": "prod-east", "relevance": {"f-checkout-runtime": 3}},
+    {"query_id": "q-negative-salary", "text": "What is Alice's current salary?", "expected": "abstain", "relevance": {}}
+  ]
+}

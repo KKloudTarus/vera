@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 import pytest
 
@@ -15,7 +15,7 @@ from vera.application.retrieval.context_assembler import (
     _pack,
     _recency,
 )
-from vera.domain.ports.retrieval_index import FactHit, PassageHit
+from vera.domain.ports.retrieval_index import ContentAvailability, FactHit, PassageHit
 from vera.shared.time import utc_now
 
 
@@ -94,6 +94,7 @@ def test_pack_accounts_for_full_citation_excerpts() -> None:
 class _FakeFacts:
     def __init__(self, hits: list[FactHit]) -> None:
         self._hits = hits
+        self.known_as_of: datetime | None = None
 
     async def search(
         self,
@@ -102,21 +103,35 @@ class _FakeFacts:
         query,
         limit,
         as_of=None,
+        known_as_of=None,
         restrict_fact_ids=None,
         snapshot_id=None,
         filters=None,
     ):
+        self.known_as_of = known_as_of
         return self._hits
 
 
 class _FakePassages:
     def __init__(self, hits: list[PassageHit]) -> None:
         self._hits = hits
+        self.created_before: datetime | None = None
+        self.calls = 0
 
     async def search(
         self, *, group_id, query, limit, created_before=None, snapshot_id=None, filters=None
     ):
+        self.calls += 1
+        self.created_before = created_before
         return self._hits
+
+
+class _FakeContentAvailability:
+    def __init__(self, *, passages: bool, code: bool) -> None:
+        self._available = ContentAvailability(passages=passages, code=code)
+
+    async def get(self, *, group_id: str, snapshot_id: str | None = None) -> ContentAvailability:
+        return self._available
 
 
 def _fact(key: str, obj: str, lifecycle: str = "active", authority: float = 1.0) -> FactHit:
@@ -162,3 +177,37 @@ async def test_assemble_combines_sources_annotates_conflict_and_cites() -> None:
     kinds = [r.kind for r in result.results]
     assert "fact" in kinds
     assert kinds.count("passage") < 5
+
+
+@pytest.mark.asyncio
+async def test_valid_time_does_not_imply_a_transaction_boundary() -> None:
+    boundary = utc_now()
+    facts = _FakeFacts([])
+    passages = _FakePassages([])
+    code = _FakePassages([])
+
+    await ContextAssembler(facts=facts, passages=passages, code=code).assemble(
+        query="payment", group_id="p:x", as_of=boundary
+    )
+
+    assert facts.known_as_of is None
+    assert passages.created_before is None
+    assert code.created_before is None
+
+
+@pytest.mark.asyncio
+async def test_assemble_skips_indexes_for_unavailable_content() -> None:
+    passages = _FakePassages([_passage("passage", "version", 1.0)])
+    code = _FakePassages([_passage("code", "version", 1.0)])
+    assembler = ContextAssembler(
+        facts=_FakeFacts([_fact("fact", "eks")]),
+        passages=passages,
+        code=code,
+        content_availability=_FakeContentAvailability(passages=False, code=False),
+    )
+
+    result = await assembler.assemble(query="payment", group_id="p:x")
+
+    assert [candidate.kind for candidate in result.results] == ["fact"]
+    assert passages.calls == 0
+    assert code.calls == 0

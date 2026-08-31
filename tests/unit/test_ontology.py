@@ -53,13 +53,24 @@ class _FakeResults:
     edges: ClassVar[list[Any]] = []
 
 
+class _FakeTripletResults:
+    def __init__(self, source: Any, edge: Any, target: Any) -> None:
+        self.nodes = [source, target]
+        self.edges = [edge]
+
+
 class _CapturingClient:
     def __init__(self) -> None:
         self.add_episode_kwargs: dict[str, Any] | None = None
+        self.triplet: tuple[Any, Any, Any] | None = None
 
     async def add_episode(self, **kwargs: Any) -> _FakeResults:
         self.add_episode_kwargs = kwargs
         return _FakeResults()
+
+    async def add_triplet(self, source: Any, edge: Any, target: Any) -> _FakeTripletResults:
+        self.triplet = (source, edge, target)
+        return _FakeTripletResults(source, edge, target)
 
 
 @pytest.mark.asyncio
@@ -80,3 +91,37 @@ async def test_text_ingestion_passes_the_ontology_to_the_extractor() -> None:
     assert client.add_episode_kwargs["entity_types"] is ENTITY_TYPES
     assert client.add_episode_kwargs["edge_types"] is EDGE_TYPES
     assert client.add_episode_kwargs["edge_type_map"] is EDGE_TYPE_MAP
+
+
+@pytest.mark.asyncio
+async def test_structured_ingestion_preserves_target_object_type() -> None:
+    client = _CapturingClient()
+    engine = GraphitiMemoryEngine(client)  # type: ignore[arg-type]
+    reference_time = utc_now()
+
+    await engine.ingest_episode(
+        EpisodeSpec(
+            source_id=SourceId("cmdb:1"),
+            group_id=GroupId("p:x"),
+            body="",
+            reference_time=reference_time,
+            knowledge_type="fact_triple",
+            metadata={
+                "triples": [
+                    {
+                        "subject": "paymentapi",
+                        "predicate": "RUNS_ON",
+                        "object": "production",
+                        "entity_type": "Service",
+                        "object_type": "Environment",
+                    }
+                ]
+            },
+        )
+    )
+
+    assert client.triplet is not None
+    source, edge, target = client.triplet
+    assert source.labels == ["Entity", "Service"]
+    assert target.labels == ["Entity", "Environment"]
+    assert edge.valid_at == reference_time

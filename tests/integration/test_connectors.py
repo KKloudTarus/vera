@@ -7,6 +7,7 @@ without duplicates. The scheduled-Confluence test is the phase's headline check.
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 from collections.abc import Callable
 
@@ -24,7 +25,7 @@ from vera.adapters.persistence.repositories.sync import SqlAlchemySyncStateStore
 from vera.adapters.persistence.unit_of_work import SqlAlchemyUnitOfWork
 from vera.application.connectors import SyncRegistration, SyncRunner, SyncScheduler
 from vera.bootstrap import Container
-from vera.domain.ports.connectors import ConnectorBatch, ConnectorRecord
+from vera.domain.ports.connectors import ConnectorBatch, ConnectorRecord, SyncOutcome
 from vera.domain.ports.curation import ExtractedClaim
 from vera.entrypoints.worker.lane_pool import LanePool
 from vera.entrypoints.worker.main import run_until_empty
@@ -234,6 +235,7 @@ async def test_scheduled_confluence_sync_updates_without_duplicates(
         scheduler = SyncScheduler(
             runner=_runner(sessionmaker),
             state=SqlAlchemySyncStateStore(sessionmaker),
+            uow_factory=lambda: SqlAlchemyUnitOfWork(sessionmaker),
             registrations=[
                 SyncRegistration(
                     source_id=source_id,  # type: ignore[arg-type]
@@ -249,6 +251,114 @@ async def test_scheduled_confluence_sync_updates_without_duplicates(
         # Second run is due again but the source reports no changes: no duplicate.
         await scheduler.run_due()
         assert await _artifact_count() == 1
+
+
+async def test_source_sync_lease_expires_and_enforces_ownership(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    source: tuple[str, object],
+) -> None:
+    _, source_id = source
+    first_owner = uuid7()
+    second_owner = uuid7()
+
+    async with SqlAlchemyUnitOfWork(sessionmaker) as uow:
+        claimed = await uow.sources.claim_sync_lease(
+            source_id=source_id,  # type: ignore[arg-type]
+            owner_token=first_owner,
+            lease_duration_s=0.05,
+        )
+        await uow.commit()
+    assert claimed is True
+
+    async with SqlAlchemyUnitOfWork(sessionmaker) as uow:
+        blocked = await uow.sources.claim_sync_lease(
+            source_id=source_id,  # type: ignore[arg-type]
+            owner_token=second_owner,
+            lease_duration_s=1.0,
+        )
+        await uow.commit()
+    assert blocked is False
+
+    await asyncio.sleep(0.08)
+    async with SqlAlchemyUnitOfWork(sessionmaker) as uow:
+        reclaimed = await uow.sources.claim_sync_lease(
+            source_id=source_id,  # type: ignore[arg-type]
+            owner_token=second_owner,
+            lease_duration_s=1.0,
+        )
+        stale_renewal = await uow.sources.renew_sync_lease(
+            source_id=source_id,  # type: ignore[arg-type]
+            owner_token=first_owner,
+            lease_duration_s=1.0,
+        )
+        stale_release = await uow.sources.release_sync_lease(
+            source_id=source_id,  # type: ignore[arg-type]
+            owner_token=first_owner,
+        )
+        renewed = await uow.sources.renew_sync_lease(
+            source_id=source_id,  # type: ignore[arg-type]
+            owner_token=second_owner,
+            lease_duration_s=1.0,
+        )
+        released = await uow.sources.release_sync_lease(
+            source_id=source_id,  # type: ignore[arg-type]
+            owner_token=second_owner,
+        )
+        await uow.commit()
+
+    assert reclaimed is True
+    assert stale_renewal is False
+    assert stale_release is False
+    assert renewed is True
+    assert released is True
+
+
+async def test_schedulers_do_not_sync_the_same_source_concurrently(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    source: tuple[str, object],
+) -> None:
+    group, source_id = source
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    class _Runner:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def sync(self, **_kwargs):
+            self.calls += 1
+            entered.set()
+            await release.wait()
+            return SyncOutcome(processed=0, unchanged=0, cursor={})
+
+    runner = _Runner()
+    registration = SyncRegistration(
+        source_id=source_id,  # type: ignore[arg-type]
+        group_id=group,
+        connector=_FakeConnector([ConnectorBatch(records=(), next_cursor={})]),
+        interval_s=60.0,
+    )
+
+    def _scheduler() -> SyncScheduler:
+        return SyncScheduler(
+            runner=runner,  # type: ignore[arg-type]
+            state=SqlAlchemySyncStateStore(sessionmaker),
+            uow_factory=lambda: SqlAlchemyUnitOfWork(sessionmaker),
+            registrations=[registration],
+            lease_duration_s=0.3,
+        )
+
+    async with asyncio.TaskGroup() as tasks:
+        first = tasks.create_task(_scheduler().run_due())
+        await entered.wait()
+        # The original claim has expired by now. Renewal must still exclude another worker.
+        await asyncio.sleep(0.45)
+        second = await _scheduler().run_due()
+        release.set()
+
+    assert len(first.result()) == 1
+    assert second == []
+    assert runner.calls == 1
 
 
 async def test_sync_drains_all_pages_in_one_run(

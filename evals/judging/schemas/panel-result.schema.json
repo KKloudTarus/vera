@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vera.local/evals/judging/schemas/panel-result.schema.json",
+  "title": "VERA judge panel result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "packet_id", "status", "quality_status", "hard_gate_status", "judge_count", "roles", "providers", "model_families", "dimension_medians", "overall_score", "max_score_spread", "critical_failures", "human_review_required", "inputs", "notes"],
+  "properties": {
+    "schema_version": {"type": "string", "enum": ["1.0", "1.1"]},
+    "packet_id": {"type": "string", "minLength": 1},
+    "status": {"type": "string", "enum": ["PASS", "FAIL", "BLOCKED"]},
+    "quality_status": {"type": "string", "enum": ["PASS", "FAIL", "DISPUTED", "INSUFFICIENT_PANEL"]},
+    "hard_gate_status": {"type": "string", "enum": ["PASS", "FAIL", "BLOCKED"]},
+    "judge_count": {"type": "integer", "minimum": 0},
+    "roles": {"type": "array", "uniqueItems": true, "items": {"type": "string"}},
+    "providers": {"type": "array", "uniqueItems": true, "items": {"type": "string"}},
+    "model_families": {"type": "array", "uniqueItems": true, "items": {"type": "string"}},
+    "dimension_medians": {"type": "object", "additionalProperties": {"type": "number", "minimum": 0, "maximum": 1}},
+    "overall_score": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+    "max_score_spread": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+    "critical_failures": {"type": "array", "items": {"type": "object"}},
+    "human_review_required": {"type": "boolean"},
+    "inputs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["packet_sha256", "report_sha256", "assignment_sha256", "judgments"],
+      "properties": {
+        "packet_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "report_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "assignment_ref": {"type": "string", "minLength": 1},
+        "assignment_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "judgments": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["actor_id", "ref", "sha256"],
+            "properties": {
+              "actor_id": {"type": "string", "minLength": 1},
+              "ref": {"type": "string", "minLength": 1},
+              "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+            }
+          }
+        }
+      }
+    },
+    "notes": {"type": "string"}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"schema_version": {"const": "1.1"}}},
+      "then": {
+        "properties": {
+          "inputs": {"required": ["assignment_ref"]}
+        }
+      }
+    }
+  ]
+}

@@ -1,8 +1,7 @@
 """Knowledge tables: the raw-to-verified pipeline plus its provenance.
 
-Flow: knowledge_source produces artifacts, each artifact keeps immutable versions,
-a version yields candidate_claims, reviews move a claim to verified, and a verified
-claim becomes a published_episode that the ingestion worker sends to the graph.
+Sources produce artifacts with immutable versions. Reviews promote candidate claims into
+published episodes that the ingestion worker projects into the graph.
 """
 
 from __future__ import annotations
@@ -61,6 +60,10 @@ class KnowledgeSourceRow(Base, UUIDPK, Timestamps):
     )
     trust_tier: Mapped[int] = mapped_column(Integer, nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
+    sync_lease_owner: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True), nullable=True)
+    sync_lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     __table_args__ = (
         CheckConstraint(f"kind IN ({_SOURCE_KINDS})", name="ck_source_kind"),
@@ -80,6 +83,11 @@ class ArtifactRow(Base, UUIDPK, Timestamps):
     s3_key: Mapped[str] = mapped_column(String(1024), nullable=False)
     reference_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     current_version: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1")
+    source_revision: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    source_updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    source_version_id: Mapped[str | None] = mapped_column(String(256), nullable=True)
 
     __table_args__ = (UniqueConstraint("source_id", "external_id", name="uq_artifact_external"),)
 

@@ -4,6 +4,8 @@ conflict policy, contamination guard, and publish -> outbox. Postgres only.
 
 from __future__ import annotations
 
+import asyncio
+import json
 from collections.abc import AsyncIterator
 from uuid import UUID
 
@@ -13,8 +15,10 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from vera.adapters.curation.extractor import StructuredClaimExtractor
+from vera.adapters.objectstore.s3_adapter import S3ObjectStore
 from vera.adapters.persistence.unit_of_work import SqlAlchemyUnitOfWork
 from vera.application.curation import CurationService, IngestArtifact
+from vera.config.settings import get_settings
 from vera.domain.knowledge.models import VerificationStatus
 from vera.domain.ports.curation import ExtractedClaim
 from vera.shared.errors import is_err, is_ok
@@ -30,6 +34,19 @@ class _Fixture:
         self.group = group
         self.workspace_id = workspace_id
         self.project_id = project_id
+
+
+class _DisabledExtractor:
+    @property
+    def provider(self) -> str:
+        return "disabled"
+
+    @property
+    def model(self) -> str:
+        return "disabled"
+
+    async def extract(self, **_kwargs: object) -> list[ExtractedClaim]:
+        return []
 
 
 @pytest_asyncio.fixture
@@ -103,6 +120,243 @@ async def test_tier1_auto_publishes_and_enqueues(
     episodes, jobs = await _counts(sessionmaker, tenant.group)
     assert episodes == 1
     assert jobs == 1
+
+
+async def test_metadata_only_change_appends_an_artifact_version(
+    sessionmaker: async_sessionmaker[AsyncSession], tenant: _Fixture
+) -> None:
+    async with SqlAlchemyUnitOfWork(sessionmaker) as uow:
+        await uow.use_tenant(tenant.group)
+        source_id = await _source(uow, tenant, kind="cmdb", tier=1)
+        service = CurationService(uow, StructuredClaimExtractor())
+        first = await service.ingest_artifact(
+            IngestArtifact(
+                source_id=source_id,
+                group_id=tenant.group,
+                external_id="metadata-only",
+                body="",
+                knowledge_type="fact_triple",
+                metadata=_triple_meta("Payment API", "RUNS_ON", "cluster-a"),
+            )
+        )
+        second = await service.ingest_artifact(
+            IngestArtifact(
+                source_id=source_id,
+                group_id=tenant.group,
+                external_id="metadata-only",
+                body="",
+                knowledge_type="fact_triple",
+                metadata=_triple_meta("Payment API", "RUNS_ON", "cluster-b"),
+            )
+        )
+        replay = await service.ingest_artifact(
+            IngestArtifact(
+                source_id=source_id,
+                group_id=tenant.group,
+                external_id="metadata-only",
+                body="",
+                knowledge_type="fact_triple",
+                metadata=_triple_meta("Payment API", "RUNS_ON", "cluster-b"),
+            )
+        )
+        await uow.commit()
+
+    assert is_ok(first) and is_ok(second) and is_ok(replay)
+    assert first.value.artifact_version_id != second.value.artifact_version_id
+    assert replay.value.action == "unchanged"
+    assert replay.value.artifact_version_id == second.value.artifact_version_id
+    async with sessionmaker() as session:
+        version_count = await session.scalar(
+            text(
+                "SELECT count(*) FROM artifact_versions av "
+                "JOIN artifacts a ON a.id = av.artifact_id "
+                "WHERE a.source_id = :source_id AND a.external_id = 'metadata-only'"
+            ),
+            {"source_id": source_id},
+        )
+    assert version_count == 2
+
+
+async def test_semantic_noop_advances_the_source_watermark(
+    sessionmaker: async_sessionmaker[AsyncSession], tenant: _Fixture
+) -> None:
+    async with SqlAlchemyUnitOfWork(sessionmaker) as uow:
+        await uow.use_tenant(tenant.group)
+        source_id = await _source(uow, tenant, kind="cmdb", tier=1)
+        service = CurationService(uow, StructuredClaimExtractor())
+        first = await service.ingest_artifact(
+            IngestArtifact(
+                source_id=source_id,
+                group_id=tenant.group,
+                external_id="ordered-noop",
+                body="same",
+                source_revision=1,
+            )
+        )
+        newer_noop = await service.ingest_artifact(
+            IngestArtifact(
+                source_id=source_id,
+                group_id=tenant.group,
+                external_id="ordered-noop",
+                body="same",
+                source_revision=3,
+            )
+        )
+        delayed_change = await service.ingest_artifact(
+            IngestArtifact(
+                source_id=source_id,
+                group_id=tenant.group,
+                external_id="ordered-noop",
+                body="stale change",
+                source_revision=2,
+            )
+        )
+        head = await uow.artifacts.get_head(source_id=source_id, external_id="ordered-noop")
+        await uow.commit()
+
+    assert is_ok(first) and is_ok(newer_noop) and is_ok(delayed_change)
+    assert newer_noop.value.action == "unchanged"
+    assert delayed_change.value.action == "stale"
+    assert head is not None
+    assert head.version == 1
+    assert head.source_revision == 3
+
+
+async def test_reextract_uses_the_existing_artifact_version(
+    sessionmaker: async_sessionmaker[AsyncSession], tenant: _Fixture
+) -> None:
+    object_store = S3ObjectStore(get_settings().objectstore)
+    async with SqlAlchemyUnitOfWork(sessionmaker) as uow:
+        await uow.use_tenant(tenant.group)
+        source_id = await _source(uow, tenant, kind="cmdb", tier=1)
+        stored = await CurationService(uow, _DisabledExtractor(), object_store).ingest_artifact(
+            IngestArtifact(
+                source_id=source_id,
+                group_id=tenant.group,
+                external_id="extractor-recovery",
+                body="",
+                knowledge_type="fact_triple",
+                metadata=_triple_meta("Checkout Service", "DEPENDS_ON", "Inventory API"),
+            )
+        )
+        assert is_ok(stored)
+        recovered = await CurationService(
+            uow, StructuredClaimExtractor(), object_store
+        ).reextract_artifact(
+            UUID(stored.value.artifact_version_id),
+            group_id=tenant.group,
+        )
+        foreign = await CurationService(
+            uow, StructuredClaimExtractor(), object_store
+        ).reextract_artifact(
+            UUID(stored.value.artifact_version_id),
+            group_id="p:foreign",
+        )
+        await uow.commit()
+
+    assert is_ok(recovered)
+    assert is_err(foreign)
+    assert stored.value.claim_ids == ()
+    assert recovered.value.action == "reextracted"
+    assert recovered.value.artifact_version_id == stored.value.artifact_version_id
+    assert len(recovered.value.claim_ids) == 1
+    async with sessionmaker() as session:
+        version_count = await session.scalar(
+            text(
+                "SELECT count(*) FROM artifact_versions av "
+                "JOIN artifacts a ON a.id = av.artifact_id "
+                "WHERE a.source_id = :source_id AND a.external_id = 'extractor-recovery'"
+            ),
+            {"source_id": source_id},
+        )
+    assert version_count == 1
+
+
+async def test_concurrent_artifact_updates_allocate_distinct_versions_and_objects(
+    sessionmaker: async_sessionmaker[AsyncSession], tenant: _Fixture
+) -> None:
+    async with SqlAlchemyUnitOfWork(sessionmaker) as uow:
+        await uow.use_tenant(tenant.group)
+        source_id = await _source(uow, tenant, kind="cmdb", tier=4)
+        await uow.commit()
+
+    store = S3ObjectStore(get_settings().objectstore)
+
+    async def _ingest(body: str):
+        async with SqlAlchemyUnitOfWork(sessionmaker) as uow:
+            await uow.use_tenant(tenant.group)
+            result = await CurationService(uow, _DisabledExtractor(), store).ingest_artifact(
+                IngestArtifact(
+                    source_id=source_id,
+                    group_id=tenant.group,
+                    external_id="concurrent-update",
+                    body=body,
+                )
+            )
+            await uow.commit()
+        return result
+
+    first, second = await asyncio.gather(_ingest("alpha"), _ingest("bravo"))
+    assert is_ok(first) and is_ok(second)
+
+    async with sessionmaker() as session:
+        versions = (
+            await session.execute(
+                text(
+                    "SELECT av.version, av.s3_key FROM artifact_versions av "
+                    "JOIN artifacts a ON a.id = av.artifact_id "
+                    "WHERE a.source_id = :source_id AND a.external_id = 'concurrent-update' "
+                    "ORDER BY av.version"
+                ),
+                {"source_id": source_id},
+            )
+        ).all()
+
+    assert [row.version for row in versions] == [1, 2]
+    assert len({row.s3_key for row in versions}) == 2
+    payloads = [json.loads((await store.get(key=row.s3_key)).decode()) for row in versions]
+    assert {payload["body"] for payload in payloads} == {"alpha", "bravo"}
+
+
+async def test_concurrent_identical_artifact_ingest_is_idempotent(
+    sessionmaker: async_sessionmaker[AsyncSession], tenant: _Fixture
+) -> None:
+    async with SqlAlchemyUnitOfWork(sessionmaker) as uow:
+        await uow.use_tenant(tenant.group)
+        source_id = await _source(uow, tenant, kind="cmdb", tier=4)
+        await uow.commit()
+
+    store = S3ObjectStore(get_settings().objectstore)
+
+    async def _ingest():
+        async with SqlAlchemyUnitOfWork(sessionmaker) as uow:
+            await uow.use_tenant(tenant.group)
+            result = await CurationService(uow, _DisabledExtractor(), store).ingest_artifact(
+                IngestArtifact(
+                    source_id=source_id,
+                    group_id=tenant.group,
+                    external_id="concurrent-replay",
+                    body="same payload",
+                )
+            )
+            await uow.commit()
+        return result
+
+    first, second = await asyncio.gather(_ingest(), _ingest())
+    assert is_ok(first) and is_ok(second)
+    assert first.value.artifact_version_id == second.value.artifact_version_id
+    assert {first.value.action, second.value.action} == {"proposal_only", "unchanged"}
+
+    async with sessionmaker() as session:
+        version_count = await session.scalar(
+            text(
+                "SELECT count(*) FROM artifact_versions av "
+                "JOIN artifacts a ON a.id = av.artifact_id "
+                "WHERE a.source_id = :source_id AND a.external_id = 'concurrent-replay'"
+            ),
+            {"source_id": source_id},
+        )
+    assert version_count == 1
 
 
 async def test_tier4_only_proposes(

@@ -1,0 +1,104 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vera.local/evals/schemas/baseline.schema.json",
+  "title": "VERA accepted evaluation baseline",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "baseline_id",
+    "promoted_at",
+    "promoted_by",
+    "source_run_uri",
+    "source_report_sha256",
+    "compatibility",
+    "metrics",
+    "threshold_policies"
+  ],
+  "properties": {
+    "schema_version": {"type": "string", "const": "1.0"},
+    "baseline_id": {"type": "string", "minLength": 1},
+    "promoted_at": {"type": "string", "format": "date-time"},
+    "promoted_by": {"type": "string", "minLength": 1},
+    "source_run_uri": {"type": "string", "minLength": 1},
+    "source_report_sha256": {"$ref": "#/$defs/sha256"},
+    "compatibility": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "dataset_sha256",
+        "profile",
+        "selection_sha256",
+        "checklist_sha256",
+        "action_catalog_sha256",
+        "execution_profile_sha256",
+        "config_fingerprint",
+        "service_version",
+        "graph_backend",
+        "cache_state",
+        "concurrency",
+        "hardware_profile",
+        "models",
+        "pipeline_versions",
+        "ontology_version"
+      ],
+      "properties": {
+        "dataset_sha256": {"$ref": "#/$defs/sha256"},
+        "profile": {"type": "string", "enum": ["daily", "nightly", "weekly", "release"]},
+        "selection_sha256": {"$ref": "#/$defs/sha256"},
+        "checklist_sha256": {"$ref": "#/$defs/sha256"},
+        "action_catalog_sha256": {"$ref": "#/$defs/sha256"},
+        "execution_profile_sha256": {"$ref": "#/$defs/sha256"},
+        "config_fingerprint": {"$ref": "#/$defs/sha256"},
+        "service_version": {"type": "string"},
+        "graph_backend": {"type": "string"},
+        "cache_state": {"type": "string", "enum": ["cold", "warm", "mixed", "disabled"]},
+        "concurrency": {"type": "integer", "minimum": 1},
+        "hardware_profile": {"type": "string"},
+        "models": {"type": "object", "additionalProperties": {"type": ["string", "null"]}},
+        "pipeline_versions": {"type": "object", "additionalProperties": {"type": ["string", "null"]}},
+        "ontology_version": {"type": "string"}
+      }
+    },
+    "metrics": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "dimensions", "unit", "value", "sample_size"],
+        "properties": {
+          "name": {"type": "string"},
+          "dimensions": {"type": "object", "additionalProperties": {"type": ["string", "number", "integer", "boolean", "null"]}},
+          "unit": {"type": "string"},
+          "value": {"type": "number"},
+          "sample_size": {"type": "integer", "minimum": 1},
+          "confidence_interval_95": {
+            "type": ["object", "null"],
+            "additionalProperties": false,
+            "required": ["low", "high"],
+            "properties": {"low": {"type": "number"}, "high": {"type": "number"}}
+          }
+        }
+      }
+    },
+    "threshold_policies": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["metric", "comparator", "value", "minimum_sample_size", "rationale", "owner"],
+        "properties": {
+          "metric": {"type": "string"},
+          "comparator": {"type": "string", "enum": ["lt", "lte", "gt", "gte", "eq"]},
+          "value": {"type": "number"},
+          "minimum_sample_size": {"type": "integer", "minimum": 1},
+          "rationale": {"type": "string", "minLength": 1},
+          "owner": {"type": "string", "minLength": 1}
+        }
+      }
+    }
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[a-fA-F0-9]{64}$"}
+  }
+}

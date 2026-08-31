@@ -1,0 +1,89 @@
+{
+  "schema_version": "1.0",
+  "profile_id": "production-readiness-v1",
+  "dependency": {
+    "required_gate": "knowledge-fabric-lifecycle",
+    "required_state": "passed",
+    "fabric_write_mode": "fabric"
+  },
+  "targets": {
+    "search_p95_ms": null,
+    "search_p99_ms": null,
+    "search_error_rate": null,
+    "ingestion_records_per_second": null,
+    "time_to_searchable_p95_ms": null,
+    "queue_lag_p95_ms": null,
+    "availability_percent": null,
+    "rpo_seconds": null,
+    "rto_seconds": null,
+    "retention_days": null,
+    "legal_hold_release_sla_seconds": null
+  },
+  "load_soak": {
+    "data_volumes": [null],
+    "scope_counts": [1, 5, 20],
+    "concurrency": [1, 8, 32],
+    "cache_states": ["cold", "warm"],
+    "duration_seconds": null,
+    "operations": ["ingest", "knowledge_get_context", "knowledge_search", "knowledge_explore"]
+  },
+  "database_role_matrix": {
+    "roles": ["api", "worker", "mcp", "trusted_read"],
+    "operations": ["tenant_read", "cross_scope_read", "fabric_write", "projection_write", "erase"],
+    "tenant_count": 2
+  },
+  "mcp_authorization_matrix": {
+    "principals": ["anonymous", "valid_user", "expired_token", "wrong_audience", "revoked_user"],
+    "tools": [
+      "knowledge_get_context",
+      "knowledge_search",
+      "knowledge_get_fact",
+      "knowledge_get_entity",
+      "knowledge_get_source",
+      "knowledge_explore",
+      "knowledge_get_context_pack",
+      "knowledge_create_snapshot",
+      "knowledge_propose"
+    ],
+    "abuse_cases": ["scope_tampering", "oversized_limit", "rapid_replay", "enumeration", "expired_pack"]
+  },
+  "content_attack_matrix": {
+    "locations": ["connector_body", "source_metadata", "derived_summary", "retrieval_query"],
+    "attacks": ["instruction_override", "tool_exfiltration", "false_authority", "citation_spoof", "secret_request"],
+    "trusted_canary_count": 2
+  },
+  "retention_matrix": {
+    "stores": ["postgres", "object_store", "graph", "valkey", "snapshot", "context_pack", "audit"],
+    "states": ["active", "expired", "deleted", "legal_hold"],
+    "clock_advance_seconds": null
+  },
+  "backup_restore_matrix": {
+    "stores": ["postgres", "object_store", "graph", "valkey"],
+    "restore_targets": ["empty_stack", "point_in_time"],
+    "faults": ["authoritative_store_loss", "derived_store_loss", "partial_restore"]
+  },
+  "observability_matrix": {
+    "signals": ["write_failure", "projection_drift", "queue_lag", "freshness", "extraction_failure", "retrieval_latency"],
+    "required_outputs": ["metric", "trace", "dashboard", "alert", "runbook_link"]
+  },
+  "incident_matrix": {
+    "incidents": ["postgres_unavailable", "object_store_unavailable", "graph_corruption", "queue_stall", "credential_compromise"],
+    "required_roles": ["incident_commander", "operations", "security", "application_owner"]
+  },
+  "rollout_matrix": {
+    "transitions": [
+      "legacy_to_dual",
+      "dual_to_fabric",
+      "role_enforcement_off_to_on",
+      "vector_retrieval_off_to_on",
+      "community_build_off_to_on"
+    ],
+    "directions": ["rollout", "rollback"]
+  },
+  "production_benchmark": {
+    "corpus_size": null,
+    "query_count": null,
+    "scope_distribution": [1, 5, 20],
+    "required_metrics": ["hit_at_5", "mrr", "ndcg_at_10", "citation_rate", "p95_ms", "p99_ms", "error_rate"]
+  }
+}

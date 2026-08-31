@@ -55,7 +55,7 @@ class UsageContext:
 @dataclass(frozen=True, slots=True)
 class UsageEvent:
     model: str
-    operation: str  # 'llm' or 'embedding'
+    operation: str  # 'llm' (including reranking) or 'embedding'
     prompt_tokens: int
     completion_tokens: int
     cost_usd: float

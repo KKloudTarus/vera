@@ -1,0 +1,23 @@
+{
+  "schema_version": "1.0",
+  "policy_id": "diverse-independent-panel-v1",
+  "minimum_judges": 4,
+  "required_roles": ["grounding", "task_utility", "adversarial_safety", "synthesis_uncertainty"],
+  "minimum_distinct_model_families": 3,
+  "minimum_distinct_providers": 2,
+  "candidate_identity_blinded": true,
+  "trusted_assignment_required": true,
+  "allow_multiple_valid_outputs": true,
+  "aggregation": "median_by_dimension_then_weighted_applicable_mean",
+  "minimum_dimension_judges": 3,
+  "dimension_pass_threshold": 0.65,
+  "overall_pass_threshold": 0.72,
+  "grounding_pass_threshold": 0.8,
+  "max_panel_score_spread": 0.2,
+  "critical_failure_minimum_votes": 2,
+  "critical_failure_policy": "two independent matching votes confirm a critical failure; a single allegation is disputed and requires another judge plus human review",
+  "hard_gate_policy": "panel scores cannot override failed deterministic assertions, cleanup, security, temporal, lineage, or performance gates",
+  "disagreement_policy": "spread above threshold or conflicting critical-failure decisions requires an additional judge and human review",
+  "human_override_allowed": true,
+  "human_override_requires_rationale": true
+}

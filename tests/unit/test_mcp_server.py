@@ -48,8 +48,11 @@ async def test_server_exposes_the_memory_tools() -> None:
     container = build_container(settings)
     try:
         server = build_server(container, settings)
-        names = {tool.name for tool in await server.list_tools()}
+        tools = await server.list_tools()
+        names = {tool.name for tool in tools}
         assert names == _EXPECTED
+        search = next(tool for tool in tools if tool.name == "knowledge_search")
+        assert {"as_of", "known_as_of"} <= search.input_schema["properties"].keys()
     finally:
         await dispose_container(container)
 

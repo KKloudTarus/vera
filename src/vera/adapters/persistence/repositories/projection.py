@@ -30,10 +30,15 @@ _ACTIVE_FACTS = text(
     JOIN canonical_entities cs ON cs.id = f.subject_entity_id
     LEFT JOIN canonical_entities co ON co.id = f.object_entity_id
     LEFT JOIN LATERAL (
-        SELECT array_agg(DISTINCT a.artifact_version_id::text)
-               FILTER (WHERE a.artifact_version_id IS NOT NULL) AS episodes
+        SELECT array_agg(DISTINCT pe.id::text ORDER BY pe.id::text) AS episodes
         FROM assertions a
-        WHERE a.fact_id = f.id AND a.state = 'active' AND a.polarity = 'supports'
+        JOIN published_episodes pe
+          ON pe.group_id = a.group_id
+         AND a.run_key IN ('episode:' || pe.source_id, 'backfill:' || pe.source_id)
+        WHERE a.group_id = f.group_id
+          AND a.fact_id = f.id
+          AND a.state = 'active'
+          AND a.polarity = 'supports'
     ) sup ON true
     WHERE f.group_id = :g AND f.lifecycle_state = 'active'
     """

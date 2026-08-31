@@ -1,0 +1,12 @@
+{
+  "schema_version": "1.0",
+  "label_id": "20260831T040748Z-REAL-001-owner-label",
+  "created_at": "2026-08-31T04:23:45Z",
+  "reviewer": "workspace-owner",
+  "packet_id": "20260831T040748Z-44da8cff-weekly-real001-slice-REAL-001",
+  "packet_sha256": "a3d30085354bfb55dad9c1cd08b8c34d1a29d7e89e4162d0abc5648dcf163d1c",
+  "panel_result_sha256": "a3fca4640aa0b03f2ac090cdb250a8335e8d808ccd815697787b3f48d6dc2c2c",
+  "decision": "ACCEPT",
+  "label": "useful",
+  "rationale": "The workspace owner accepted the corrected output as useful after reviewing the candidate and independent panel result."
+}

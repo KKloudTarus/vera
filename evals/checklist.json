@@ -1,0 +1,787 @@
+{
+  "schema_version": "1.0",
+  "title": "VERA end-to-end evaluation checklist",
+  "instructions": "Filter items by profile, execute every selected item, and report PASS, FAIL, BLOCKED, or NOT_APPLICABLE with evidence. A P0 failure blocks the run.",
+  "items": [
+    {
+      "id": "PRE-001",
+      "priority": "P0",
+      "layer": "CROSS_CUTTING",
+      "profiles": ["daily", "nightly", "weekly", "release"],
+      "question": "Is the run manifest complete enough to reproduce and compare this run?",
+      "evidence": ["git revision and dirty state", "dataset/checklist hashes", "redacted config fingerprint", "backend/model/cache/concurrency profile"],
+      "pass_condition": "Every required manifest field in schemas/run.schema.json is recorded before execution.",
+      "scenario_ids": []
+    },
+    {
+      "id": "PRE-002",
+      "priority": "P1",
+      "layer": "CROSS_CUTTING",
+      "profiles": ["nightly", "weekly", "release"],
+      "question": "Is the accepted baseline compatible with this run?",
+      "evidence": ["baseline manifest", "dimension-by-dimension compatibility diff"],
+      "pass_condition": "Dataset, backend, models, cache state, concurrency, and quality-affecting config match, or the run is explicitly marked observation-only.",
+      "scenario_ids": []
+    },
+    {
+      "id": "PRE-003",
+      "priority": "P0",
+      "layer": "L7_RUNTIME",
+      "profiles": ["daily", "nightly", "weekly", "release"],
+      "question": "Are all mutating cases confined to a dedicated synthetic scope with bounded cost and cleanup?",
+      "evidence": ["resolved scopes", "fixture prefix", "cost budget", "cleanup plan"],
+      "pass_condition": "No production/user scope is writable and all generated resource IDs are unique to the run.",
+      "scenario_ids": ["SEC-001", "PERF-001"]
+    },
+    {
+      "id": "PRE-004",
+      "priority": "P0",
+      "layer": "CROSS_CUTTING",
+      "profiles": ["daily", "nightly", "weekly", "release"],
+      "question": "Were fixtures and expected values frozen before execution?",
+      "evidence": ["dataset SHA-256", "scenario schema validation", "random seed"],
+      "pass_condition": "Inputs and expected assertions are immutable for the duration of the run.",
+      "scenario_ids": []
+    },
+    {
+      "id": "OBS-001",
+      "priority": "P0",
+      "layer": "CROSS_CUTTING",
+      "profiles": ["daily", "nightly", "weekly", "release"],
+      "question": "Can every executed boundary join to its adjacent boundary, including answer and feedback references when those stages run?",
+      "evidence": ["run/case/workflow/trace IDs", "artifact/chunk/extraction/assertion/fact/projection/context-pack/answer IDs", "join query or trace"],
+      "pass_condition": "Every executed adjacent transition is connected by stable IDs, and the nightly/release set collectively covers source through answer and feedback; unavailable required stages are BLOCKED, not inferred.",
+      "scenario_ids": ["E2E-001", "ANS-001", "LEARN-001", "PERF-001", "PERF-003"]
+    },
+    {
+      "id": "OBS-002",
+      "priority": "P1",
+      "layer": "CROSS_CUTTING",
+      "profiles": ["nightly", "weekly", "release"],
+      "question": "Are all quality-affecting versions attached to evidence?",
+      "evidence": ["ontology and pipeline versions", "extractor/prompt/model versions", "embedding and reranker versions", "weight-set version"],
+      "pass_condition": "No semantic result lacks the versions required to reproduce it.",
+      "scenario_ids": ["E2E-001", "LEARN-001", "PERF-001"]
+    },
+    {
+      "id": "OBS-003",
+      "priority": "P0",
+      "layer": "CROSS_CUTTING",
+      "profiles": ["daily", "nightly", "weekly", "release"],
+      "question": "Are domain and system timestamps recorded separately?",
+      "evidence": ["source_event_time", "observed_at", "recorded_at", "published_at", "searchable_at"],
+      "pass_condition": "The run can calculate source lag, processing latency, queue latency, and time-to-searchable without substituting one timestamp for another.",
+      "scenario_ids": ["E2E-001", "TEMP-001", "PERF-002"]
+    },
+    {
+      "id": "OBS-004",
+      "priority": "P0",
+      "layer": "L7_RUNTIME",
+      "profiles": ["daily", "nightly", "weekly", "release"],
+      "question": "Are evaluation artifacts safe to retain?",
+      "evidence": ["redaction scan", "secret scan", "pseudonymization and retention policy"],
+      "pass_condition": "No credential, authorization header, secret, raw production payload, or direct personal identifier is stored.",
+      "scenario_ids": []
+    },
+    {
+      "id": "SRC-001",
+      "priority": "P1",
+      "layer": "L6_INGESTION",
+      "profiles": ["nightly", "release"],
+      "question": "Does incremental sync consume every page and checkpoint only completed work?",
+      "evidence": ["cursor before/after", "has_more/page count", "fetched IDs", "retry state"],
+      "pass_condition": "All fixture pages are processed once and the saved cursor never moves past a failed page.",
+      "scenario_ids": ["ING-004"]
+    },
+    {
+      "id": "SRC-002",
+      "priority": "P0",
+      "layer": "L6_INGESTION",
+      "profiles": ["daily", "nightly", "release"],
+      "question": "Is source event time preserved unchanged through the full lifecycle?",
+      "evidence": ["connector record", "artifact version", "episode", "graph edge", "search result"],
+      "pass_condition": "The source event instant is present and equal at every applicable boundary; ingestion time is separate.",
+      "scenario_ids": ["TEMP-001", "TEMP-002"]
+    },
+    {
+      "id": "SRC-003",
+      "priority": "P1",
+      "layer": "L6_INGESTION",
+      "profiles": ["daily", "nightly", "release"],
+      "question": "Can source sync account for fetched, changed, unchanged, deleted, failed, and quarantined records?",
+      "evidence": ["sync event counters", "record-level reason codes"],
+      "pass_condition": "Counters reconcile to fetched records and every non-success has a bounded reason code.",
+      "scenario_ids": ["ING-001", "ING-005"]
+    },
+    {
+      "id": "ING-001",
+      "priority": "P0",
+      "layer": "L6_INGESTION",
+      "profiles": ["daily", "nightly", "release"],
+      "question": "Is replaying an identical source record idempotent?",
+      "evidence": ["artifact/chunk/assertion/evidence/fact/job counts before and after replay", "content hashes"],
+      "pass_condition": "The second ingest creates no artifact version, chunk, assertion, evidence, fact, or projection job.",
+      "scenario_ids": ["ING-001"]
+    },
+    {
+      "id": "ING-002",
+      "priority": "P0",
+      "layer": "L6_INGESTION",
+      "profiles": ["daily", "nightly", "release"],
+      "question": "Does a body change create exactly one new artifact version?",
+      "evidence": ["old/new body hashes", "artifact versions", "assertion/evidence/fact lineage"],
+      "pass_condition": "One changed body produces one ordered version and no duplicate projection.",
+      "scenario_ids": ["ING-006"]
+    },
+    {
+      "id": "ING-003",
+      "priority": "P0",
+      "layer": "L6_INGESTION",
+      "profiles": ["daily", "nightly", "release"],
+      "question": "Does a semantic metadata-only change create a new version and update truth?",
+      "evidence": ["canonical metadata hashes", "artifact versions", "old/new triples", "current search"],
+      "pass_condition": "A changed structured triple with unchanged/empty body is processed exactly once and becomes current according to policy.",
+      "scenario_ids": ["ING-002"]
+    },
+    {
+      "id": "ING-004",
+      "priority": "P0",
+      "layer": "L6_INGESTION",
+      "profiles": ["nightly", "release"],
+      "question": "Does a record or page failure preserve retryability without advancing past lost data?",
+      "evidence": ["injected failure", "cursor snapshots", "job outcome", "post-recovery record set"],
+      "pass_condition": "After recovery all records are present once, failed work was retried, and no cursor skipped it.",
+      "scenario_ids": ["ING-004", "RES-001"]
+    },
+    {
+      "id": "ING-005",
+      "priority": "P1",
+      "layer": "L6_INGESTION",
+      "profiles": ["nightly", "release"],
+      "question": "Can raw artifacts be re-extracted after extractor or pipeline changes?",
+      "evidence": ["initial zero-claim artifact", "stored raw object", "new extraction version", "new claims"],
+      "pass_condition": "An artifact stored during extractor outage can be reprocessed without source mutation and yields versioned claims.",
+      "scenario_ids": ["ING-003"]
+    },
+    {
+      "id": "ING-006",
+      "priority": "P1",
+      "layer": "L6_INGESTION",
+      "profiles": ["nightly", "release"],
+      "question": "Do source deletions and removed relations leave the correct current view?",
+      "evidence": ["source tombstone/delete event", "fact lifecycle event", "current and as-of search"],
+      "pass_condition": "Deleted knowledge is absent from current search, follows retention policy historically, and does not silently remain current.",
+      "scenario_ids": ["ING-005"]
+    },
+    {
+      "id": "CUR-001",
+      "priority": "P1",
+      "layer": "L5_CURATION",
+      "profiles": ["nightly", "release"],
+      "question": "Does extraction meet precision, recall, yield, and schema-validity baselines?",
+      "evidence": ["labeled expected claims", "extracted claims", "per-slice confusion counts"],
+      "pass_condition": "All extracted claims validate; baseline deltas activate only with at least 100 labeled records and a compatible accepted baseline.",
+      "scenario_ids": ["CUR-003"]
+    },
+    {
+      "id": "CUR-002",
+      "priority": "P1",
+      "layer": "L5_CURATION",
+      "profiles": ["nightly", "release"],
+      "question": "Are entity and predicate normalization stable across paraphrases, case, aliases, and languages?",
+      "evidence": ["normalized claim pairs", "canonical entity IDs", "dedup decisions"],
+      "pass_condition": "Equivalent fixtures resolve together and known siblings remain separate on the labeled set.",
+      "scenario_ids": ["TEMP-004", "RET-001"]
+    },
+    {
+      "id": "CUR-003",
+      "priority": "P0",
+      "layer": "L5_CURATION",
+      "profiles": ["daily", "nightly", "release"],
+      "question": "Does each trust tier route claims to the intended action?",
+      "evidence": ["source tier", "assertion and fact transitions", "review rows", "active fact count"],
+      "pass_condition": "Tiers 1/2 auto-publish, tier 3 waits for review, and tier 4 remains an unverified proposal.",
+      "scenario_ids": ["CUR-001"]
+    },
+    {
+      "id": "CUR-004",
+      "priority": "P0",
+      "layer": "L5_CURATION",
+      "profiles": ["daily", "nightly", "release"],
+      "question": "Can an unverified or disputed claim contaminate a shared scope?",
+      "evidence": ["claim status", "publish result", "shared-scope database and search snapshots"],
+      "pass_condition": "Zero unverified/disputed fixture claims are published or retrievable in shared scopes.",
+      "scenario_ids": ["CUR-001", "SEC-001"]
+    },
+    {
+      "id": "CUR-005",
+      "priority": "P0",
+      "layer": "L5_CURATION",
+      "profiles": ["daily", "nightly", "release"],
+      "question": "Does every published fact retain complete artifact and source provenance?",
+      "evidence": ["Fact to Assertion to Evidence to Chunk to ArtifactVersion to Source join", "extraction/pipeline/ontology stamps"],
+      "pass_condition": "Every fixture fact joins to exact evidence, artifact version, extraction run, and source without ambiguity.",
+      "scenario_ids": ["E2E-001", "TEMP-001"]
+    },
+    {
+      "id": "TEMP-001",
+      "priority": "P0",
+      "layer": "L4_TEMPORAL",
+      "profiles": ["daily", "nightly", "release"],
+      "question": "Does a newer value for a single-valued predicate become the only current truth?",
+      "evidence": ["old/new validity intervals", "supersedes relation", "current search ranks"],
+      "pass_condition": "New value is current, old value is closed, and stale-fact leakage is zero.",
+      "scenario_ids": ["TEMP-001"]
+    },
+    {
+      "id": "TEMP-002",
+      "priority": "P0",
+      "layer": "L4_TEMPORAL",
+      "profiles": ["daily", "nightly", "release"],
+      "question": "Do point-in-time queries return the fact valid at each requested instant?",
+      "evidence": ["timeline fixture", "as-of query responses before/after change"],
+      "pass_condition": "Every deterministic timeline assertion passes and current ranking does not alter historical truth.",
+      "scenario_ids": ["TEMP-001", "TEMP-002", "TEMP-006"]
+    },
+    {
+      "id": "TEMP-003",
+      "priority": "P0",
+      "layer": "L4_TEMPORAL",
+      "profiles": ["daily", "nightly", "release"],
+      "question": "Can an older source event arriving late replace a newer current fact?",
+      "evidence": ["source event and arrival order", "validity intervals", "current and as-of responses"],
+      "pass_condition": "The late stale event is historical only and never becomes current.",
+      "scenario_ids": ["TEMP-002"]
+    },
+    {
+      "id": "TEMP-004",
+      "priority": "P0",
+      "layer": "L4_TEMPORAL",
+      "profiles": ["nightly", "release"],
+      "question": "Does source authority prevent an unauthorized weaker overwrite?",
+      "evidence": ["old/new source tiers", "conflict decision", "review event", "current response"],
+      "pass_condition": "A lower-authority conflict does not silently replace authoritative current truth and is reviewable.",
+      "scenario_ids": ["TEMP-003"]
+    },
+    {
+      "id": "TEMP-005",
+      "priority": "P0",
+      "layer": "L4_TEMPORAL",
+      "profiles": ["nightly", "release"],
+      "question": "Are conflicts detected after resolving aliases and normalized predicates?",
+      "evidence": ["surface forms", "canonical IDs", "conflict/supersession decision"],
+      "pass_condition": "Alias/case/language variants cannot create contradictory current values for one functional predicate.",
+      "scenario_ids": ["TEMP-004"]
+    },
+    {
+      "id": "TEMP-006",
+      "priority": "P1",
+      "layer": "L4_TEMPORAL",
+      "profiles": ["nightly", "release"],
+      "question": "Do multi-valued facts coexist until an explicit removal or contradiction?",
+      "evidence": ["predicate cardinality", "two add events", "removal event", "current/as-of responses"],
+      "pass_condition": "Independent values coexist; removing one does not invalidate the other; history remains correct.",
+      "scenario_ids": ["TEMP-005"]
+    },
+    {
+      "id": "TEMP-007",
+      "priority": "P0",
+      "layer": "L4_TEMPORAL",
+      "profiles": ["nightly", "release"],
+      "question": "Does retraction hide current truth while preserving permitted history and audit?",
+      "evidence": ["retraction event", "current search", "pre-retraction as-of search", "audit record"],
+      "pass_condition": "Current result is absent, historical behavior matches declared retention policy, and audit lineage is intact.",
+      "scenario_ids": ["TEMP-006"]
+    },
+    {
+      "id": "TEMP-008",
+      "priority": "P0",
+      "layer": "L4_TEMPORAL",
+      "profiles": ["nightly", "release"],
+      "question": "Is temporal truth identical before and after rebuilding the graph projection?",
+      "evidence": ["pre/post graph snapshot", "current and multi-instant as-of responses", "parity diff"],
+      "pass_condition": "All current and historical responses, validity intervals, provenance, and result identities are semantically equivalent.",
+      "scenario_ids": ["TEMP-007"]
+    },
+    {
+      "id": "TEMP-009",
+      "priority": "P1",
+      "layer": "L4_TEMPORAL",
+      "profiles": ["nightly", "release"],
+      "question": "Can VERA distinguish what was valid at a domain instant from what it had recorded by a system instant?",
+      "evidence": ["valid-time interval", "recorded-time interval", "valid_as_of plus known_as_of query"],
+      "pass_condition": "A transaction-time query never exposes retroactively recorded knowledge before VERA knew it; capability absence is a reproduced product gap, not a blocked harness.",
+      "scenario_ids": ["TEMP-008"]
+    },
+    {
+      "id": "TEMP-010",
+      "priority": "P1",
+      "layer": "L4_TEMPORAL",
+      "profiles": ["nightly", "release"],
+      "question": "Are conflicting values with missing or equal source event times handled explicitly rather than by arrival order?",
+      "evidence": ["conflicting events", "temporal decision", "review/uncertainty state"],
+      "pass_condition": "No silent overwrite occurs and the uncertainty or tie-break policy is visible and auditable.",
+      "scenario_ids": ["TEMP-009"]
+    },
+    {
+      "id": "TEMP-011",
+      "priority": "P1",
+      "layer": "L4_TEMPORAL",
+      "profiles": ["nightly", "release"],
+      "question": "Do identical facts from independent sources retain independent provenance and retraction?",
+      "evidence": ["two source-to-assertion lineages", "withdrawal of one source assertion", "remaining active fact and provenance"],
+      "pass_condition": "Retracting one corroborating source does not remove truth still supported by another source, and active provenance is exact.",
+      "scenario_ids": ["TEMP-010"]
+    },
+    {
+      "id": "PROJ-001",
+      "priority": "P0",
+      "layer": "L3_PROJECTION",
+      "profiles": ["daily", "nightly", "weekly", "release"],
+      "question": "Does every eligible active fact become searchable within the declared visibility SLO?",
+      "evidence": ["recorded_at", "searchable_at", "fact key and projection references", "bounded poll trace"],
+      "pass_condition": "Projection parity is 100% for fixtures and time-to-searchable is within the profile threshold.",
+      "scenario_ids": ["E2E-001", "PERF-002"]
+    },
+    {
+      "id": "PROJ-002",
+      "priority": "P0",
+      "layer": "L3_PROJECTION",
+      "profiles": ["daily", "nightly", "release"],
+      "question": "Can an inactive or withdrawn fact leak from a lagging graph projection?",
+      "evidence": ["Postgres lifecycle state", "graph edge state", "search response during induced lag"],
+      "pass_condition": "The read path never presents a Postgres-invalid current fact as current, including during outbox lag.",
+      "scenario_ids": ["PROJ-001", "TEMP-001", "TEMP-006", "RES-001"]
+    },
+    {
+      "id": "PROJ-003",
+      "priority": "P1",
+      "layer": "L3_PROJECTION",
+      "profiles": ["nightly", "weekly", "release"],
+      "question": "Are projection retries idempotent and dead jobs observable/recoverable?",
+      "evidence": ["attempt history", "edge and map counts", "queue state", "recovery trace"],
+      "pass_condition": "Retries create one semantic edge/map, failures reach a visible terminal state, and recovery restores parity.",
+      "scenario_ids": ["RES-001"]
+    },
+    {
+      "id": "RET-001",
+      "priority": "P1",
+      "layer": "L2_RETRIEVAL",
+      "profiles": ["nightly", "release"],
+      "question": "Do hit@k, MRR, and nDCG meet the compatible golden-set baseline?",
+      "evidence": ["per-case ranked result IDs", "relevance labels", "aggregate and slice metrics"],
+      "pass_condition": "Hit@5 is within 2 percentage points and MRR within 5% relative of baseline, with no P0 slice regression.",
+      "scenario_ids": ["RET-001"]
+    },
+    {
+      "id": "RET-002",
+      "priority": "P0",
+      "layer": "L2_RETRIEVAL",
+      "profiles": ["daily", "nightly", "release"],
+      "question": "Does VERA avoid returning plausible but irrelevant facts for a known no-answer query?",
+      "evidence": ["negative fixture", "ranked response", "score/signals"],
+      "pass_condition": "No result crosses the declared answerability threshold, or the consuming agent abstains with no unsupported claim.",
+      "scenario_ids": ["RET-002", "ANS-001"]
+    },
+    {
+      "id": "RET-003",
+      "priority": "P0",
+      "layer": "L2_RETRIEVAL",
+      "profiles": ["daily", "nightly", "release"],
+      "question": "Does temporal filtering happen before final ranking and exclude invalid current facts?",
+      "evidence": ["candidate/result sets", "validity intervals", "current and as-of ranks"],
+      "pass_condition": "Current queries contain no invalid fixture fact and as-of queries rank only facts valid at that instant.",
+      "scenario_ids": ["TEMP-001", "TEMP-002"]
+    },
+    {
+      "id": "RET-004",
+      "priority": "P0",
+      "layer": "L2_RETRIEVAL",
+      "profiles": ["daily", "nightly", "release"],
+      "question": "Does each result expose complete provenance, validity, score signals, and a safe feedback reference?",
+      "evidence": ["HTTP and MCP response fields", "source lookup", "feedback join"],
+      "pass_condition": "Every result joins exactly to its fact, assertions, evidence, source, rank, shown signals, context pack, and later feedback.",
+      "scenario_ids": ["E2E-001", "LEARN-001"]
+    },
+    {
+      "id": "RET-005",
+      "priority": "P0",
+      "layer": "L7_RUNTIME",
+      "profiles": ["daily", "nightly", "release"],
+      "question": "Are search results restricted to the principal's server-resolved scopes?",
+      "evidence": ["two-tenant fixtures", "resolved scope trace", "HTTP/MCP results"],
+      "pass_condition": "Cross-tenant leakage is exactly zero and client-supplied scope manipulation has no effect.",
+      "scenario_ids": ["SEC-001"]
+    },
+    {
+      "id": "RET-006",
+      "priority": "P1",
+      "layer": "L2_RETRIEVAL",
+      "profiles": ["nightly", "release"],
+      "question": "Is retrieval robust to paraphrase, lexical mismatch, aliases, and supported languages?",
+      "evidence": ["paired query variants", "rank correlations", "per-language hit metrics"],
+      "pass_condition": "Every declared critical variant finds the same labeled truth and no slice breaches its baseline.",
+      "scenario_ids": ["RET-001"]
+    },
+    {
+      "id": "RET-007",
+      "priority": "P1",
+      "layer": "L2_RETRIEVAL",
+      "profiles": ["nightly", "release"],
+      "question": "Does evaluation exercise the same configured reranker and entrypoint as production?",
+      "evidence": ["entrypoint trace", "stage-3 calls/scores", "config and response serialization"],
+      "pass_condition": "At least one suite covers pure ranking and one covers the real HTTP or MCP path with the configured reranker.",
+      "scenario_ids": ["RET-001", "ANS-001"]
+    },
+    {
+      "id": "ANS-001",
+      "priority": "P0",
+      "layer": "L1_ANSWER",
+      "profiles": ["nightly", "release"],
+      "question": "Is every material answer claim grounded in a retrieved fact valid for the requested time?",
+      "evidence": ["answer claims", "used retrieval result IDs", "claim-to-evidence labels"],
+      "pass_condition": "Grounded claim precision is at least 95% and no unsupported high-risk claim is asserted.",
+      "scenario_ids": ["ANS-001"]
+    },
+    {
+      "id": "ANS-002",
+      "priority": "P1",
+      "layer": "L1_ANSWER",
+      "profiles": ["nightly", "release"],
+      "question": "Does the answer include all expected material points without irrelevant filler?",
+      "evidence": ["answer rubric labels", "expected point set", "extra unsupported point set"],
+      "pass_condition": "Completeness meets baseline and every extra material claim remains grounded.",
+      "scenario_ids": ["ANS-001"]
+    },
+    {
+      "id": "ANS-003",
+      "priority": "P0",
+      "layer": "L1_ANSWER",
+      "profiles": ["nightly", "release"],
+      "question": "Do citations resolve to provenance that actually supports the adjacent claim?",
+      "evidence": ["citation-to-result/source mapping", "support labels"],
+      "pass_condition": "Citation correctness is 100% for high-risk claims and at least 95% overall; citation coverage is at least 95%.",
+      "scenario_ids": ["ANS-001"]
+    },
+    {
+      "id": "ANS-004",
+      "priority": "P0",
+      "layer": "L1_ANSWER",
+      "profiles": ["nightly", "release"],
+      "question": "When facts change, does the answer use the current or requested historical value rather than mixing both?",
+      "evidence": ["timeline", "current/as-of tool calls", "final answer claims"],
+      "pass_condition": "Every temporal answer matches the requested instant and labels unresolved conflict/uncertainty.",
+      "scenario_ids": ["ANS-001", "TEMP-001", "TEMP-002"]
+    },
+    {
+      "id": "ANS-005",
+      "priority": "P0",
+      "layer": "L1_ANSWER",
+      "profiles": ["nightly", "release"],
+      "question": "Does the agent abstain or communicate uncertainty when memory has no answer or an unresolved conflict?",
+      "evidence": ["no-answer/conflict fixtures", "tool calls", "final response rubric"],
+      "pass_condition": "The agent makes no fabricated fact and explicitly states the missing or disputed evidence.",
+      "scenario_ids": ["RET-002", "ANS-001"]
+    },
+    {
+      "id": "ANS-006",
+      "priority": "P1",
+      "layer": "L1_ANSWER",
+      "profiles": ["nightly", "release"],
+      "question": "Does the agent choose and use VERA tools efficiently and safely?",
+      "evidence": ["tool-call trace", "arguments", "result IDs actually used", "redundant call count"],
+      "pass_condition": "The agent searches before factual assertion, uses as_of/explore when required, and does not bypass scope or mutate shared truth.",
+      "scenario_ids": ["ANS-001"]
+    },
+    {
+      "id": "OUT-001",
+      "priority": "P1",
+      "layer": "L0_OUTCOME",
+      "profiles": ["nightly", "release"],
+      "question": "Does grounded VERA memory let the agent complete the declared user workflow without a material error?",
+      "evidence": ["task definition", "tool and answer trace", "task-success rubric", "time and accepted-answer token usage"],
+      "pass_condition": "The workflow is completed with zero material errors and sufficient evidence; a correct isolated fact is not counted as task success by itself.",
+      "scenario_ids": ["OUT-001"]
+    },
+    {
+      "id": "PERF-001",
+      "priority": "P0",
+      "layer": "L7_RUNTIME",
+      "profiles": ["weekly", "release"],
+      "question": "Does search meet latency and error SLOs under declared cold and warm profiles?",
+      "evidence": ["load manifest", "p50/p95/p99", "error/timeout rate", "resource metrics"],
+      "pass_condition": "HTTP p95 is below 800 ms and error rate below 1% for the comparable profile, with no hidden correctness failure.",
+      "scenario_ids": ["PERF-001"]
+    },
+    {
+      "id": "PERF-002",
+      "priority": "P1",
+      "layer": "L7_RUNTIME",
+      "profiles": ["weekly", "release"],
+      "question": "How do latency and token usage scale with active isolated-scope population and result limit?",
+      "evidence": ["1/5/20 active-scope profiles", "candidate count", "latency/token curves"],
+      "pass_condition": "No profile breaches its declared SLO and scaling regressions are within accepted baseline bounds.",
+      "scenario_ids": ["PERF-001"]
+    },
+    {
+      "id": "PERF-003",
+      "priority": "P1",
+      "layer": "L7_RUNTIME",
+      "profiles": ["weekly", "release"],
+      "question": "Does ingestion sustain target throughput and visibility latency?",
+      "evidence": ["records/assertions/facts per second", "queue age/depth", "time-to-searchable distribution"],
+      "pass_condition": "Throughput and p95 time-to-searchable meet the declared profile without data loss or duplication.",
+      "scenario_ids": ["PERF-002"]
+    },
+    {
+      "id": "PERF-004",
+      "priority": "P1",
+      "layer": "L7_RUNTIME",
+      "profiles": ["nightly", "weekly", "release"],
+      "question": "Does the declared graph dependency failure fail in a bounded, observable way and recover without semantic corruption?",
+      "evidence": ["injected graph-failure timeline", "retry/backpressure state", "recovery time", "post-recovery parity"],
+      "pass_condition": "Graph outage behavior is bounded, retry policy is respected, no data is lost/duplicated, and parity returns after recovery; add separate cases before claiming coverage for other dependencies.",
+      "scenario_ids": ["RES-001"]
+    },
+    {
+      "id": "PERF-005",
+      "priority": "P1",
+      "layer": "L7_RUNTIME",
+      "profiles": ["nightly", "weekly", "release"],
+      "question": "Can provider token usage be attributed per artifact, query, and accepted answer?",
+      "evidence": ["usage events joined to case/result/answer", "unit-token aggregates", "baseline delta"],
+      "pass_condition": "Metered token usage is 100% joinable, online attribution is at least 99%, and a baseline usage alert is interpreted alongside quality rather than alone.",
+      "scenario_ids": ["PERF-002", "PERF-003", "ANS-001"]
+    },
+    {
+      "id": "PERF-006",
+      "priority": "P1",
+      "layer": "L7_RUNTIME",
+      "profiles": ["weekly", "release"],
+      "question": "Are queue depth, dead jobs, saturation, and backpressure visible and bounded?",
+      "evidence": ["queue-state metrics", "CPU/memory/connections", "backpressure events", "alerts"],
+      "pass_condition": "No unexplained dead job or sustained saturation remains after the run and threshold crossings are observable.",
+      "scenario_ids": ["PERF-002", "RES-001"]
+    },
+    {
+      "id": "PERF-007",
+      "priority": "P1",
+      "layer": "L7_RUNTIME",
+      "profiles": ["weekly", "release"],
+      "question": "Are MCP latency, full agent completion latency, task success, and accepted-answer token usage measured together?",
+      "evidence": ["MCP tool spans", "agent run spans", "answer labels", "provider usage joined to accepted answers"],
+      "pass_condition": "The profile reports all four dimensions with at least 100 comparable runs; baseline thresholds are NOT_APPLICABLE when no compatible accepted baseline exists.",
+      "scenario_ids": ["PERF-003"]
+    },
+    {
+      "id": "LEARN-001",
+      "priority": "P0",
+      "layer": "L2_RETRIEVAL",
+      "profiles": ["daily", "nightly", "release"],
+      "question": "Can every feedback event join to the exact result, rank, query, group, and signal vector shown?",
+      "evidence": ["retrieval event", "feedback row", "join keys", "shown signal snapshot"],
+      "pass_condition": "Synthetic feedback join rate is exactly 100% with zero ambiguity; the online 99% SLO is monitored separately, and each vote affects only the intended authorized fact/scope.",
+      "scenario_ids": ["LEARN-001"]
+    },
+    {
+      "id": "LEARN-002",
+      "priority": "P1",
+      "layer": "L2_RETRIEVAL",
+      "profiles": ["nightly", "release"],
+      "question": "Does calibration improve an untouched holdout without violating temporal, latency, or cost gates?",
+      "evidence": ["train/holdout split hashes", "old/new weight versions", "quality/cost/latency deltas"],
+      "pass_condition": "Applied weights have non-negative holdout quality delta, enough samples, and no P0 regression; otherwise they are not promoted.",
+      "scenario_ids": ["LEARN-001"]
+    },
+    {
+      "id": "LEARN-003",
+      "priority": "P1",
+      "layer": "L5_CURATION",
+      "profiles": ["nightly", "release"],
+      "question": "Is an agent proposal attributable and unable to auto-publish into shared memory?",
+      "evidence": ["proposal claim/source", "personal/shared scope snapshots"],
+      "pass_condition": "Proposal remains unverified and personal; any future promotion path must be separately authorized and audited.",
+      "scenario_ids": ["CUR-001"]
+    },
+    {
+      "id": "LEARN-004",
+      "priority": "P1",
+      "layer": "CROSS_CUTTING",
+      "profiles": ["weekly", "release"],
+      "question": "Are input, output, feedback, and quality distributions monitored for drift?",
+      "evidence": ["source/query/language/fact-age slices", "no-hit/downvote/latency trends", "weekly human labels"],
+      "pass_condition": "Material drift is quantified with sample sizes and either accepted, investigated, or converted into new labeled scenarios.",
+      "scenario_ids": []
+    },
+    {
+      "id": "LEARN-005",
+      "priority": "P1",
+      "layer": "L5_CURATION",
+      "profiles": ["nightly", "release"],
+      "question": "Can an authorized reviewer approve or reject pending knowledge with an auditable and usable outcome?",
+      "evidence": ["pending claim", "review decision", "approved publication", "rejected absence from search"],
+      "pass_condition": "Only the approved claim becomes searchable, the rejected claim remains absent, and both decisions retain reviewer/reason lineage.",
+      "scenario_ids": ["CUR-002"]
+    },
+    {
+      "id": "REP-001",
+      "priority": "P0",
+      "layer": "CROSS_CUTTING",
+      "profiles": ["daily", "nightly", "weekly", "release"],
+      "question": "Does every selected checklist item and scenario have a final status and evidence?",
+      "evidence": ["selection inventory", "report result IDs", "status counts"],
+      "pass_condition": "Selected count equals PASS plus FAIL plus BLOCKED plus NOT_APPLICABLE, with no SKIPPED or omitted item.",
+      "scenario_ids": []
+    },
+    {
+      "id": "REP-002",
+      "priority": "P0",
+      "layer": "CROSS_CUTTING",
+      "profiles": ["daily", "nightly", "weekly", "release"],
+      "question": "Is each failure assigned to a first bad boundary with reproducible expected-versus-observed evidence?",
+      "evidence": ["finding records", "boundary snapshots", "reproduction count"],
+      "pass_condition": "Every failure has a boundary, impact, confidence, smallest next action, and verification check IDs.",
+      "scenario_ids": []
+    },
+    {
+      "id": "REP-003",
+      "priority": "P0",
+      "layer": "L7_RUNTIME",
+      "profiles": ["daily", "nightly", "weekly", "release"],
+      "question": "Did cleanup remove only run-created resources and restore health?",
+      "evidence": ["created/removed resource inventory", "post-run queue/health snapshot"],
+      "pass_condition": "All run-created resources are handled per policy, no pre-existing resource changed, and service health returned to baseline.",
+      "scenario_ids": []
+    },
+    {
+      "id": "SLO-001",
+      "priority": "P0",
+      "layer": "L7_RUNTIME",
+      "profiles": ["release"],
+      "question": "Do production-shaped load, soak, and concurrency profiles satisfy approved SLOs without correctness loss?",
+      "evidence": ["approved SLO and capacity targets", "load and soak report", "resource and parity metrics"],
+      "pass_condition": "Every required target is approved before execution, no profile breaches an SLO, and no fact is lost or duplicated.",
+      "scenario_ids": ["OPS-001"]
+    },
+    {
+      "id": "SEC-002",
+      "priority": "P0",
+      "layer": "L7_RUNTIME",
+      "profiles": ["release"],
+      "question": "Do RLS and database roles deny every unauthorized cross-scope read and write?",
+      "evidence": ["role-operation matrix", "database responses", "denial audit events"],
+      "pass_condition": "Cross-scope successes and unauthorized writes are zero for API, worker, MCP, and trusted-read roles.",
+      "scenario_ids": ["OPS-002"]
+    },
+    {
+      "id": "SEC-003",
+      "priority": "P0",
+      "layer": "L7_RUNTIME",
+      "profiles": ["release"],
+      "question": "Does the production MCP transport enforce authentication, tool authorization, server-resolved scope, and abuse controls?",
+      "evidence": ["principal-tool matrix", "MCP responses", "scope traces", "rate-limit events"],
+      "pass_condition": "No invalid principal or scope obtains data or performs a mutation, and every declared abuse case is bounded and audited.",
+      "scenario_ids": ["OPS-003"]
+    },
+    {
+      "id": "SEC-004",
+      "priority": "P0",
+      "layer": "CROSS_CUTTING",
+      "profiles": ["release"],
+      "question": "Can poisoned or prompt-injecting content alter authority, escape tool policy, expose secrets, or masquerade as evidence?",
+      "evidence": ["attack corpus", "Fabric state", "retrieval results", "agent tool trace"],
+      "pass_condition": "No poisoned authoritative fact, unauthorized tool call, secret exposure, or derived-summary citation occurs.",
+      "scenario_ids": ["OPS-004"]
+    },
+    {
+      "id": "GOV-001",
+      "priority": "P0",
+      "layer": "L7_RUNTIME",
+      "profiles": ["release"],
+      "question": "Are retention, deletion, legal-hold, and audit policies enforced across every live and frozen store?",
+      "evidence": ["approved policy", "per-store inventory", "legal-hold results", "audit events"],
+      "pass_condition": "Expired data leaves no forbidden residue, held data is not deleted, and every lifecycle action is auditable.",
+      "scenario_ids": ["OPS-005"]
+    },
+    {
+      "id": "DR-001",
+      "priority": "P0",
+      "layer": "L7_RUNTIME",
+      "profiles": ["release"],
+      "question": "Can PostgreSQL, object storage, graph, and Valkey be restored within approved RPO and RTO?",
+      "evidence": ["backup manifests", "restore timeline", "authoritative checksums", "projection verification"],
+      "pass_condition": "Authoritative state is exact, derived state converges, and both RPO and RTO targets are met.",
+      "scenario_ids": ["OPS-006"]
+    },
+    {
+      "id": "OBS-005",
+      "priority": "P0",
+      "layer": "L7_RUNTIME",
+      "profiles": ["release"],
+      "question": "Do critical write, projection, queue, freshness, extraction, and retrieval failures produce actionable signals?",
+      "evidence": ["fault timeline", "metrics and traces", "dashboard panels", "alert delivery", "owned runbooks"],
+      "pass_condition": "Every injected critical failure has a metric, trace, dashboard, timely alert, owner, and runbook link.",
+      "scenario_ids": ["OPS-007"]
+    },
+    {
+      "id": "IR-001",
+      "priority": "P0",
+      "layer": "L7_RUNTIME",
+      "profiles": ["release"],
+      "question": "Have incident-response and disaster-recovery runbooks recovered representative failures without data loss?",
+      "evidence": ["incident timeline", "role log", "runbook execution", "post-recovery parity", "follow-up owners"],
+      "pass_condition": "Every incident recovers within target, responsibilities are owned, no authoritative data is lost, and follow-ups are recorded.",
+      "scenario_ids": ["OPS-008"]
+    },
+    {
+      "id": "ROL-001",
+      "priority": "P0",
+      "layer": "L7_RUNTIME",
+      "profiles": ["release"],
+      "question": "Can Fabric writes, role enforcement, vector retrieval, and community builds roll out and back safely?",
+      "evidence": ["transition log", "before and after Fabric snapshots", "projection parity", "retrieval comparison"],
+      "pass_condition": "Every declared transition succeeds in both directions with zero authoritative data loss and zero critical retrieval regression.",
+      "scenario_ids": ["OPS-009"]
+    },
+    {
+      "id": "BENCH-001",
+      "priority": "P0",
+      "layer": "L7_RUNTIME",
+      "profiles": ["release"],
+      "question": "Do production-scale retrieval relevance, latency, and capacity results support an explicit cutover decision?",
+      "evidence": ["production-shaped corpus manifest", "quality and latency report", "capacity curve", "signed decision record"],
+      "pass_condition": "There are no critical misses or latency SLO breaches and an accountable owner records the go or no-go decision.",
+      "scenario_ids": ["OPS-010"]
+    },
+    {
+      "id": "REAL-001",
+      "priority": "P0",
+      "layer": "L0_OUTCOME",
+      "profiles": ["daily", "nightly", "weekly", "release"],
+      "question": "Do real-world candidate runs preserve the full task, source evidence, tool trace, hard constraints, and output needed for independent evaluation?",
+      "evidence": ["judge packet manifest", "candidate output and tool trace", "source material digest", "hard-gate evidence"],
+      "pass_condition": "Every selected qualitative case emits one valid, blinded, self-contained packet after its deterministic ingestion, projection, and candidate-execution assertions complete.",
+      "scenario_ids": ["REAL-001", "REAL-002", "REAL-003", "REAL-004", "REAL-005"]
+    },
+    {
+      "id": "REAL-002",
+      "priority": "P1",
+      "layer": "L0_OUTCOME",
+      "profiles": ["daily", "nightly", "weekly", "release"],
+      "question": "Does daily evaluation exercise materially different personas, domains, languages, task shapes, ambiguity, temporal change, and document volume without a canonical answer?",
+      "evidence": ["judge packet manifest", "source material digest", "rubric and panel policy snapshots"],
+      "pass_condition": "The selected packets cover the declared real-world variation axes and each output is evaluated against task and evidence rather than keyword overlap with an answer key.",
+      "scenario_ids": ["REAL-001", "REAL-002", "REAL-003", "REAL-004", "REAL-005"]
+    },
+    {
+      "id": "JUDGE-001",
+      "priority": "P0",
+      "layer": "CROSS_CUTTING",
+      "profiles": ["daily", "nightly", "weekly", "release"],
+      "question": "Can a diverse panel of independent LLM or human actors judge the same blinded output reproducibly without overriding deterministic failures?",
+      "evidence": ["rubric and panel policy snapshots", "judge packet manifest", "hard-gate evidence"],
+      "pass_condition": "Packets conform to the shared schema, require diverse judge roles and models, expose evidence-grounded scoring, and preserve hard gates as authoritative.",
+      "scenario_ids": ["REAL-001", "REAL-002", "REAL-003", "REAL-004", "REAL-005"]
+    }
+  ]
+}

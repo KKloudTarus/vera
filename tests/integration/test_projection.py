@@ -21,6 +21,12 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from vera.adapters.graph.fact_projection import GraphitiFactProjection
 from vera.adapters.graph.offline import DeterministicEmbedder, NoCrossEncoder, NoLLMClient
+from vera.adapters.persistence.models.fabric import AssertionRow
+from vera.adapters.persistence.models.knowledge import (
+    ArtifactRow,
+    ArtifactVersionRow,
+    PublishedEpisodeRow,
+)
 from vera.adapters.persistence.repositories import SqlAlchemyCanonicalEntityRepository
 from vera.adapters.persistence.repositories.fabric import SqlAlchemyFactRepository
 from vera.adapters.persistence.repositories.projection import SqlAlchemyProjectionSource
@@ -29,7 +35,8 @@ from vera.application.projection import FactProjectionService
 from vera.domain.knowledge import fabric
 from vera.domain.knowledge.fabric import Fact, FactLifecycle, ObjectType
 from vera.domain.ports.projection import ProjectedFact
-from vera.shared.ids import uuid7
+from vera.shared.ids import deterministic_id, uuid7
+from vera.shared.time import utc_now
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 
@@ -142,13 +149,13 @@ async def _seed_tenant(sessionmaker: async_sessionmaker[AsyncSession], group: st
 
 async def _add_active_fact(
     sessionmaker: async_sessionmaker[AsyncSession], group: str, subject_id: UUID, obj: str
-) -> None:
+) -> UUID:
     fk = fabric.fact_key(
         scope=group, subject_entity_id=subject_id, predicate="RUNS_ON", object_scalar=obj
     )
     sk = fabric.slot_key(scope=group, subject_entity_id=subject_id, predicate="RUNS_ON")
     async with _tenant(sessionmaker, group) as s:
-        await SqlAlchemyFactRepository(s).upsert(
+        fact = await SqlAlchemyFactRepository(s).upsert(
             Fact(
                 id=uuid7(),
                 group_id=group,
@@ -164,6 +171,98 @@ async def _add_active_fact(
                 confidence=0.9,
             )
         )
+        return fact.id
+
+
+async def test_projection_source_returns_exact_published_episode_ids(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    group = f"p:proj-{uuid7().hex[:12]}"
+    subject = await _seed_tenant(sessionmaker, group)
+    fact_ids = {
+        "eks": await _add_active_fact(sessionmaker, group, subject, "eks"),
+        "valkey": await _add_active_fact(sessionmaker, group, subject, "valkey"),
+    }
+    now = utc_now()
+    async with _tenant(sessionmaker, group) as session:
+        workspace_id, project_id = (
+            await session.execute(
+                text(
+                    "SELECT w.id, p.id FROM projects p JOIN workspaces w ON w.id=p.workspace_id "
+                    "WHERE p.group_id=:group"
+                ),
+                {"group": group},
+            )
+        ).one()
+        source_id = await session.scalar(
+            text(
+                "INSERT INTO knowledge_sources "
+                "(workspace_id, project_id, kind, name, trust_tier) "
+                "VALUES (:workspace_id, :project_id, 'cmdb', 'CMDB', 1) RETURNING id"
+            ),
+            {"workspace_id": workspace_id, "project_id": project_id},
+        )
+        assert source_id is not None
+        artifact = ArtifactRow(
+            source_id=source_id,
+            external_id="runtime",
+            content_hash="hash",
+            s3_key="runtime/v1",
+            reference_time=now,
+        )
+        session.add(artifact)
+        await session.flush()
+        version = ArtifactVersionRow(
+            artifact_id=artifact.id,
+            version=1,
+            content_hash="hash",
+            s3_key="runtime/v1",
+            reference_time=now,
+        )
+        session.add(version)
+        await session.flush()
+
+        episodes = {
+            obj: PublishedEpisodeRow(
+                source_id=f"{group}:claim-{obj}",
+                artifact_version_id=version.id,
+                group_id=group,
+                knowledge_type="fact",
+                verification="human_verified",
+                authority=1.0,
+                confidence=0.9,
+                reference_time=now,
+                payload={"object": obj},
+                dedup_uuid=deterministic_id(group, obj),
+            )
+            for obj in fact_ids
+        }
+        session.add_all(episodes.values())
+        await session.flush()
+        session.add_all(
+            AssertionRow(
+                group_id=group,
+                fact_id=fact_id,
+                polarity="supports",
+                knowledge_source_id=source_id,
+                artifact_id=artifact.id,
+                artifact_version_id=version.id,
+                extractor_confidence=0.9,
+                source_authority=1.0,
+                verification_state="human_verified",
+                run_key=f"episode:{episodes[obj].source_id}",
+                state="active",
+            )
+            for obj, fact_id in fact_ids.items()
+        )
+        expected = {obj: str(episode.id) for obj, episode in episodes.items()}
+        artifact_version_id = str(version.id)
+
+    projected = await SqlAlchemyProjectionSource(sessionmaker).active_facts(group_id=group)
+    supporting = {fact.object_name: fact.supporting_episode_ids for fact in projected}
+
+    assert supporting == {obj: (episode_id,) for obj, episode_id in expected.items()}
+    assert all(artifact_version_id not in episode_ids for episode_ids in supporting.values())
 
 
 async def test_rebuild_reproduces_the_active_fact_set(

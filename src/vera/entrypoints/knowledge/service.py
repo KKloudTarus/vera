@@ -25,19 +25,27 @@ from vera.adapters.persistence.repositories.fabric import (
 )
 from vera.adapters.persistence.repositories.knowledge_read import SqlAlchemyKnowledgeReadModel
 from vera.adapters.persistence.repositories.ontology import SqlAlchemyOntologyRepository
+from vera.adapters.persistence.repositories.outbox import SqlAlchemyOutboxRepository
 from vera.adapters.persistence.repositories.passage_index import (
     SqlAlchemyCodeIndex,
+    SqlAlchemyContentAvailability,
     SqlAlchemyFactCandidateSource,
     SqlAlchemyPassageIndex,
 )
 from vera.adapters.persistence.repositories.pgvector_index import (
     PgVectorCodeIndex,
+    PgVectorHybridFactCandidateSource,
     PgVectorPassageIndex,
 )
 from vera.adapters.persistence.unit_of_work import SqlAlchemyUnitOfWork
-from vera.application.retrieval import ContextAssembler, HybridPassageIndex
+from vera.application.retrieval import (
+    ContextAssembler,
+    HybridFactCandidateSource,
+    HybridPassageIndex,
+)
 from vera.application.snapshot import ContextPackService, SnapshotService, serialize_candidate
 from vera.bootstrap import Container
+from vera.config.settings import active_embedding
 from vera.domain.identity.models import Role, role_at_least
 from vera.domain.identity.scopes import ScopeKind, scope_kind
 from vera.domain.knowledge.fabric import (
@@ -55,13 +63,52 @@ from vera.domain.knowledge.fabric import (
 )
 from vera.domain.ontology import current_descriptor, diff_descriptors
 from vera.domain.ports.identity import ResolvedScope, ScopeResolver
-from vera.domain.ports.retrieval_index import CodeIndex, PassageIndex, RetrievalFilters
+from vera.domain.ports.retrieval_index import (
+    CodeIndex,
+    FactCandidateSource,
+    PassageIndex,
+    RetrievalFilters,
+)
 from vera.domain.ports.snapshot import ContextPack
+from vera.observability.cost import UsageContext, reset_usage_context, set_usage_context
 from vera.shared.ids import uuid7
 from vera.shared.time import utc_now
 from vera.shared.types import GroupId, JsonDict
 
 _PROPOSAL_AUTHORITY = 0.4  # tier 4 (unverified) authority; proposals never outrank real facts
+
+
+def active_embedding_version(container: Container) -> JsonDict:
+    if not container.settings.memory.vector_search_enabled or container.embedder is None:
+        return {}
+    model, dimension = active_embedding(container.settings)
+    memory = container.settings.memory
+    return {
+        "provider": memory.embedder,
+        "model": model,
+        "model_version": memory.embedding_model_version,
+        "dimension": dimension,
+    }
+
+
+def active_retrieval_index_version(container: Container) -> str:
+    if not container.settings.memory.vector_search_enabled or container.embedder is None:
+        return "fts-v1"
+    if container.reranker is None:
+        return "hybrid-rrf-v1"
+    rerank = container.settings.rerank
+    model = (
+        container.settings.voyage.rerank_model
+        if rerank.cross_encoder_provider == "voyage"
+        else container.settings.memory.small_llm_model
+    )
+    fingerprint = hashlib.sha256(
+        (
+            f"semantic-fact-ann-v1:{rerank.cross_encoder_provider}:{model}:"
+            f"{rerank.cross_encoder_min_score}:{rerank.cross_encoder_top_n}"
+        ).encode()
+    ).hexdigest()[:12]
+    return f"hybrid-rrf-v1+semantic-fact-ann-v1:{fingerprint}"
 
 
 class ScopeError(Exception):
@@ -97,36 +144,59 @@ class KnowledgeService:
         self._read = SqlAlchemyKnowledgeReadModel(sm)
         self._uow_factory = lambda: SqlAlchemyUnitOfWork(container.sessionmaker)
         self._community_lineage = SqlAlchemyCommunityLineageRepository(sm)
+        facts: FactCandidateSource = SqlAlchemyFactCandidateSource(sm)
         passages: PassageIndex
         code: CodeIndex
         if container.settings.memory.vector_search_enabled and container.embedder is not None:
+            model, dimension = active_embedding(container.settings)
             passages = HybridPassageIndex(
                 SqlAlchemyPassageIndex(sm),
                 PgVectorPassageIndex(
                     sm,
                     container.embedder,
                     provider=container.settings.memory.embedder,
-                    model=container.settings.memory.embedding_model,
+                    model=model,
                     model_version=container.settings.memory.embedding_model_version,
-                    dimension=container.settings.memory.embedding_dim,
+                    dimension=dimension,
                 ),
             )
+            if container.reranker is not None:
+                hydrator = SqlAlchemyFactCandidateSource(sm)
+                facts = HybridFactCandidateSource(
+                    batch_source=PgVectorHybridFactCandidateSource(
+                        sm,
+                        container.embedder,
+                        container.reranker,
+                        provider=container.settings.memory.embedder,
+                        model=model,
+                        model_version=container.settings.memory.embedding_model_version,
+                        dimension=dimension,
+                        min_score=container.settings.rerank.cross_encoder_min_score,
+                        top_n=container.settings.rerank.cross_encoder_top_n,
+                        include_provenance=False,
+                    ),
+                    hydrator=hydrator,
+                    batch_semaphore=container.fact_candidate_semaphore,
+                )
             code = HybridPassageIndex(
                 SqlAlchemyCodeIndex(sm),
                 PgVectorCodeIndex(
                     sm,
                     container.embedder,
                     provider=container.settings.memory.embedder,
-                    model=container.settings.memory.embedding_model,
+                    model=model,
                     model_version=container.settings.memory.embedding_model_version,
-                    dimension=container.settings.memory.embedding_dim,
+                    dimension=dimension,
                 ),
             )
         else:
             passages = SqlAlchemyPassageIndex(sm)
             code = SqlAlchemyCodeIndex(sm)
         self._assembler = ContextAssembler(
-            facts=SqlAlchemyFactCandidateSource(sm), passages=passages, code=code
+            facts=facts,
+            passages=passages,
+            code=code,
+            content_availability=SqlAlchemyContentAvailability(sm),
         )
         self._snapshot_service = SnapshotService(uow_factory=self._uow_factory)
         self._context_pack_service = ContextPackService(
@@ -180,20 +250,12 @@ class KnowledgeService:
         max_trust_tier: int | None = None,
         citation_mode: Literal["full", "compact"] = "full",
         conflict_handling: Literal["include", "exclude", "only"] = "include",
+        usage_ref: str | None = None,
     ) -> JsonDict:
         scope = await self._resolve(principal_id)
         group = await self._target_group(scope, project)
-        embedding_version: JsonDict = {}
-        retrieval_index_version = "fts-v1"
-        if self._c.settings.memory.vector_search_enabled and self._c.embedder is not None:
-            memory = self._c.settings.memory
-            embedding_version = {
-                "provider": memory.embedder,
-                "model": memory.embedding_model,
-                "model_version": memory.embedding_model_version,
-                "dimension": memory.embedding_dim,
-            }
-            retrieval_index_version = "hybrid-rrf-v1"
+        embedding_version = active_embedding_version(self._c)
+        retrieval_index_version = active_retrieval_index_version(self._c)
         filters = RetrievalFilters(
             repository=repository,
             branch=branch,
@@ -206,20 +268,26 @@ class KnowledgeService:
             max_trust_tier=max_trust_tier,
             conflict_handling=conflict_handling,
         )
-        pack = await self._context_pack_service.create(
-            group_id=group,
-            query=query,
-            snapshot_id=snapshot_id,
-            hints=hints,
-            limit=limit,
-            token_budget=token_budget,
-            as_of=as_of,
-            filters=filters,
-            citation_mode=citation_mode,
-            active_embedding_version=embedding_version,
-            active_retrieval_index_version=retrieval_index_version,
-            actor=str(principal_id),
+        usage_token = set_usage_context(
+            UsageContext(request_kind="search", group_id=group, ref=usage_ref)
         )
+        try:
+            pack = await self._context_pack_service.create(
+                group_id=group,
+                query=query,
+                snapshot_id=snapshot_id,
+                hints=hints,
+                limit=limit,
+                token_budget=token_budget,
+                as_of=as_of,
+                filters=filters,
+                citation_mode=citation_mode,
+                active_embedding_version=embedding_version,
+                active_retrieval_index_version=retrieval_index_version,
+                actor=str(principal_id),
+            )
+        finally:
+            reset_usage_context(usage_token)
         return _context_pack_payload(pack)
 
     async def get_context_pack(self, principal_id: UUID, *, pack_id: str) -> JsonDict | None:
@@ -242,12 +310,21 @@ class KnowledgeService:
         project: str | None = None,
         limit: int = 10,
         as_of: datetime | None = None,
+        known_as_of: datetime | None = None,
     ) -> JsonDict:
         scope = await self._resolve(principal_id)
         group = await self._target_group(scope, project)
-        assembled = await self._assembler.assemble(
-            query=query, group_id=group, limit=limit, as_of=as_of
-        )
+        usage_token = set_usage_context(UsageContext(request_kind="search", group_id=group))
+        try:
+            assembled = await self._assembler.assemble(
+                query=query,
+                group_id=group,
+                limit=limit,
+                as_of=as_of,
+                known_as_of=known_as_of,
+            )
+        finally:
+            reset_usage_context(usage_token)
         return {
             "query": query,
             "conflicts": assembled.conflicts,
@@ -397,17 +474,8 @@ class KnowledgeService:
     ) -> JsonDict:
         scope = await self._resolve(principal_id)
         group = await self._target_group(scope, project)
-        embedding_version: JsonDict = {}
-        retrieval_index_version = "fts-v1"
-        if self._c.settings.memory.vector_search_enabled and self._c.embedder is not None:
-            memory = self._c.settings.memory
-            embedding_version = {
-                "provider": memory.embedder,
-                "model": memory.embedding_model,
-                "model_version": memory.embedding_model_version,
-                "dimension": memory.embedding_dim,
-            }
-            retrieval_index_version = "hybrid-rrf-v1"
+        embedding_version = active_embedding_version(self._c)
+        retrieval_index_version = active_retrieval_index_version(self._c)
         snap = await self._snapshot_service.create(
             group_id=group,
             as_of=as_of,
@@ -619,6 +687,17 @@ class KnowledgeService:
                     reason=reason,
                 )
             )
+            if (
+                to is FactLifecycle.ACTIVE
+                and self._c.settings.memory.vector_search_enabled
+                and self._c.embedder is not None
+            ):
+                await SqlAlchemyOutboxRepository(session).add(
+                    group_id=group,
+                    source_id=f"fact-activation:{fact['fact_id']}",
+                    dedup_uuid=uuid7(),
+                    payload={"job_kind": "embed_facts", "group_id": group},
+                )
             await uow.commit()
         return {"fact_key": fact_key, "lifecycle": to.value, "group_id": group}
 

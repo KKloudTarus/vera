@@ -1,0 +1,208 @@
+# Disposable full-stack topology for evaluation. Always use a unique Compose project name
+# and remove its volumes after exporting the immutable report.
+x-eval-app-env: &eval-app-env
+  VERA_ENVIRONMENT: dev
+  VERA_DB__DSN: postgresql+asyncpg://vera:vera@postgres:5432/vera
+  VERA_DB__POOL_SIZE: "30"
+  VERA_DB__MAX_OVERFLOW: "15"
+  VERA_DB__ROLE_ENFORCEMENT: "true"
+  VERA_NEO4J__URI: bolt://neo4j-proxy:7687
+  VERA_NEO4J__USER: neo4j
+  VERA_NEO4J__PASSWORD: vera-local-pass
+  VERA_MEMORY__PROVIDER: graphiti
+  VERA_MEMORY__GRAPH_BACKEND: neo4j
+  VERA_MEMORY__FABRIC_WRITE_MODE: fabric
+  VERA_MEMORY__VECTOR_SEARCH_ENABLED: "true"
+  VERA_MEMORY__EMBEDDER: voyage
+  VERA_VOYAGE__API_KEY: ${VERA_VOYAGE__API_KEY:?set VERA_VOYAGE__API_KEY for semantic evaluation}
+  VERA_VOYAGE__EMBEDDING_MODEL: voyage-4-lite
+  VERA_VOYAGE__EMBEDDING_DIM: "1024"
+  VERA_VOYAGE__RERANK_MODEL: rerank-2.5
+  VERA_RERANK__CROSS_ENCODER_ENABLED: "true"
+  VERA_RERANK__CROSS_ENCODER_PROVIDER: voyage
+  VERA_RERANK__CROSS_ENCODER_MIN_SCORE: "0.35"
+  VERA_FALKOR__HOST: falkordb
+  VERA_FALKOR__PORT: 6379
+  VERA_RESILIENCE__VALKEY_URL: redis://valkey:6379/0
+  VERA_OBJECTSTORE__ENDPOINT_URL: http://minio:9000
+  VERA_OBJECTSTORE__ACCESS_KEY: minioadmin
+  VERA_OBJECTSTORE__SECRET_KEY: minioadmin
+  VERA_MCP__JWT_SECRET: ${VERA_EVAL_MCP_JWT_SECRET:?set a run-specific MCP JWT secret}
+  VERA_MCP__REQUIRED_SCOPES: '["memory:read"]'
+
+services:
+  postgres:
+    ports: !reset []
+
+  neo4j:
+    ports: !reset []
+    volumes:
+      - neo4j-data:/data
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "cypher-shell -u neo4j -p vera-local-pass 'RETURN 1' >/dev/null 2>&1",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+
+  neo4j-proxy:
+    image: ghcr.io/shopify/toxiproxy:2.12.0@sha256:9378ed52a28bc50edc1350f936f518f31fa95f0d15917d6eb40b8e376d1a214e
+    command: ["-host", "0.0.0.0"]
+    healthcheck:
+      test: ["CMD", "/toxiproxy-cli", "-h", "http://localhost:8474", "list"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    depends_on:
+      neo4j:
+        condition: service_healthy
+
+  neo4j-proxy-init:
+    image: ghcr.io/shopify/toxiproxy:2.12.0@sha256:9378ed52a28bc50edc1350f936f518f31fa95f0d15917d6eb40b8e376d1a214e
+    entrypoint: ["/toxiproxy-cli"]
+    command:
+      [
+        "-h",
+        "http://neo4j-proxy:8474",
+        "create",
+        "-l",
+        "0.0.0.0:7687",
+        "-u",
+        "neo4j:7687",
+        "neo4j",
+      ]
+    depends_on:
+      neo4j-proxy:
+        condition: service_healthy
+
+  valkey:
+    ports: !reset []
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  minio:
+    ports: !reset []
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  migrate:
+    environment: *eval-app-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      neo4j-proxy-init:
+        condition: service_completed_successfully
+      valkey:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+
+  api:
+    environment: *eval-app-env
+    extra_hosts: ["host.docker.internal:host-gateway"]
+    ports: !reset []
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8000/health/ready', timeout=5)",
+        ]
+      interval: 5s
+      timeout: 6s
+      retries: 30
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      neo4j-proxy-init:
+        condition: service_completed_successfully
+      valkey:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+
+  worker:
+    environment: *eval-app-env
+    extra_hosts: ["host.docker.internal:host-gateway"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      neo4j-proxy-init:
+        condition: service_completed_successfully
+      valkey:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+
+  mcp:
+    environment: *eval-app-env
+    extra_hosts: ["host.docker.internal:host-gateway"]
+    ports: !reset []
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import socket; socket.create_connection(('localhost', 8080), timeout=5).close()",
+        ]
+      interval: 5s
+      timeout: 6s
+      retries: 30
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      neo4j-proxy-init:
+        condition: service_completed_successfully
+      valkey:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+
+  evaluator:
+    build:
+      context: .
+      dockerfile: evals/Dockerfile.eval
+    profiles: ["eval"]
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      <<: *eval-app-env
+      VERA_EVAL_API_URL: http://api:8000
+      VERA_EVAL_MCP_URL: http://mcp:8080/mcp
+      VERA_EVAL_MCP_HOST_HEADER: localhost:8080
+      VERA_EVAL_MODEL_TIMEOUT_S: "120"
+      VERA_EVAL_DEPENDENCY_CONTROL_URL: http://neo4j-proxy:8474
+      VERA_EVAL_SCOPE_ID: ${VERA_EVAL_SCOPE_ID:?set a run-specific evaluation scope ID}
+      VERA_EVAL_STATE_ROOT: /state
+    extra_hosts: ["host.docker.internal:host-gateway"]
+    volumes:
+      - ./evals/runs:/output
+      - eval-state:/state
+    command: ["sleep", "infinity"]
+    depends_on:
+      api:
+        condition: service_healthy
+      mcp:
+        condition: service_healthy
+      worker:
+        condition: service_started
+
+volumes:
+  neo4j-data:
+  minio-data:
+  eval-state:

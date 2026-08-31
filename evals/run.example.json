@@ -1,0 +1,51 @@
+{
+  "profile": "daily",
+  "environment": "dedicated-synthetic",
+  "service_version": "replace-me",
+  "git_sha": "0000000000000000000000000000000000000000",
+  "git_dirty": false,
+  "graph_backend": "replace-me",
+  "hardware_profile": "replace-me",
+  "cache_state": "cold",
+  "concurrency": 1,
+  "random_seed": 20260829,
+  "execution_profiles": [
+    {
+      "profile_id": "daily",
+      "dimensions": {
+        "isolation": "dedicated_synthetic_scope"
+      }
+    }
+  ],
+  "models": {},
+  "pipeline_versions": {},
+  "ontology_version": "replace-me",
+  "quality_config": {
+    "fabric_write_mode": "fabric"
+  },
+  "run_context": {
+    "principal": "synthetic-evaluator",
+    "evaluation_scope": {
+      "id": "replace-with-run-owned-scope",
+      "kind": "dedicated_synthetic_scope",
+      "run_owned": true,
+      "production_writable": false
+    },
+    "cost_budget": {
+      "max_duration_s": 3600,
+      "max_cost_usd": 10
+    }
+  },
+  "allowed_effects": [
+    "read",
+    "judge",
+    "synthetic_write",
+    "failure_injection",
+    "external",
+    "load",
+    "cleanup"
+  ],
+  "output_root": "runs",
+  "step_timeout_s": 600,
+  "retain_synthetic_payloads": false
+}

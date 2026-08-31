@@ -20,7 +20,12 @@ from vera.domain.ports.memory_engine import GraphHit, GraphQuery, MemoryEngine
 from vera.domain.ports.reranker import Reranker
 from vera.domain.ports.retrieval import HitProvenance, RetrievalReadModel
 from vera.observability import span
-from vera.observability.cost import UsageContext, reset_usage_context, set_usage_context
+from vera.observability.cost import (
+    UsageContext,
+    current_usage_context,
+    reset_usage_context,
+    set_usage_context,
+)
 from vera.observability.metrics import record_search
 from vera.shared.time import utc_now
 from vera.shared.types import GroupId
@@ -131,7 +136,14 @@ class SearchMemoryHandler:
         started = time.perf_counter()
         results: list[RankedHit] = []
         # Tag any query-embedding provider call this search triggers as search cost.
-        token = set_usage_context(UsageContext(request_kind="search"))
+        group_id = str(query.group_ids[0]) if len(query.group_ids) == 1 else None
+        parent_context = current_usage_context()
+        ref = (
+            parent_context.ref
+            if parent_context is not None and parent_context.request_kind == "search"
+            else None
+        )
+        token = set_usage_context(UsageContext(request_kind="search", group_id=group_id, ref=ref))
         try:
             async with AsyncExitStack() as stack:
                 # A tight read-path budget: a slow dependency fails the query fast

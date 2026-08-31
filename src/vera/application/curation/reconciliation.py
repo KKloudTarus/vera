@@ -95,6 +95,8 @@ class ArtifactReconciliation:
     source_authority: float
     trust_tier: int
     propositions: list[ResolvedProposition]
+    human_verified: bool = False
+    valid_from: datetime | None = None
     artifact_version_id: UUID | None = None
     knowledge_source_id: UUID | None = None
     artifact_id: UUID | None = None
@@ -176,7 +178,9 @@ class ReconciliationService:
         advances_source = not req.propositions or any(
             not prop.needs_review for prop in req.propositions
         )
-        if action_for_tier(req.trust_tier) is TrustAction.AUTO_PUBLISH and advances_source:
+        if (
+            req.human_verified or action_for_tier(req.trust_tier) is TrustAction.AUTO_PUBLISH
+        ) and advances_source:
             reaffirmed_fact_ids: set[UUID] = set()
             for prop in req.propositions:
                 if prop.needs_review or prop.polarity is not Polarity.SUPPORTS:
@@ -230,11 +234,14 @@ class ReconciliationService:
         report: ReconciliationReport,
     ) -> Fact:
         policy = policy_for(prop.predicate)
-        auto = action_for_tier(req.trust_tier) is TrustAction.AUTO_PUBLISH and not prop.needs_review
+        auto = (
+            req.human_verified or action_for_tier(req.trust_tier) is TrustAction.AUTO_PUBLISH
+        ) and not prop.needs_review
         sk = _slot_key(req.group_id, prop)
         lifecycle = FactLifecycle.ACTIVE if auto else FactLifecycle.PROPOSED
 
         superseded_ids: list[UUID] = []
+        valid_to: datetime | None = None
         if policy.cardinality is Cardinality.SINGLE_PER_QUALIFIER_SET and auto:
             rivals = [
                 f
@@ -242,11 +249,11 @@ class ReconciliationService:
                 if f.normalized_object != _normalized(prop)
             ]
             if rivals:
-                lifecycle, superseded_ids = await self._resolve_single_valued(
+                lifecycle, superseded_ids, valid_to = await self._resolve_single_valued(
                     req, rivals, now, report
                 )
 
-        fact = self._new_fact(req, prop, fk, sk, lifecycle, now)
+        fact = self._new_fact(req, prop, fk, sk, lifecycle, now, valid_to=valid_to)
         if lifecycle is FactLifecycle.ACTIVE:
             fact = await self._facts.upsert(fact)
             await self._emit(req, KnowledgeEventType.FACT_ACTIVATED, now, fact_id=fact.id)
@@ -278,16 +285,47 @@ class ReconciliationService:
         rivals: list[Fact],
         now: datetime,
         report: ReconciliationReport,
-    ) -> tuple[FactLifecycle, list[UUID]]:
+    ) -> tuple[FactLifecycle, list[UUID], datetime | None]:
         """Decide the new fact's lifecycle against the current values in its slot, and demote
         rivals when superseded or equally contested. Returns the new fact's lifecycle and the
         ids of any rivals it supersedes (for the SUPERSEDES relations the caller records).
         """
         top = max(f.authority for f in rivals)
+        if req.source_authority < top:
+            return FactLifecycle.PROPOSED, [], None
+        dated_rivals = [(fact, fact.valid_from) for fact in rivals if fact.valid_from is not None]
+        if req.valid_from is not None and dated_rivals:
+            later = [
+                (fact, valid_from)
+                for fact, valid_from in dated_rivals
+                if valid_from > req.valid_from
+            ]
+            if later:
+                return FactLifecycle.SUPERSEDED, [], min(valid_from for _, valid_from in later)
+            if all(valid_from < req.valid_from for _, valid_from in dated_rivals):
+                for rival in rivals:
+                    await self._facts.set_lifecycle(
+                        group_id=req.group_id,
+                        fact_id=str(rival.id),
+                        state=FactLifecycle.SUPERSEDED,
+                        valid_to=req.valid_from,
+                    )
+                    await self._emit(
+                        req,
+                        KnowledgeEventType.FACT_SUPERSEDED,
+                        now,
+                        fact_id=rival.id,
+                        reason="replaced by a later valid-time value",
+                    )
+                    report.facts_superseded += 1
+                return FactLifecycle.ACTIVE, [rival.id for rival in rivals], None
         if req.source_authority > top:
             for rival in rivals:
                 await self._facts.set_lifecycle(
-                    group_id=req.group_id, fact_id=str(rival.id), state=FactLifecycle.SUPERSEDED
+                    group_id=req.group_id,
+                    fact_id=str(rival.id),
+                    state=FactLifecycle.SUPERSEDED,
+                    valid_to=req.valid_from,
                 )
                 await self._emit(
                     req,
@@ -297,7 +335,7 @@ class ReconciliationService:
                     reason="replaced by a higher-authority value",
                 )
                 report.facts_superseded += 1
-            return FactLifecycle.ACTIVE, [r.id for r in rivals]
+            return FactLifecycle.ACTIVE, [r.id for r in rivals], None
         if req.source_authority == top:
             for rival in rivals:
                 await self._facts.set_lifecycle(
@@ -305,8 +343,8 @@ class ReconciliationService:
                 )
                 await self._emit(req, KnowledgeEventType.FACT_DISPUTED, now, fact_id=rival.id)
                 report.facts_disputed += 1
-        # lower or equal authority: the new value does not overwrite; record it as disputed.
-        return FactLifecycle.DISPUTED, []
+        # Equal authority at the same valid-time boundary remains contested.
+        return FactLifecycle.DISPUTED, [], None
 
     def _new_fact(
         self,
@@ -316,6 +354,8 @@ class ReconciliationService:
         sk: str,
         lifecycle: FactLifecycle,
         now: datetime,
+        *,
+        valid_to: datetime | None = None,
     ) -> Fact:
         ttl = policy_for(prop.predicate).ttl_seconds
         return Fact(
@@ -333,6 +373,8 @@ class ReconciliationService:
             lifecycle_state=lifecycle,
             authority=req.source_authority,
             confidence=prop.extractor_confidence,
+            valid_from=req.valid_from,
+            valid_to=valid_to,
             expires_at=(
                 now + timedelta(seconds=ttl) if ttl is not None and not prop.needs_review else None
             ),
@@ -397,6 +439,7 @@ class ReconciliationService:
                 artifact_version_id=req.artifact_version_id,
                 extractor_confidence=prop.extractor_confidence,
                 source_authority=req.source_authority,
+                valid_from=req.valid_from,
                 observed_at=now,
                 recorded_at=now,
                 extraction_run_id=req.extraction_run_id,
@@ -511,7 +554,18 @@ class ReconciliationService:
             for a in await self._assertions.active_for_artifact(
                 group_id=req.group_id, artifact_id=str(req.artifact_id)
             )
-            if a.artifact_version_id != req.artifact_version_id
+            if (
+                a.artifact_version_id != req.artifact_version_id
+                or (
+                    req.extraction_run_id is not None
+                    and a.extraction_run_id != req.extraction_run_id
+                )
+            )
+            and not (
+                req.valid_from is not None
+                and a.valid_from is not None
+                and a.valid_from > req.valid_from
+            )
         ]
         touched: set[UUID] = set()
         for assertion in stale:
@@ -553,7 +607,12 @@ class ReconciliationService:
             AbsenceSemantics.EXPIRE: FactLifecycle.EXPIRED,
             AbsenceSemantics.REVIEW: FactLifecycle.DISPUTED,
         }[semantics]
-        await self._facts.set_lifecycle(group_id=req.group_id, fact_id=str(fact_id), state=state)
+        await self._facts.set_lifecycle(
+            group_id=req.group_id,
+            fact_id=str(fact_id),
+            state=state,
+            valid_to=req.valid_from,
+        )
         event = {
             FactLifecycle.DISPUTED: KnowledgeEventType.FACT_DISPUTED,
             FactLifecycle.EXPIRED: KnowledgeEventType.FACT_EXPIRED,

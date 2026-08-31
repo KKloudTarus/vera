@@ -13,7 +13,7 @@ from contextlib import asynccontextmanager
 from uuid import UUID
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import exc, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from vera.adapters.persistence.models.knowledge import ArtifactRow, ArtifactVersionRow
@@ -261,6 +261,149 @@ async def test_fact_and_chunk_and_evidence_upsert_are_idempotent(
         ).one()
         assert replayed.state.value == "withdrawn"
         assert membership_after == membership_before
+
+
+async def test_fact_revision_history_is_trigger_only_for_runtime_roles(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    group = f"p:history-{uuid7().hex[:12]}"
+    _, _, subject_id = await _setup(sessionmaker, group)
+
+    async with _tenant(sessionmaker, group) as session:
+        facts = SqlAlchemyFactRepository(session)
+        fact = await facts.upsert(_fact(group, subject_id))
+        await facts.set_aggregates(
+            group_id=group,
+            fact_id=str(fact.id),
+            authority=0.8,
+            confidence=0.7,
+        )
+        revisions = (
+            await session.execute(
+                text(
+                    "SELECT authority, confidence, system_to FROM fact_revisions "
+                    "WHERE fact_id = :fact_id ORDER BY system_from"
+                ),
+                {"fact_id": fact.id},
+            )
+        ).all()
+
+    assert len(revisions) == 2
+    assert revisions[0].system_to is not None
+    assert revisions[1].authority == 0.8
+    assert revisions[1].confidence == 0.7
+    assert revisions[1].system_to is None
+
+    async with sessionmaker() as session:
+        function_security = (
+            await session.execute(
+                text(
+                    "SELECT function_def.prosecdef, owner.rolname, function_def.proconfig "
+                    "FROM pg_catalog.pg_proc function_def "
+                    "JOIN pg_catalog.pg_roles owner ON owner.oid = function_def.proowner "
+                    "WHERE function_def.oid = "
+                    "'public.record_fact_revision()'::regprocedure"
+                )
+            )
+        ).one()
+        runtime_grants = {
+            (row.grantee, row.privilege_type)
+            for row in await session.execute(
+                text(
+                    "SELECT grantee, privilege_type FROM information_schema.table_privileges "
+                    "WHERE table_schema = 'public' AND table_name = 'fact_revisions' "
+                    "AND grantee IN ('PUBLIC', 'vera_app', 'vera_trusted', 'vera_worker')"
+                )
+            )
+        }
+        runtime_execute = await session.scalar(
+            text(
+                "SELECT bool_or(has_function_privilege(role_name, "
+                "'public.record_fact_revision()', 'EXECUTE')) "
+                "FROM unnest(ARRAY['vera_app', 'vera_trusted', 'vera_worker']) "
+                "AS roles(role_name)"
+            )
+        )
+
+    assert function_security.prosecdef is True
+    assert function_security.rolname == "vera_fact_history_writer"
+    assert function_security.proconfig == ["search_path=pg_catalog"]
+    assert runtime_grants == {
+        ("vera_app", "SELECT"),
+        ("vera_trusted", "SELECT"),
+        ("vera_worker", "SELECT"),
+    }
+    assert runtime_execute is False
+
+    mutations = (
+        "INSERT INTO fact_revisions ("
+        "group_id, fact_id, lifecycle_state, authority, confidence, valid_from, valid_to, "
+        "expires_at, system_from, system_to) "
+        "SELECT group_id, fact_id, lifecycle_state, authority, confidence, valid_from, valid_to, "
+        "expires_at, clock_timestamp(), clock_timestamp() FROM fact_revisions "
+        "WHERE fact_id = :fact_id LIMIT 1",
+        "UPDATE fact_revisions SET confidence = confidence WHERE fact_id = :fact_id",
+        "DELETE FROM fact_revisions WHERE fact_id = :fact_id",
+        "TRUNCATE fact_revisions",
+    )
+    role_statements = (
+        ("vera_app", text("SET LOCAL ROLE vera_app")),
+        ("vera_worker", text("SET LOCAL ROLE vera_worker")),
+    )
+    for role, role_statement in role_statements:
+        for mutation in mutations:
+            async with sessionmaker() as session:
+                await session.begin()
+                await session.execute(role_statement)
+                if role == "vera_app":
+                    await session.execute(
+                        text("SELECT set_config('vera.group_id', :group, true)"),
+                        {"group": group},
+                    )
+                with pytest.raises(exc.DBAPIError, match="permission denied"):
+                    params = {"fact_id": fact.id} if ":fact_id" in mutation else None
+                    await session.execute(text(mutation), params)
+                await session.rollback()
+
+
+async def test_fact_embedding_migration_indexes_are_valid(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    expected = {
+        "uq_chunk_embedding_model",
+        "ix_fact_embeddings_group_active",
+        "ix_fact_embeddings_ann_256",
+        "ix_fact_embeddings_ann_512",
+        "ix_fact_embeddings_ann_1024",
+        "ix_fact_embeddings_ann_1536",
+        "ix_snapshot_fact_embeddings_ann_256",
+        "ix_snapshot_fact_embeddings_ann_512",
+        "ix_snapshot_fact_embeddings_ann_1024",
+        "ix_snapshot_fact_embeddings_ann_1536",
+        "ix_chunk_embeddings_ann_256",
+        "ix_chunk_embeddings_ann_512",
+    }
+    async with sessionmaker() as session:
+        fact_embeddings_exists = await session.scalar(
+            text("SELECT to_regclass('public.fact_embeddings') IS NOT NULL")
+        )
+        if not fact_embeddings_exists:
+            pytest.skip("pgvector migration was not applied")
+        indexes = (
+            await session.execute(
+                text(
+                    "SELECT index.relname, index_def.indisvalid, index_def.indisready "
+                    "FROM pg_catalog.pg_index index_def "
+                    "JOIN pg_catalog.pg_class index ON index.oid = index_def.indexrelid "
+                    "JOIN pg_catalog.pg_namespace namespace ON namespace.oid = index.relnamespace "
+                    "WHERE namespace.nspname = 'public' AND index.relname = ANY(:names)"
+                ),
+                {"names": list(expected)},
+            )
+        ).all()
+
+    assert {row.relname for row in indexes} == expected
+    assert all(row.indisvalid and row.indisready for row in indexes)
 
 
 async def test_one_fact_supported_by_multiple_sources(

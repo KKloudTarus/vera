@@ -69,7 +69,7 @@ async def get_uow(container: ContainerDep) -> AsyncIterator[SqlAlchemyUnitOfWork
         await uow.commit()
 
 
-UnitOfWorkDep = Annotated[SqlAlchemyUnitOfWork, Depends(get_uow)]
+UnitOfWorkDep = Annotated[SqlAlchemyUnitOfWork, Depends(get_uow, scope="function")]
 
 
 def get_identity_service(uow: UnitOfWorkDep) -> IdentityService:

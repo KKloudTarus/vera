@@ -10,9 +10,11 @@ sends it to the graph. All writes share the caller's Unit of Work transaction.
 from __future__ import annotations
 
 import hashlib
+import json
 import unicodedata
 from dataclasses import dataclass, replace
 from datetime import datetime
+from typing import cast
 from uuid import UUID
 
 from vera.application.curation.chunking import chunk_artifact
@@ -53,6 +55,7 @@ class IngestArtifact:
     source_updated_at: datetime | None = None
     source_version_id: str | None = None
     tombstone: bool = False
+    reextract_existing: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,6 +69,21 @@ class IngestResult:
 @dataclass(frozen=True, slots=True)
 class PublishOutcome:
     status: str  # "published" or "flagged"
+
+
+def _artifact_payload(cmd: IngestArtifact, metadata: JsonDict) -> bytes:
+    return json.dumps(
+        {
+            "schema_version": "1.0",
+            "body": unicodedata.normalize("NFC", cmd.body),
+            "knowledge_type": cmd.knowledge_type,
+            "metadata": metadata,
+            "tombstone": cmd.tombstone,
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
 
 
 def _payload_for(
@@ -153,6 +171,19 @@ def _is_stale_version(head: ArtifactHead, cmd: IngestArtifact) -> bool:
     return False
 
 
+def _same_source_position(head: ArtifactHead, cmd: IngestArtifact) -> bool:
+    if cmd.source_revision is None and cmd.source_updated_at is None:
+        return True
+    if cmd.source_revision is not None and head.source_revision is not None:
+        return cmd.source_revision == head.source_revision
+    if cmd.source_updated_at is not None and head.source_updated_at is not None:
+        return (cmd.source_updated_at, cmd.source_version_id or "") == (
+            head.source_updated_at,
+            head.source_version_id or "",
+        )
+    return False
+
+
 class CurationService:
     def __init__(
         self,
@@ -201,12 +232,37 @@ class CurationService:
         if source is None:
             return Err(NotFound(f"knowledge source {cmd.source_id} not found"))
 
+        await uow.artifacts.lock_version_allocation(
+            source_id=cmd.source_id, external_id=cmd.external_id
+        )
         # Re-ingestion is idempotent by content: an unchanged record is a no-op, changed
         # content appends a version. This keeps a re-run of a sync from duplicating work.
-        hash_input = (b"tombstone\0" + cmd.body.encode()) if cmd.tombstone else cmd.body.encode()
-        content_hash = "sha256:" + hashlib.sha256(hash_input).hexdigest()
+        raw_payload = _artifact_payload(cmd, metadata)
+        content_hash = "sha256:" + hashlib.sha256(raw_payload).hexdigest()
         head = await uow.artifacts.get_head(source_id=cmd.source_id, external_id=cmd.external_id)
-        if head is not None and head.content_hash == content_hash:
+        if (
+            head is not None
+            and head.content_hash == content_hash
+            and not cmd.reextract_existing
+            and _is_stale_version(head, cmd)
+            and not _same_source_position(head, cmd)
+        ):
+            return Ok(
+                IngestResult(
+                    artifact_version_id=str(head.version_id),
+                    claim_ids=(),
+                    published=0,
+                    action="stale",
+                )
+            )
+        if head is not None and head.content_hash == content_hash and not cmd.reextract_existing:
+            if not _same_source_position(head, cmd):
+                await uow.artifacts.advance_watermark(
+                    artifact_id=head.artifact_id,
+                    source_revision=cmd.source_revision,
+                    source_updated_at=cmd.source_updated_at,
+                    source_version_id=cmd.source_version_id,
+                )
             return Ok(
                 IngestResult(
                     artifact_version_id=str(head.version_id),
@@ -215,7 +271,11 @@ class CurationService:
                     action="unchanged",
                 )
             )
-        if head is not None and _is_stale_version(head, cmd):
+        if cmd.reextract_existing and head is None:
+            return Err(NotFound(f"artifact {cmd.external_id} has no version to re-extract"))
+        if cmd.reextract_existing and head is not None and head.content_hash != content_hash:
+            return Err(Conflict("re-extraction payload does not match the stored artifact version"))
+        if head is not None and _is_stale_version(head, cmd) and not cmd.reextract_existing:
             return Ok(
                 IngestResult(
                     artifact_version_id=str(head.version_id),
@@ -226,13 +286,25 @@ class CurationService:
             )
         observed_at = utc_now()
         reference_time = cmd.reference_time or observed_at
-        s3_key = f"artifacts/{cmd.source_id}/{cmd.external_id}/v{(head.version + 1) if head else 1}"
+        next_version = (head.version + 1) if head else 1
+        digest = content_hash.removeprefix("sha256:")
+        s3_key = f"artifacts/{cmd.source_id}/{cmd.external_id}/v{next_version}-{digest}"
         # Persist the raw artifact bytes so the graph stays rebuildable from Postgres + S3.
-        if self._object_store is not None and cmd.body:
+        if self._object_store is not None and not cmd.reextract_existing:
             await self._object_store.put(
-                key=s3_key, data=cmd.body.encode("utf-8"), content_type="text/plain"
+                key=s3_key, data=raw_payload, content_type="application/json"
             )
-        if head is None:
+        if cmd.reextract_existing and head is not None:
+            ref = ArtifactRef(
+                artifact_id=head.artifact_id,
+                version_id=head.version_id,
+                version=head.version,
+                source_revision=head.source_revision,
+                source_updated_at=head.source_updated_at,
+                source_version_id=head.source_version_id,
+                observed_at=head.observed_at,
+            )
+        elif head is None:
             ref = await uow.artifacts.create_with_version(
                 source_id=cmd.source_id,
                 external_id=cmd.external_id,
@@ -390,7 +462,12 @@ class CurationService:
             item.subject and item.predicate and item.object for item, _ in extracted_with_chunks
         )
         if action is TrustAction.AUTO_PUBLISH and not has_fabric_claim:
-            await self._queue_fabric_version(ref, source.trust_tier, cmd.group_id)
+            await self._queue_fabric_version(
+                ref,
+                source.trust_tier,
+                cmd.group_id,
+                extraction_run_id=extraction_run.id,
+            )
 
         return Ok(
             IngestResult(
@@ -400,6 +477,61 @@ class CurationService:
                 action=action.value,
             )
         )
+
+    async def reextract_artifact(
+        self, artifact_version_id: UUID, *, group_id: str
+    ) -> Result[IngestResult, DomainError]:
+        """Run extraction again from an immutable raw artifact envelope."""
+        if self._object_store is None:
+            return Err(NotFound("raw artifact object store is unavailable"))
+        version = await self._uow.artifacts.get_version(artifact_version_id, group_id=group_id)
+        if version is None:
+            return Err(NotFound(f"artifact version {artifact_version_id} not found"))
+        head = await self._uow.artifacts.get_head(
+            source_id=version.source_id, external_id=version.external_id
+        )
+        if head is None or head.version_id != artifact_version_id:
+            return Err(Conflict("only the current artifact version can be re-extracted"))
+        try:
+            decoded = (await self._object_store.get(key=version.s3_key)).decode("utf-8")
+            loaded = cast(object, json.loads(decoded))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return Err(Conflict("stored artifact envelope is invalid"))
+        if not isinstance(loaded, dict):
+            return Err(Conflict("stored artifact envelope is invalid"))
+        payload = cast(dict[str, object], loaded)
+        if payload.get("schema_version") != "1.0":
+            return Err(Conflict("stored artifact envelope is invalid"))
+        body = payload.get("body")
+        knowledge_type = payload.get("knowledge_type")
+        metadata = payload.get("metadata")
+        tombstone = payload.get("tombstone")
+        if (
+            not isinstance(body, str)
+            or not isinstance(knowledge_type, str)
+            or not isinstance(metadata, dict)
+            or not isinstance(tombstone, bool)
+        ):
+            return Err(Conflict("stored artifact envelope has invalid fields"))
+        result = await self.ingest_artifact(
+            IngestArtifact(
+                source_id=version.source_id,
+                group_id=group_id,
+                external_id=version.external_id,
+                body=body,
+                knowledge_type=knowledge_type,
+                metadata=cast(JsonDict, metadata),
+                reference_time=version.reference_time,
+                source_revision=version.source_revision,
+                source_updated_at=version.source_updated_at,
+                source_version_id=version.source_version_id,
+                tombstone=tombstone,
+                reextract_existing=True,
+            )
+        )
+        if isinstance(result, Err):
+            return result
+        return Ok(replace(result.value, action="reextracted"))
 
     async def review_claim(
         self,
@@ -523,6 +655,7 @@ class CurationService:
             reference_time=utc_now(),
             payload=payload,
             dedup_uuid=dedup,
+            artifact_version_id=claim.artifact_version_id,
             ontology_version_id=ontology_id,
             pipeline=CURRENT_PIPELINE_VERSIONS.as_dict(),
             confidence=claim.confidence if claim.confidence is not None else 1.0,
@@ -596,8 +729,16 @@ class CurationService:
             payload=payload,
         )
 
-    async def _queue_fabric_version(self, ref: ArtifactRef, trust_tier: int, group_id: str) -> None:
-        source_id = f"fabric-version:{group_id}:{ref.version_id}"
+    async def _queue_fabric_version(
+        self,
+        ref: ArtifactRef,
+        trust_tier: int,
+        group_id: str,
+        *,
+        extraction_run_id: UUID | None = None,
+    ) -> None:
+        run_suffix = f":{extraction_run_id}" if extraction_run_id is not None else ""
+        source_id = f"fabric-version:{group_id}:{ref.version_id}{run_suffix}"
         ontology_id = await self._uow.ontology.get_active_id()
         await self._uow.outbox.add(
             group_id=group_id,
@@ -613,7 +754,9 @@ class CurationService:
                     "verification": "human_verified",
                     "ontology_version_id": str(ontology_id) if ontology_id is not None else None,
                     "artifact_version_id": str(ref.version_id),
-                    "extraction_run_id": None,
+                    "extraction_run_id": (
+                        str(extraction_run_id) if extraction_run_id is not None else None
+                    ),
                     "chunk_id": None,
                     "quote_hash": None,
                     "needs_review": False,

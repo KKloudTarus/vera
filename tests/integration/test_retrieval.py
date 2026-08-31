@@ -5,7 +5,7 @@ fact candidate sources, and the ContextAssembler that fuses and cites them.
 from __future__ import annotations
 
 import hashlib
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from uuid import UUID
@@ -26,10 +26,17 @@ from vera.adapters.persistence.repositories.fabric import (
     SqlAlchemyEvidenceRepository,
     SqlAlchemyFactRepository,
 )
+from vera.adapters.persistence.repositories.fact_embedding import (
+    SqlAlchemyFactEmbeddingRepository,
+)
 from vera.adapters.persistence.repositories.passage_index import (
     SqlAlchemyCodeIndex,
     SqlAlchemyFactCandidateSource,
     SqlAlchemyPassageIndex,
+)
+from vera.adapters.persistence.repositories.pgvector_index import (
+    PgVectorFactIndex,
+    PgVectorHybridFactCandidateSource,
 )
 from vera.adapters.persistence.unit_of_work import SqlAlchemyUnitOfWork
 from vera.application.retrieval import ContextAssembler
@@ -39,6 +46,7 @@ from vera.domain.knowledge.fabric import (
     Chunk,
     Evidence,
     Fact,
+    FactEmbedding,
     FactLifecycle,
     ObjectType,
     Polarity,
@@ -47,8 +55,33 @@ from vera.domain.ports.retrieval_index import RetrievalFilters
 from vera.domain.ports.snapshot import Snapshot
 from vera.shared.ids import uuid7
 from vera.shared.time import utc_now
+from vera.shared.types import JsonDict
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
+
+
+class _SemanticEmbedder:
+    async def embed(self, text: str) -> list[float]:
+        del text
+        return [1.0, 0.0]
+
+
+class _SemanticReranker:
+    async def rerank(self, *, query: str, facts: Sequence[str]) -> list[float]:
+        score = 0.1 if "salary" in query else 0.8
+        return [score for _ in facts]
+
+
+class _FailingReranker:
+    async def rerank(self, *, query: str, facts: Sequence[str]) -> list[float]:
+        del query, facts
+        raise RuntimeError("reranker unavailable")
+
+
+class _NeutralReranker:
+    async def rerank(self, *, query: str, facts: Sequence[str]) -> list[float]:
+        del query
+        return [0.5 for _ in facts]
 
 
 @asynccontextmanager
@@ -72,6 +105,25 @@ async def _snapshot(
         await uow.use_tenant(group)
         snapshot = await uow.snapshots.create(
             group_id=group, policy_version="ontology-v2", as_of=as_of
+        )
+        await uow.commit()
+        return snapshot
+
+
+async def _snapshot_with_embedding(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    group: str,
+    *,
+    embedding_version: JsonDict,
+) -> Snapshot:
+    async with SqlAlchemyUnitOfWork(sessionmaker) as uow:
+        await uow.set_repeatable_read()
+        await uow.use_tenant(group)
+        snapshot = await uow.snapshots.create(
+            group_id=group,
+            policy_version="ontology-v2",
+            embedding_version=embedding_version,
+            retrieval_index_version="hybrid-rrf-v1+semantic-fact-ann-v1:test",
         )
         await uow.commit()
         return snapshot
@@ -363,6 +415,186 @@ async def test_fact_candidate_source_matches_subject_and_object(
     )
 
 
+async def test_semantic_fact_candidates_require_cross_encoder_relevance(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    group = f"p:r-{uuid7().hex[:12]}"
+    _, subject = await _setup(sessionmaker, group)
+    fact_id = await _fact(sessionmaker, group, subject, "Payment API")
+    async with _tenant(sessionmaker, group) as session:
+        embeddings = SqlAlchemyFactEmbeddingRepository(session)
+        await embeddings.upsert(
+            FactEmbedding(
+                id=uuid7(),
+                group_id=group,
+                fact_id=fact_id,
+                provider="test",
+                model="semantic-test",
+                model_version="1",
+                dimension=2,
+                embedding=[1.0, 0.0],
+                content_hash="fact-content",
+                created_at=utc_now(),
+            )
+        )
+        await embeddings.upsert(
+            FactEmbedding(
+                id=uuid7(),
+                group_id=group,
+                fact_id=fact_id,
+                provider="test",
+                model="semantic-test",
+                model_version="1",
+                dimension=3,
+                embedding=[1.0, 0.0, 0.0],
+                content_hash="fact-content-3d",
+                created_at=utc_now(),
+            )
+        )
+        dimension_count = await session.scalar(
+            text("SELECT count(*) FROM fact_embeddings WHERE fact_id = :fact_id"),
+            {"fact_id": fact_id},
+        )
+
+    source = PgVectorFactIndex(
+        sessionmaker,
+        _SemanticEmbedder(),
+        _SemanticReranker(),
+        provider="test",
+        model="semantic-test",
+        model_version="1",
+        dimension=2,
+        min_score=0.35,
+        top_n=20,
+    )
+    combined_source = PgVectorHybridFactCandidateSource(
+        sessionmaker,
+        _SemanticEmbedder(),
+        _SemanticReranker(),
+        provider="test",
+        model="semantic-test",
+        model_version="1",
+        dimension=2,
+        min_score=0.35,
+        top_n=20,
+    )
+    lightweight_combined_source = PgVectorHybridFactCandidateSource(
+        sessionmaker,
+        _SemanticEmbedder(),
+        _SemanticReranker(),
+        provider="test",
+        model="semantic-test",
+        model_version="1",
+        dimension=2,
+        min_score=0.35,
+        top_n=20,
+        include_provenance=False,
+    )
+    hits = await source.search(
+        group_id=group,
+        query="Doi nao phu trach dich vu thanh toan?",
+        limit=5,
+    )
+    combined = await combined_source.search(
+        group_id=group,
+        query="Doi nao phu trach dich vu thanh toan?",
+        limit=5,
+    )
+    lightweight_combined = await lightweight_combined_source.search(
+        group_id=group,
+        query="Doi nao phu trach dich vu thanh toan?",
+        limit=5,
+    )
+    negative = await source.search(
+        group_id=group,
+        query="What is Alice's current salary?",
+        limit=5,
+    )
+    snapshot = await _snapshot_with_embedding(
+        sessionmaker,
+        group,
+        embedding_version={
+            "provider": "test",
+            "model": "semantic-test",
+            "model_version": "1",
+            "dimension": 2,
+        },
+    )
+    frozen_before = await source.search(
+        group_id=group,
+        query="Doi nao phu trach dich vu thanh toan?",
+        limit=5,
+        snapshot_id=snapshot.id,
+        restrict_fact_ids={str(fact_id)},
+    )
+    async with _tenant(sessionmaker, group) as session:
+        await session.execute(text("DELETE FROM fact_embeddings WHERE group_id = :g"), {"g": group})
+    frozen_after = await source.search(
+        group_id=group,
+        query="Doi nao phu trach dich vu thanh toan?",
+        limit=5,
+        snapshot_id=snapshot.id,
+    )
+    combined_frozen = await combined_source.search(
+        group_id=group,
+        query="Doi nao phu trach dich vu thanh toan?",
+        limit=5,
+        snapshot_id=snapshot.id,
+        restrict_fact_ids={str(fact_id)},
+    )
+    outage_source = PgVectorFactIndex(
+        sessionmaker,
+        _SemanticEmbedder(),
+        _FailingReranker(),
+        provider="test",
+        model="semantic-test",
+        model_version="1",
+        dimension=2,
+        min_score=0.35,
+        top_n=20,
+    )
+    neutral_source = PgVectorFactIndex(
+        sessionmaker,
+        _SemanticEmbedder(),
+        _NeutralReranker(),
+        provider="test",
+        model="semantic-test",
+        model_version="1",
+        dimension=2,
+        min_score=0.35,
+        top_n=20,
+    )
+
+    assert dimension_count == 2
+    assert [hit.fact_id for hit in hits] == [str(fact_id)]
+    assert [hit.fact_id for hit in combined.semantic] == [str(fact_id)]
+    assert [hit.fact_id for hit in lightweight_combined.semantic] == [str(fact_id)]
+    assert lightweight_combined.semantic[0].evidence_id is None
+    assert negative == []
+    assert [hit.fact_id for hit in frozen_before] == [str(fact_id)]
+    assert frozen_after == frozen_before
+    assert [hit.fact_id for hit in combined_frozen.semantic] == [str(fact_id)]
+    assert await source.search(group_id=group, query="payment", limit=5) == []
+    assert (
+        await outage_source.search(
+            group_id=group,
+            query="payment",
+            limit=5,
+            snapshot_id=snapshot.id,
+        )
+        == []
+    )
+    assert [
+        hit.fact_id
+        for hit in await neutral_source.search(
+            group_id=group,
+            query="payment",
+            limit=5,
+            snapshot_id=snapshot.id,
+        )
+    ] == [str(fact_id)]
+
+
 async def test_fact_candidate_source_respects_as_of(
     sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -400,11 +632,158 @@ async def test_historical_retrieval_requires_support_recorded_by_as_of(
     )
 
     source = SqlAlchemyFactCandidateSource(sessionmaker)
-    assert await source.search(group_id=group, query="eks", limit=10, as_of=before_support) == []
+    assert (
+        await source.search(
+            group_id=group,
+            query="eks",
+            limit=10,
+            as_of=before_support,
+            known_as_of=before_support,
+        )
+        == []
+    )
     snapshot = await _snapshot(sessionmaker, group, as_of=before_support)
     async with SqlAlchemyUnitOfWork(sessionmaker) as uow:
         await uow.use_tenant(group)
         assert await uow.snapshots.fact_ids(group_id=group, snapshot_id=snapshot.id) == set()
+
+
+async def test_fact_candidate_source_separates_valid_and_transaction_time(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    group = f"p:r-{uuid7().hex[:12]}"
+    version, subject = await _setup(sessionmaker, group)
+    source_id, artifact_id = await _source_artifact(sessionmaker, group, version)
+    fact_id = await _fact(
+        sessionmaker,
+        group,
+        subject,
+        "retroactive-cluster",
+        valid_from=utc_now() - timedelta(days=1),
+    )
+    valid_as_of = utc_now()
+    before_recording = utc_now()
+    await _assertion(
+        sessionmaker,
+        group,
+        fact_id,
+        source_id=source_id,
+        artifact_id=artifact_id,
+        version_id=version,
+    )
+    after_recording = utc_now()
+
+    source = SqlAlchemyFactCandidateSource(sessionmaker)
+    assert (
+        await source.search(
+            group_id=group,
+            query="retroactive-cluster",
+            limit=10,
+            as_of=valid_as_of,
+            known_as_of=before_recording,
+        )
+        == []
+    )
+    assert any(
+        hit.object_name == "retroactive-cluster"
+        for hit in await source.search(
+            group_id=group,
+            query="retroactive-cluster",
+            limit=10,
+            as_of=valid_as_of,
+            known_as_of=after_recording,
+        )
+    )
+
+
+async def test_fact_candidate_source_uses_fact_revision_at_transaction_time(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    group = f"p:r-{uuid7().hex[:12]}"
+    version, subject = await _setup(sessionmaker, group)
+    source_id, artifact_id = await _source_artifact(sessionmaker, group, version)
+    fact_id = await _fact(
+        sessionmaker,
+        group,
+        subject,
+        "revision-cluster",
+        valid_from=utc_now() - timedelta(days=1),
+    )
+    await _assertion(
+        sessionmaker,
+        group,
+        fact_id,
+        source_id=source_id,
+        artifact_id=artifact_id,
+        version_id=version,
+    )
+    valid_as_of = utc_now()
+    before_aggregate_change = utc_now()
+    async with _tenant(sessionmaker, group) as session:
+        await SqlAlchemyFactRepository(session).set_aggregates(
+            group_id=group,
+            fact_id=str(fact_id),
+            authority=0.1,
+            confidence=0.2,
+        )
+    after_aggregate_change = utc_now()
+    before_retraction = utc_now()
+    async with _tenant(sessionmaker, group) as session:
+        await SqlAlchemyFactRepository(session).set_lifecycle(
+            group_id=group,
+            fact_id=str(fact_id),
+            state=FactLifecycle.RETRACTED,
+        )
+    after_retraction = utc_now()
+
+    source = SqlAlchemyFactCandidateSource(sessionmaker)
+    original = await source.search(
+        group_id=group,
+        query="revision-cluster",
+        limit=10,
+        as_of=valid_as_of,
+        known_as_of=before_aggregate_change,
+        filters=RetrievalFilters(min_authority=0.5),
+    )
+    changed = await source.search(
+        group_id=group,
+        query="revision-cluster",
+        limit=10,
+        as_of=valid_as_of,
+        known_as_of=after_aggregate_change,
+    )
+    before_withdrawal = await source.search(
+        group_id=group,
+        query="revision-cluster",
+        limit=10,
+        as_of=valid_as_of,
+        known_as_of=before_retraction,
+    )
+    retracted = await source.search(
+        group_id=group,
+        query="revision-cluster",
+        limit=10,
+        as_of=valid_as_of,
+        known_as_of=after_retraction,
+    )
+
+    assert original[0].authority == 1.0
+    assert original[0].confidence == 0.9
+    assert changed[0].authority == 0.1
+    assert changed[0].confidence == 0.2
+    assert before_withdrawal[0].lifecycle_state == FactLifecycle.ACTIVE.value
+    assert retracted[0].lifecycle_state == FactLifecycle.RETRACTED.value
+    assert (
+        await source.search(
+            group_id=group,
+            query="revision-cluster",
+            limit=10,
+            as_of=valid_as_of,
+            known_as_of=after_aggregate_change,
+            filters=RetrievalFilters(min_authority=0.5),
+        )
+        == []
+    )
 
 
 async def test_fact_citation_does_not_follow_cross_tenant_evidence(
@@ -632,6 +1011,7 @@ async def test_historical_snapshot_retains_withdrawn_supporting_evidence(
         query="eks",
         limit=10,
         as_of=as_of,
+        known_as_of=as_of,
         filters=RetrievalFilters(repository="history"),
     )
     assert historical_live[0].evidence_excerpt == body
@@ -757,6 +1137,7 @@ async def test_fact_citation_respects_source_filters(
     )
 
     source = SqlAlchemyFactCandidateSource(sessionmaker)
+    lightweight_source = SqlAlchemyFactCandidateSource(sessionmaker, include_provenance=False)
     unfiltered = await source.search(group_id=group, query="eks", limit=10)
     filtered = await source.search(
         group_id=group,
@@ -764,10 +1145,29 @@ async def test_fact_citation_respects_source_filters(
         limit=10,
         filters=RetrievalFilters(repository="allowed", code_path="allowed.md"),
     )
+    lightweight = await lightweight_source.search(
+        group_id=group,
+        query="eks",
+        limit=10,
+        filters=RetrievalFilters(repository="allowed", code_path="allowed.md"),
+    )
+    rehydrated = await source.hydrate(
+        group_id=group,
+        matches=[(lightweight[0].fact_id, lightweight[0].score)],
+        limit=1,
+        filters=RetrievalFilters(repository="allowed", code_path="allowed.md"),
+    )
 
     assert unfiltered[0].evidence_excerpt == denied_body
     assert filtered[0].evidence_excerpt == allowed_body
     assert filtered[0].evidence_chunk_id == str(allowed_chunk)
+    assert lightweight[0].fact_id == filtered[0].fact_id
+    assert lightweight[0].text == filtered[0].text
+    assert lightweight[0].score == filtered[0].score
+    assert lightweight[0].supporting_source_ids == ()
+    assert lightweight[0].evidence_id is None
+    assert rehydrated[0].evidence_excerpt == allowed_body
+    assert rehydrated[0].evidence_chunk_id == str(allowed_chunk)
 
     uncited_fact = await _fact(sessionmaker, group, subject, "fargate")
     await _assertion(
@@ -785,6 +1185,88 @@ async def test_fact_citation_respects_source_filters(
         filters=RetrievalFilters(repository="allowed"),
     )
     assert len(uncited) == 1 and uncited[0].evidence_excerpt is None
+
+
+async def test_passage_search_selects_the_version_visible_at_the_boundary(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    group = f"p:versions-{uuid7().hex[:12]}"
+    old_version, _ = await _setup(sessionmaker, group)
+    await _chunk(
+        sessionmaker,
+        group,
+        old_version,
+        0,
+        "legacy deployment uses willow cluster",
+    )
+    boundary = utc_now()
+    async with _tenant(sessionmaker, group) as session:
+        artifact_id = await session.scalar(
+            text("SELECT artifact_id FROM artifact_versions WHERE id = :version_id"),
+            {"version_id": old_version},
+        )
+        assert artifact_id is not None
+        new_version = ArtifactVersionRow(
+            artifact_id=artifact_id,
+            version=2,
+            content_hash="new-hash",
+            s3_key="new-key",
+            reference_time=utc_now(),
+            observed_at=utc_now(),
+            predecessor_version_id=old_version,
+        )
+        session.add(new_version)
+        await session.flush()
+        await session.execute(
+            text(
+                "UPDATE artifacts SET current_version = 2, content_hash = 'new-hash', "
+                "s3_key = 'new-key' WHERE id = :artifact_id"
+            ),
+            {"artifact_id": artifact_id},
+        )
+        new_version_id = new_version.id
+    await _chunk(
+        sessionmaker,
+        group,
+        new_version_id,
+        0,
+        "current deployment uses cedar cluster",
+    )
+    async with _tenant(sessionmaker, group) as session:
+        versions = (
+            (
+                await session.execute(
+                    text(
+                        "SELECT version FROM artifact_versions WHERE artifact_id = :artifact_id "
+                        "ORDER BY version"
+                    ),
+                    {"artifact_id": artifact_id},
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert versions == [1, 2]
+
+    passages = SqlAlchemyPassageIndex(sessionmaker)
+    assert await passages.search(group_id=group, query="willow", limit=10) == []
+    assert (
+        await passages.search(
+            group_id=group,
+            query="cedar",
+            limit=10,
+            created_before=boundary,
+        )
+        == []
+    )
+    historical = await passages.search(
+        group_id=group,
+        query="willow",
+        limit=10,
+        created_before=boundary,
+    )
+    assert len(historical) == 1
+    assert historical[0].artifact_version_id == str(old_version)
 
 
 async def test_erasure_removes_source_only_snapshot_and_denies_trusted_role(
