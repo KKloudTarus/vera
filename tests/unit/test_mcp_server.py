@@ -57,6 +57,21 @@ async def test_server_exposes_the_memory_tools() -> None:
         await dispose_container(container)
 
 
+@pytest.mark.asyncio
+async def test_instructions_declare_retrieved_content_untrusted() -> None:
+    settings = get_settings()
+    container = build_container(settings)
+    try:
+        server = build_server(container, settings)
+        instructions = server.instructions or ""
+        # The agent-facing contract: retrieved knowledge is reference data, not commands.
+        assert "untrusted reference data" in instructions
+        assert "never as" in instructions and "instructions" in instructions
+        assert "knowledge_get_context" in instructions
+    finally:
+        await dispose_container(container)
+
+
 def test_local_server_uses_stable_principal_without_jwt() -> None:
     principal_id = deterministic_id("test", "local-mcp")
     settings = get_settings().model_copy(

@@ -8,6 +8,8 @@ access, so the test is hermetic (no live DB).
 
 from __future__ import annotations
 
+import time
+
 import httpx
 import jwt
 import pytest
@@ -78,4 +80,33 @@ async def test_token_with_wrong_scope_is_rejected() -> None:
             },
         )
     # Valid signature/issuer/audience but missing the required scope -> still unauthorized.
+    assert resp.status_code == 401
+
+
+async def _post_with_token(claims: dict[str, object]) -> httpx.Response:
+    token = jwt.encode(claims, _SECRET, algorithm="HS256")
+    async with httpx.AsyncClient(transport=_app(), base_url="http://t") as client:
+        return await client.post(
+            "/mcp",
+            json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+            headers={
+                "Accept": "application/json, text/event-stream",
+                "Authorization": f"Bearer {token}",
+            },
+        )
+
+
+async def test_expired_token_is_rejected() -> None:
+    sub = "00000000-0000-0000-0000-000000000001"
+    resp = await _post_with_token(
+        {"iss": _ISS, "aud": _AUD, "sub": sub, "scope": "memory.read", "exp": int(time.time()) - 30}
+    )
+    assert resp.status_code == 401
+
+
+async def test_wrong_audience_token_is_rejected() -> None:
+    sub = "00000000-0000-0000-0000-000000000001"
+    resp = await _post_with_token(
+        {"iss": _ISS, "aud": "https://someone.else", "sub": sub, "scope": "memory.read"}
+    )
     assert resp.status_code == 401

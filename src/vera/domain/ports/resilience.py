@@ -14,3 +14,17 @@ class RateLimiter(Protocol):
     async def acquire(self, *, tokens: int = 0) -> None:
         """Wait until one request and ``tokens`` tokens are available, then consume them."""
         ...
+
+
+class QuotaLimiter(Protocol):
+    """A fixed-window admission counter, keyed by an opaque string.
+
+    Unlike ``RateLimiter``, this never waits: it records the hit and reports whether the
+    caller stayed within ``limit`` for the current ``window_seconds``, so an abusive
+    principal is rejected fast rather than queued. A non-positive ``limit`` disables the
+    bucket (always admitted).
+    """
+
+    async def allow(self, key: str, *, limit: int, window_seconds: int) -> bool:
+        """Record a hit on ``key`` and return whether it stayed within ``limit``."""
+        ...
