@@ -185,7 +185,7 @@ services:
       VERA_EVAL_API_URL: http://api:8000
       VERA_EVAL_MCP_URL: http://mcp:8080/mcp
       VERA_EVAL_MCP_HOST_HEADER: localhost:8080
-      VERA_EVAL_MODEL_TIMEOUT_S: "120"
+      VERA_EVAL_MODEL_TIMEOUT_S: "300"
       VERA_EVAL_DEPENDENCY_CONTROL_URL: http://neo4j-proxy:8474
       VERA_EVAL_SCOPE_ID: ${VERA_EVAL_SCOPE_ID:?set a run-specific evaluation scope ID}
       VERA_EVAL_STATE_ROOT: /state
