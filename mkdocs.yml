@@ -69,6 +69,9 @@ nav:
   - MCP (AI agents): mcp.md
   - Integrations:
       - Agent integration GUIDE: integrations/GUIDE.md
+      - "Adapter: Claude Code": integrations/adapters/claude-code.md
+      - "Adapter: Cursor": integrations/adapters/cursor.md
+      - "Adapter: OpenCode": integrations/adapters/opencode.md
   - Deployment: deployment.md
   - Architecture & algorithms: architecture.md
   - Disaster recovery: dr-runbook.md
