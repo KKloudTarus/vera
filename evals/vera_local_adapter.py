@@ -2265,6 +2265,40 @@ def _settings_fingerprint(settings: Settings) -> str:
     return hashlib.sha256(encoded.encode()).hexdigest()
 
 
+# Hosts a disposable evaluation stack is allowed to run against. The scope id is only a logical
+# label, so it cannot by itself prove the configured Postgres/Neo4j/S3/Valkey endpoints are not
+# production; this allowlist guards the destructive cleanup against a matching-scope run pointed
+# at a real (even if momentarily empty) stack. Override with VERA_EVAL_ALLOWED_HOSTS.
+_DEFAULT_DISPOSABLE_HOSTS = frozenset(
+    {"localhost", "127.0.0.1", "::1", "postgres", "neo4j", "minio", "valkey", "falkordb"}
+)
+
+
+def _endpoint_hosts(settings: Settings) -> list[tuple[str, str | None]]:
+    hosts: list[tuple[str, str | None]] = [("postgres", urlsplit(str(settings.db.dsn)).hostname)]
+    if settings.neo4j.uri:
+        hosts.append(("neo4j", urlsplit(settings.neo4j.uri).hostname))
+    if settings.objectstore.endpoint_url:
+        hosts.append(("objectstore", urlsplit(settings.objectstore.endpoint_url).hostname))
+    valkey_url = getattr(settings.resilience, "valkey_url", None)
+    if valkey_url:
+        hosts.append(("valkey", urlsplit(valkey_url).hostname))
+    return hosts
+
+
+def _assert_disposable_endpoints(settings: Settings) -> None:
+    configured = os.environ.get("VERA_EVAL_ALLOWED_HOSTS", "")
+    allowed = {h.strip().lower() for h in configured.split(",") if h.strip()} or set(
+        _DEFAULT_DISPOSABLE_HOSTS
+    )
+    for name, host in _endpoint_hosts(settings):
+        if host is not None and host.lower() not in allowed:
+            raise AdapterBlocked(
+                f"refusing destructive evaluation: {name} endpoint host {host!r} is not in the "
+                "disposable-host allowlist; set VERA_EVAL_ALLOWED_HOSTS to permit it"
+            )
+
+
 async def _preflight(
     container: Container, request: dict[str, Any], state: dict[str, Any]
 ) -> dict[str, Any]:
@@ -2293,6 +2327,7 @@ async def _preflight(
             },
             "message": "evaluation scope does not exactly match the configured ephemeral stack",
         }
+    _assert_disposable_endpoints(container.settings)
     if state.get("preflight") is not None or state.get("cases"):
         raise AdapterBlocked("evaluation state is not pristine before preflight")
     manifest_errors, actual_models = _runtime_manifest_errors(container, request)
@@ -2363,6 +2398,7 @@ async def _cleanup(
     )
     if not safe:
         raise AdapterBlocked("full-store cleanup lacks a matching disposable-stack preflight")
+    _assert_disposable_endpoints(container.settings)
     if os.environ.get("VERA_EVAL_DEPENDENCY_CONTROL_URL"):
         await _configure_graph_dependency("available")
     inventory = await _database_inventory(container)

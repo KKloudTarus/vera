@@ -94,6 +94,14 @@ async def _tenant(
         yield session
 
 
+async def _db_now(sessionmaker: async_sessionmaker[AsyncSession]) -> datetime:
+    # Transaction-time boundaries must come from the DB clock, not app utc_now(): fact revisions
+    # are stamped server-side, so an app-captured boundary can fall on the wrong side of a
+    # revision range under any app-vs-DB clock skew (a flaky-test source).
+    async with sessionmaker() as session:
+        return await session.scalar(text("SELECT clock_timestamp()"))  # type: ignore[return-value]
+
+
 async def _snapshot(
     sessionmaker: async_sessionmaker[AsyncSession],
     group: str,
@@ -718,7 +726,7 @@ async def test_fact_candidate_source_uses_fact_revision_at_transaction_time(
         version_id=version,
     )
     valid_as_of = utc_now()
-    before_aggregate_change = utc_now()
+    before_aggregate_change = await _db_now(sessionmaker)
     async with _tenant(sessionmaker, group) as session:
         await SqlAlchemyFactRepository(session).set_aggregates(
             group_id=group,
@@ -726,15 +734,15 @@ async def test_fact_candidate_source_uses_fact_revision_at_transaction_time(
             authority=0.1,
             confidence=0.2,
         )
-    after_aggregate_change = utc_now()
-    before_retraction = utc_now()
+    after_aggregate_change = await _db_now(sessionmaker)
+    before_retraction = await _db_now(sessionmaker)
     async with _tenant(sessionmaker, group) as session:
         await SqlAlchemyFactRepository(session).set_lifecycle(
             group_id=group,
             fact_id=str(fact_id),
             state=FactLifecycle.RETRACTED,
         )
-    after_retraction = utc_now()
+    after_retraction = await _db_now(sessionmaker)
 
     source = SqlAlchemyFactCandidateSource(sessionmaker)
     original = await source.search(
@@ -991,7 +999,7 @@ async def test_historical_snapshot_retains_withdrawn_supporting_evidence(
         body=body,
         quote=body,
     )
-    as_of = utc_now()
+    as_of = await _db_now(sessionmaker)  # DB clock: after evidence commit, before withdrawal
     active_snapshot = await _snapshot(sessionmaker, group)
     active_hits = await SqlAlchemyFactCandidateSource(sessionmaker).search(
         group_id=group,
