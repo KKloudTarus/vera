@@ -25,6 +25,7 @@ from vera.entrypoints.knowledge.service import ScopeError as KnowledgeScopeError
 from vera.entrypoints.mcp import errors, policy
 from vera.entrypoints.mcp.policy import ToolClass
 from vera.entrypoints.mcp.service import ScopeError as McpScopeError
+from vera.shared.errors import VeraError
 
 _Tool = TypeVar("_Tool", bound=Callable[..., Awaitable[Any]])
 
@@ -75,6 +76,10 @@ class Guard:
                     raise
                 except (KnowledgeScopeError, McpScopeError) as exc:
                     raise _map_scope_error(exc) from exc
+                except VeraError as exc:
+                    # An infrastructure failure (DB, graph, object store). Its message can
+                    # carry internal detail, so give the client a stable, redacted code.
+                    raise errors.internal() from exc
 
             return wrapper  # type: ignore[return-value]  # wraps preserves fn's signature
 

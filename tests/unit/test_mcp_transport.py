@@ -24,6 +24,7 @@ from vera.adapters.resilience.quota import InProcessQuota
 from vera.config.settings import McpSettings, Settings, get_settings
 from vera.entrypoints.mcp.guard import Guard
 from vera.entrypoints.mcp.policy import ToolClass
+from vera.shared.errors import InfrastructureError
 
 pytestmark = pytest.mark.asyncio
 
@@ -36,6 +37,11 @@ def _server(settings: Settings) -> MCPServer:
     async def probe(query: str, limit: int = 5) -> dict[str, Any]:
         # Echoes its input so a test can prove the transport carries a string as data.
         return {"echo": query, "limit": limit}
+
+    @guard.tool(ToolClass.READ)
+    async def boom(query: str) -> dict[str, Any]:
+        # Stands in for an infrastructure failure surfacing from the service layer.
+        raise InfrastructureError("postgres connection refused at 10.0.0.5:5432")
 
     return server
 
@@ -85,6 +91,16 @@ async def test_spent_quota_is_a_structured_error() -> None:
             await session.call_tool("probe", {"query": "two"})
     assert isinstance(exc.value.data, dict)
     assert exc.value.data["code"] == "quota_exceeded"
+
+
+async def test_infrastructure_failure_is_a_redacted_internal_error() -> None:
+    async with _client(get_settings()) as session:
+        with pytest.raises(MCPError) as exc:
+            await session.call_tool("boom", {"query": "hi"})
+    assert isinstance(exc.value.data, dict)
+    assert exc.value.data["code"] == "internal_error"
+    # The connection string in the raw exception never reaches the client.
+    assert "postgres" not in exc.value.message and "10.0.0.5" not in exc.value.message
 
 
 async def test_hostile_content_is_carried_as_inert_data() -> None:
