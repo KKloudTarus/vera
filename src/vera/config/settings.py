@@ -84,7 +84,24 @@ class McpSettings(BaseModel):
     auth_audience: str = "https://mcp.vera.local"
     jwt_secret: SecretStr | None = None
     jwt_algorithm: str = "HS256"
+    # Server-wide baseline scope, enforced by the SDK before any tool runs. Reads need
+    # only this; writes additionally require their per-class scope below.
     required_scopes: list[str] = Field(default_factory=lambda: ["memory:read"])
+    # Tool-level authorization classes. A read-only credential holds only ``scope_read``
+    # and is refused at the propose, feedback, and snapshot tools.
+    scope_read: str = "memory:read"
+    scope_propose: str = "memory:propose"
+    scope_feedback: str = "memory:feedback"
+    scope_snapshot: str = "memory:snapshot"
+    # Per-principal abuse controls (fixed windows). 0 disables a bucket. Persisted
+    # context packs and snapshots are budgeted apart from ordinary reads because each
+    # one writes durable state.
+    quota_enabled: bool = True
+    quota_reads_per_minute: int = 120
+    quota_context_per_minute: int = 20
+    quota_proposals_per_minute: int = 30
+    quota_feedback_per_minute: int = 60
+    quota_snapshots_per_hour: int = 10
 
 
 class ObservabilitySettings(BaseModel):
