@@ -7,6 +7,7 @@ injects the pieces it needs. Construction is explicit, with no DI container.
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
@@ -27,7 +28,7 @@ from vera.adapters.persistence.repositories.usage import SqlAlchemyUsageSink
 from vera.adapters.queue.postgres_queue import PostgresJobQueue
 from vera.application.identity import ScopeResolutionService
 from vera.application.queries.search_memory import RerankWeights
-from vera.config.settings import Settings, voyage_api_key
+from vera.config.settings import Settings, active_embedding, voyage_api_key
 from vera.domain.ports.connectors import SyncStateStore
 from vera.domain.ports.curation import (
     ClaimExtractor,
@@ -66,6 +67,9 @@ class Container:
     entity_judge: EntityResolutionJudge | None
     embedder: Embedder | None
     reranker: Reranker | None = None
+    fact_candidate_semaphore: asyncio.Semaphore = field(
+        default_factory=lambda: asyncio.Semaphore(8)
+    )
     # Active rerank weights: the configured defaults until refresh_rerank_weights loads a
     # calibrated set from the database at startup.
     rerank_weights: RerankWeights = field(default_factory=RerankWeights)
@@ -108,10 +112,18 @@ def build_container(settings: Settings) -> Container:
     memory: MemoryEngine = build_memory_engine(settings, usage_sink)
     fact_projection = maybe_fact_projection(memory)
     embedder: Embedder | None = None
-    if settings.memory.semantic_dedup_enabled and settings.memory.provider == "graphiti":
+    if settings.memory.vector_search_enabled:
+        _, dimension = active_embedding(settings)
+        if dimension not in {256, 512, 1024, 1536}:
+            raise ConfigError(
+                "vector search requires an indexed embedding dimension: 256, 512, 1024, or 1536"
+            )
+    if settings.memory.vector_search_enabled or (
+        settings.memory.semantic_dedup_enabled and settings.memory.provider == "graphiti"
+    ):
         from vera.adapters.graph import build_embedder
 
-        embedder = build_embedder(settings)  # type: ignore[assignment]
+        embedder = build_embedder(settings, usage_sink)  # type: ignore[assignment]
     object_store: ObjectStore = S3ObjectStore(settings.objectstore)
     # The retrieval read model and scope resolution are cross-scope reads: the trusted role.
     retrieval_read: RetrievalReadModel = SqlAlchemyRetrievalReadModel(reads)
@@ -182,7 +194,11 @@ def build_container(settings: Settings) -> Container:
             from vera.adapters.embedding.voyage import VoyageClient, VoyageReranker
 
             reranker = VoyageReranker(
-                VoyageClient(api_key=vkey, base_url=settings.voyage.base_url),
+                VoyageClient(
+                    api_key=vkey,
+                    base_url=settings.voyage.base_url,
+                    usage_sink=usage_sink,
+                ),
                 model=settings.voyage.rerank_model,
             )
         elif (
@@ -193,6 +209,11 @@ def build_container(settings: Settings) -> Container:
 
             # openai_api_key is set here, so the shared metered client was built above.
             reranker = LlmReranker(client=curation_client, model=settings.memory.small_llm_model)
+        if reranker is None:
+            raise ConfigError(
+                f"cross-encoder provider {settings.rerank.cross_encoder_provider!r} "
+                "is enabled but its credential is unavailable"
+            )
 
     return Container(
         settings=settings,

@@ -9,98 +9,56 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
-env:
-  # A DSN is required for settings to load; the check job never opens a connection.
-  VERA_DB__DSN: postgresql+asyncpg://vera:vera@localhost:5432/vera
-
 jobs:
   check:
     name: Lint, types, arch, unit
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-          cache: pip
-      - run: pip install -e ".[all]"
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Build test image
+        run: docker compose -f tests/docker-compose.yml build test
       - name: Ruff (lint)
-        run: ruff check src tests
+        run: docker compose -f tests/docker-compose.yml run --rm --no-deps test ruff check src tests evals
       - name: Ruff (format)
-        run: ruff format --check src tests
+        run: docker compose -f tests/docker-compose.yml run --rm --no-deps test ruff format --check src tests evals
       - name: Pyright
-        run: pyright
+        run: docker compose -f tests/docker-compose.yml run --rm --no-deps test pyright
       - name: Import contracts
-        run: lint-imports
+        run: docker compose -f tests/docker-compose.yml run --rm --no-deps test lint-imports
       - name: Unit tests
-        run: pytest -m "not integration and not llm"
+        run: docker compose -f tests/docker-compose.yml run --rm --no-deps test pytest -m "not integration and not llm"
+      - name: Evaluator contracts
+        run: >-
+          docker compose -f tests/docker-compose.yml run --rm --no-deps test
+          python -m pytest evals/tests tests/unit/test_eval_contract.py -q
+      - name: Evaluator validation
+        run: docker compose -f tests/docker-compose.yml run --rm --no-deps test python -m evals.validate
+      - name: Dependency audit
+        run: >-
+          docker compose -f tests/docker-compose.yml run --rm --no-deps test
+          pip-audit --skip-editable
 
   integration:
     name: Integration tests
-    runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: pgvector/pgvector:pg18
-        env:
-          POSTGRES_USER: vera
-          POSTGRES_PASSWORD: vera
-          POSTGRES_DB: vera
-        ports: ["5432:5432"]
-        options: >-
-          --health-cmd "pg_isready -U vera"
-          --health-interval 5s --health-timeout 3s --health-retries 20
-      neo4j:
-        image: neo4j:5.26
-        env:
-          NEO4J_AUTH: neo4j/vera-local-pass
-        ports: ["7687:7687", "7474:7474"]
-        options: >-
-          --health-cmd "wget -qO- http://localhost:7474 || exit 1"
-          --health-interval 10s --health-timeout 5s --health-retries 20
-      valkey:
-        image: valkey/valkey:8
-        ports: ["6379:6379"]
-        options: >-
-          --health-cmd "valkey-cli ping"
-          --health-interval 5s --health-timeout 3s --health-retries 20
-      falkordb:
-        image: falkordb/falkordb:latest
-        ports: ["6380:6379"]
-    env:
-      VERA_NEO4J__URI: bolt://localhost:7687
-      VERA_NEO4J__USER: neo4j
-      VERA_NEO4J__PASSWORD: vera-local-pass
-      VERA_RESILIENCE__VALKEY_URL: redis://localhost:6379/0
-      VERA_FALKOR__PORT: "6380"
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-          cache: pip
-      - run: pip install -e ".[all]"
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Build test image
+        run: docker compose -f tests/docker-compose.yml build test
+      - name: Start integration services
+        run: >-
+          docker compose -f tests/docker-compose.yml up -d --wait
+          postgres neo4j valkey falkordb minio
       - name: Apply migrations
-        run: alembic upgrade head
+        run: docker compose -f tests/docker-compose.yml run --rm test alembic upgrade head
       - name: Integration tests
-        run: pytest -m "integration and not llm" -rA
+        run: >-
+          docker compose -f tests/docker-compose.yml run --rm test
+          pytest -m "integration and not llm" -rA
       - name: Issue 6 E2E acceptance
-        run: pytest -m "issue6_acceptance and not llm" -rA
-
-  security:
-    name: Dependency audit
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-          cache: pip
-      # Patch the packaging tools first: advisories land in pip/setuptools/wheel that are
-      # not part of VERA's shipped surface (the runtime image upgrades these too).
-      - run: python -m pip install --upgrade pip setuptools wheel
-      - run: pip install -e ".[all]"
-      # Audit the installed dependencies. --skip-editable drops the local `vera` package,
-      # which is not on PyPI and cannot be audited. Add `--ignore-vuln <ID>` with a written
-      # justification only for an advisory with no available fix.
-      - name: pip-audit
-        run: pip-audit --skip-editable
+        run: >-
+          docker compose -f tests/docker-compose.yml run --rm test
+          pytest -m "issue6_acceptance and not llm" -rA
+      - name: Stop integration services
+        if: always()
+        run: docker compose -f tests/docker-compose.yml down --volumes

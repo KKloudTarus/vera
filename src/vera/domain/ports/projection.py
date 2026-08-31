@@ -16,8 +16,8 @@ from typing import Protocol
 @dataclass(frozen=True, slots=True)
 class ProjectedFact:
     """One active fact as it should appear in the graph: a temporal edge between the subject
-    and object entities, carrying its content key, validity, aggregates, and the ids of the
-    source episodes that currently support it.
+    and object entities, carrying its content key, validity, aggregates, and the durable
+    PostgreSQL published-episode ids that currently support it.
     """
 
     group_id: str

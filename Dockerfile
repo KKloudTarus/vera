@@ -4,30 +4,31 @@
 # default; the worker and MCP server override CMD. A builder stage compiles the venv so
 # no build tools reach the runtime image, which runs as an unprivileged user.
 #
-# The base is pinned to a Debian codename (bookworm) rather than the floating `slim` tag,
-# so a rebuild is reproducible. Bump it deliberately to pick up a newer Python or distro.
+# Image and dependency digests are deliberate release inputs. Bump them explicitly.
 
-FROM python:3.11-slim-bookworm AS builder
+FROM python:3.11-slim-bookworm@sha256:0bee7276f83efd4a1ee05bbbf4281d95ed28e079220a9457f25a93e3f1e3c31b AS builder
 
-ENV PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1
+ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_DEFAULT_TIMEOUT=30 \
+    PIP_RETRIES=5 \
+    PIP_CONSTRAINT=/app/constraints.lock
 
 WORKDIR /app
 RUN python -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
-# Patch the venv's own pip/setuptools/wheel before installing, so no vulnerable packaging
-# tool is baked into the image (e.g. PYSEC-2026-3721 in pip < 26.2).
-RUN pip install --upgrade pip setuptools wheel
-
 # Runtime extras only (no dev toolchain), so the image stays lean. LICENSE and NOTICE are
 # copied because the project metadata references the license file.
-COPY pyproject.toml README.md LICENSE NOTICE ./
+COPY pyproject.toml constraints.lock README.md LICENSE NOTICE ./
+RUN --mount=type=cache,id=vera-pip,target=/root/.cache/pip \
+    pip install pip==26.2 setuptools==84.0.0 wheel==0.48.0
+
 COPY src ./src
-RUN pip install ".[memory,objectstore,observability,resilience,security]"
+RUN --mount=type=cache,id=vera-pip,target=/root/.cache/pip \
+    pip install --constraint constraints.lock ".[memory,objectstore,observability,resilience,security]"
 
 
-FROM python:3.11-slim-bookworm AS runtime
+FROM python:3.11-slim-bookworm@sha256:0bee7276f83efd4a1ee05bbbf4281d95ed28e079220a9457f25a93e3f1e3c31b AS runtime
 
 LABEL org.opencontainers.image.title="vera" \
       org.opencontainers.image.description="Verified Episodic Recall for Agents" \
@@ -36,12 +37,6 @@ LABEL org.opencontainers.image.title="vera" \
 ENV PATH="/opt/venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1
-
-# Apply outstanding OS security updates, then drop the apt lists to keep the image small.
-# No extra packages are installed; the app needs only the Python runtime.
-RUN apt-get update \
-    && apt-get upgrade -y --no-install-recommends \
-    && rm -rf /var/lib/apt/lists/*
 
 # Unprivileged runtime user.
 RUN groupadd --system vera && useradd --system --gid vera --home-dir /app vera

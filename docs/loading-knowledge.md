@@ -38,11 +38,16 @@ embedding and reranker backends are swappable here.
   `voyage-4-lite`, `voyage-code-4`), and set `VERA_VOYAGE__EMBEDDING_DIM` to match
   (256/512/1024/2048). A group is pinned to one embedding dimension; changing it means
   reprocessing that group (`python -m vera.entrypoints.reprocess <group>`).
+- **Dense retrieval**: enable with `VERA_MEMORY__VECTOR_SEARCH_ENABLED=true`. Existing groups
+  need both `python -m vera.entrypoints.backfill_chunk_embeddings <group>` and
+  `python -m vera.entrypoints.backfill_fact_embeddings <group>` before dense retrieval is
+  complete.
 - **Reranking** (stage 3): off by default. Enable with
   `VERA_RERANK__CROSS_ENCODER_ENABLED=true` and choose
   `VERA_RERANK__CROSS_ENCODER_PROVIDER` = `llm` (an LLM scores relevance) or `voyage`
   (a purpose-built reranker, `VERA_VOYAGE__RERANK_MODEL` e.g. `rerank-2.5`), which is
-  cheaper and faster than the LLM path.
+  cheaper and faster than the LLM path. `VERA_RERANK__CROSS_ENCODER_MIN_SCORE` controls the
+  fail-closed relevance threshold for semantic fact candidates.
 
 You can mix providers, for example OpenAI for extraction and Voyage for embeddings and
 reranking. To compare quality before switching, use `python -m vera.entrypoints.dedup_eval`

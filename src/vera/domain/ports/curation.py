@@ -11,7 +11,12 @@ from datetime import datetime
 from typing import Protocol
 from uuid import UUID
 
-from vera.domain.curation.models import ArtifactHead, ArtifactRef, ClaimRecord
+from vera.domain.curation.models import (
+    ArtifactHead,
+    ArtifactRef,
+    ArtifactVersionRecord,
+    ClaimRecord,
+)
 from vera.domain.knowledge.models import ClaimType, VerificationStatus
 from vera.shared.types import JsonDict, empty_json
 
@@ -89,8 +94,28 @@ class KnowledgeSourceRepository(Protocol):
         """The tier-4 agent source for a workspace, creating it on first use."""
         ...
 
+    async def claim_sync_lease(
+        self, *, source_id: UUID, owner_token: UUID, lease_duration_s: float
+    ) -> bool:
+        """Claim an expired source lease. False means another worker owns it."""
+        ...
+
+    async def renew_sync_lease(
+        self, *, source_id: UUID, owner_token: UUID, lease_duration_s: float
+    ) -> bool:
+        """Extend a live lease only while its ownership token still matches."""
+        ...
+
+    async def release_sync_lease(self, *, source_id: UUID, owner_token: UUID) -> bool:
+        """Release a lease only while its ownership token still matches."""
+        ...
+
 
 class ArtifactRepository(Protocol):
+    async def lock_version_allocation(self, *, source_id: UUID, external_id: str) -> None:
+        """Serialize version allocation for one source artifact until transaction end."""
+        ...
+
     async def create_with_version(
         self,
         *,
@@ -108,6 +133,21 @@ class ArtifactRepository(Protocol):
 
     async def get_head(self, *, source_id: UUID, external_id: str) -> ArtifactHead | None:
         """The current artifact for this external id, or None if never ingested."""
+        ...
+
+    async def get_version(self, version_id: UUID, *, group_id: str) -> ArtifactVersionRecord | None:
+        """Return a version previously extracted in the requested tenant group."""
+        ...
+
+    async def advance_watermark(
+        self,
+        *,
+        artifact_id: UUID,
+        source_revision: int | None,
+        source_updated_at: datetime | None,
+        source_version_id: str | None,
+    ) -> None:
+        """Record the newest source position without appending a semantic version."""
         ...
 
     async def add_version(
@@ -182,6 +222,7 @@ class PublishedEpisodeRepository(Protocol):
         reference_time: datetime,
         payload: JsonDict,
         dedup_uuid: UUID,
+        artifact_version_id: UUID | None = None,
         ontology_version_id: UUID | None = None,
         pipeline: JsonDict | None = None,
         confidence: float = 1.0,

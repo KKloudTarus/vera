@@ -17,6 +17,8 @@ from vera.observability.cost import UsageSink
 
 if TYPE_CHECKING:
     from graphiti_core import Graphiti
+    from graphiti_core.embedder.client import EmbedderClient
+    from graphiti_core.llm_client.client import LLMClient
 
 __all__ = [
     "NullMemoryEngine",
@@ -26,7 +28,7 @@ __all__ = [
 ]
 
 
-def _embedder(settings: Settings) -> object:
+def _embedder(settings: Settings, usage_sink: UsageSink | None = None) -> EmbedderClient:
     from vera.adapters.graph.offline import DeterministicEmbedder
 
     memory = settings.memory
@@ -38,7 +40,11 @@ def _embedder(settings: Settings) -> object:
         from vera.config.settings import voyage_api_key
 
         return GraphitiVoyageEmbedder(
-            VoyageClient(api_key=voyage_api_key(settings), base_url=settings.voyage.base_url),
+            VoyageClient(
+                api_key=voyage_api_key(settings),
+                base_url=settings.voyage.base_url,
+                usage_sink=usage_sink,
+            ),
             model=settings.voyage.embedding_model,
             dim=settings.voyage.embedding_dim,
         )
@@ -55,7 +61,7 @@ def _embedder(settings: Settings) -> object:
     )
 
 
-def _llm_client(settings: Settings, usage_sink: UsageSink | None) -> object:
+def _llm_client(settings: Settings, usage_sink: UsageSink | None) -> LLMClient:
     memory = settings.memory
     if not memory.openai_api_key:
         from vera.adapters.graph.offline import NoLLMClient
@@ -88,22 +94,24 @@ def build_graphiti_client(settings: Settings, usage_sink: UsageSink | None = Non
 
     password = settings.neo4j.password.get_secret_value() if settings.neo4j.password else None
     model_name, dim = active_embedding(settings)
-    real = _embedder(settings)
+    real = _embedder(settings, usage_sink)
     if settings.memory.embedder in ("openai", "voyage"):
         from vera.adapters.graph.resilient import ResilientEmbedder
         from vera.adapters.resilience.policy import build_resilience_policy
 
         real = ResilientEmbedder(
-            real,  # type: ignore[arg-type]
+            real,
             build_resilience_policy(
                 settings.resilience, name=f"{settings.memory.embedder}-embedder"
             ),
         )
     # Meter inside the cache so only real (cache-miss) provider calls are counted.
-    metered = MeteredEmbedder(
-        real,  # type: ignore[arg-type]
-        model=model_name,
-        sink=usage_sink,
+    # Voyage reports exact usage at its HTTP boundary. Other embedders expose only vectors,
+    # so retain estimated metering for those providers.
+    metered = (
+        real
+        if settings.memory.embedder == "voyage"
+        else MeteredEmbedder(real, model=model_name, sink=usage_sink)
     )
     namespace = f"{model_name}:{dim}"
     l2 = None
@@ -139,14 +147,21 @@ def build_graphiti_client(settings: Settings, usage_sink: UsageSink | None = Non
     )
 
 
-def build_embedder(settings: Settings) -> object:
+def build_embedder(settings: Settings, usage_sink: UsageSink | None = None) -> object:
     """A standalone cached embedder (same model as ingestion) for entity linking."""
     from vera.adapters.graph.caching import CachingEmbedder
     from vera.adapters.graph.embedder_port import GraphitiEmbedderAdapter
+    from vera.adapters.graph.metered import MeteredEmbedder
 
     model_name, dim = active_embedding(settings)
     namespace = f"{model_name}:{dim}"
-    cached = CachingEmbedder(_embedder(settings), namespace=namespace)  # type: ignore[arg-type]
+    real = _embedder(settings, usage_sink)
+    metered = (
+        real
+        if settings.memory.embedder == "voyage"
+        else MeteredEmbedder(real, model=model_name, sink=usage_sink)
+    )
+    cached = CachingEmbedder(metered, namespace=namespace)
     return GraphitiEmbedderAdapter(cached)
 
 

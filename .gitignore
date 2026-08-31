@@ -38,3 +38,11 @@ coverage.xml
 CLAUDE.md
 BUILD_CHECKLIST.md
 site/
+
+/.serena/
+/.opencode/
+/.cache/
+/evals/.cache/
+/evals/.state/
+/evals/runs/*
+!/evals/runs/.gitignore

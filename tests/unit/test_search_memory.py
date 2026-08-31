@@ -10,17 +10,25 @@ from vera.adapters.graph.null import NullMemoryEngine
 from vera.application.queries.search_memory import SearchMemory, SearchMemoryHandler
 from vera.domain.ports.memory_engine import GraphHit, GraphQuery
 from vera.domain.ports.retrieval import HitProvenance
+from vera.observability.cost import (
+    UsageContext,
+    current_usage_context,
+    reset_usage_context,
+    set_usage_context,
+)
 from vera.shared.types import GroupId
 
 
 class _FakeEngine:
     def __init__(self, hits: list[GraphHit]) -> None:
         self._hits = hits
+        self.usage_context: UsageContext | None = None
 
     async def ingest_episode(self, episode: object) -> object:  # pragma: no cover
         raise NotImplementedError
 
     async def search(self, query: GraphQuery) -> Sequence[GraphHit]:
+        self.usage_context = current_usage_context()
         return self._hits
 
     async def health(self) -> bool:
@@ -90,3 +98,20 @@ async def test_downvotes_lower_the_score() -> None:
 async def test_empty_search_returns_empty() -> None:
     handler = SearchMemoryHandler(NullMemoryEngine(), _FakeReadModel({}))
     assert await handler.handle(SearchMemory(text="x", group_ids=(GroupId("p:demo"),))) == []
+
+
+@pytest.mark.asyncio
+async def test_search_preserves_parent_usage_ref() -> None:
+    engine = _FakeEngine([])
+    handler = SearchMemoryHandler(engine, _FakeReadModel({}))
+    parent_context = UsageContext(request_kind="search", group_id="p:outer", ref="query-1")
+    token = set_usage_context(parent_context)
+    try:
+        await handler.handle(SearchMemory(text="x", group_ids=(GroupId("p:demo"),)))
+
+        assert engine.usage_context == UsageContext(
+            request_kind="search", group_id="p:demo", ref="query-1"
+        )
+        assert current_usage_context() == parent_context
+    finally:
+        reset_usage_context(token)

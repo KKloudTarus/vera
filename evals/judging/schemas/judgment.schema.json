@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vera.local/evals/judging/schemas/judgment.schema.json",
+  "title": "VERA independent judge result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "packet_id", "packet_sha256", "judge", "dimension_results", "critical_failures", "overall_score", "confidence", "overall_rationale", "strengths", "weaknesses", "recommended_improvement"],
+  "properties": {
+    "schema_version": {"type": "string", "const": "1.0"},
+    "packet_id": {"type": "string", "minLength": 1},
+    "packet_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "judge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["actor_id", "role", "provider", "model_family", "model_id", "version", "independence_attested"],
+      "properties": {
+        "actor_id": {"type": "string", "minLength": 1},
+        "role": {"type": "string", "enum": ["grounding", "task_utility", "adversarial_safety", "synthesis_uncertainty", "generalist", "human"]},
+        "provider": {"type": "string", "minLength": 1},
+        "model_family": {"type": "string", "minLength": 1},
+        "model_id": {"type": "string", "minLength": 1},
+        "version": {"type": "string", "minLength": 1},
+        "independence_attested": {"type": "boolean", "const": true}
+      }
+    },
+    "dimension_results": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["status", "score", "rationale", "evidence_refs"],
+        "properties": {
+          "status": {"type": "string", "enum": ["SCORED", "NOT_APPLICABLE"]},
+          "score": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+          "rationale": {"type": "string", "minLength": 1},
+          "evidence_refs": {"type": "array", "items": {"type": "string", "minLength": 1}}
+        },
+        "allOf": [
+          {
+            "if": {"properties": {"status": {"const": "SCORED"}}},
+            "then": {
+              "properties": {
+                "score": {"type": "number"},
+                "evidence_refs": {"minItems": 1}
+              }
+            },
+            "else": {"properties": {"score": {"type": "null"}}}
+          }
+        ]
+      }
+    },
+    "critical_failures": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["rule_id", "rationale", "evidence_refs"],
+        "properties": {
+          "rule_id": {"type": "string", "minLength": 1},
+          "rationale": {"type": "string", "minLength": 1},
+          "evidence_refs": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}}
+        }
+      }
+    },
+    "overall_score": {"type": "number", "minimum": 0, "maximum": 1},
+    "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+    "overall_rationale": {"type": "string", "minLength": 1},
+    "strengths": {"type": "array", "items": {"type": "string", "minLength": 1}},
+    "weaknesses": {"type": "array", "items": {"type": "string", "minLength": 1}},
+    "recommended_improvement": {"type": "string", "minLength": 1}
+  }
+}

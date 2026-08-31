@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vera.local/evals/judging/schemas/rubric.schema.json",
+  "title": "VERA open-output rubric",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "rubric_id", "purpose", "score_scale", "dimensions", "critical_failure_rules"],
+  "properties": {
+    "schema_version": {"type": "string", "const": "1.0"},
+    "rubric_id": {"type": "string", "minLength": 1},
+    "purpose": {"type": "string", "minLength": 1},
+    "score_scale": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["minimum", "maximum"],
+      "properties": {
+        "minimum": {"type": "number", "const": 0},
+        "maximum": {"type": "number", "const": 1}
+      }
+    },
+    "dimensions": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "weight", "applicability", "description", "anchors"],
+        "properties": {
+          "id": {"type": "string", "minLength": 1},
+          "weight": {"type": "number", "exclusiveMinimum": 0, "maximum": 1},
+          "applicability": {"type": "string", "minLength": 1},
+          "description": {"type": "string", "minLength": 1},
+          "anchors": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["0", "0.5", "1"],
+            "properties": {
+              "0": {"type": "string", "minLength": 1},
+              "0.5": {"type": "string", "minLength": 1},
+              "1": {"type": "string", "minLength": 1}
+            }
+          }
+        }
+      }
+    },
+    "critical_failure_rules": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "description"],
+        "properties": {
+          "id": {"type": "string", "minLength": 1},
+          "description": {"type": "string", "minLength": 1}
+        }
+      }
+    }
+  }
+}

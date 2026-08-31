@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from typing import Protocol
+from uuid import UUID
 
 from vera.domain.knowledge.fabric import (
     Assertion,
@@ -18,6 +19,7 @@ from vera.domain.knowledge.fabric import (
     Evidence,
     ExtractionRun,
     Fact,
+    FactEmbedding,
     FactLifecycle,
     FactRelation,
     KnowledgeEvent,
@@ -46,7 +48,23 @@ class ChunkEmbeddingRepository(Protocol):
         provider: str,
         model: str,
         model_version: str,
+        dimension: int,
     ) -> None: ...
+
+
+class FactEmbeddingRepository(Protocol):
+    async def exists(
+        self,
+        *,
+        group_id: str,
+        fact_id: UUID,
+        provider: str,
+        model: str,
+        model_version: str,
+        dimension: int,
+    ) -> bool: ...
+
+    async def upsert(self, embedding: FactEmbedding) -> None: ...
 
 
 class ExtractionRunRepository(Protocol):
@@ -70,7 +88,14 @@ class FactRepository(Protocol):
 
     async def get(self, *, group_id: str, fact_id: str) -> Fact | None: ...
 
-    async def set_lifecycle(self, *, group_id: str, fact_id: str, state: FactLifecycle) -> None: ...
+    async def set_lifecycle(
+        self,
+        *,
+        group_id: str,
+        fact_id: str,
+        state: FactLifecycle,
+        valid_to: datetime | None = None,
+    ) -> None: ...
 
     async def set_aggregates(
         self, *, group_id: str, fact_id: str, authority: float, confidence: float

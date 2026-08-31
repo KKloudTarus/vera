@@ -1,4 +1,4 @@
-"""Semantic dedup against the live database: backfill embeddings and link synonyms.
+"""Semantic dedup against the live database: backfill embeddings and link judged synonyms.
 
 Proves the two persistence methods the backfill and resolver rely on (list entities
 lacking an embedding, store one) and that the resolver merges a synonym into a known
@@ -23,6 +23,13 @@ class _FakeEmbedder:
 
     async def embed(self, text: str) -> list[float]:
         return self._vectors[text]
+
+
+class _FakeJudge:
+    async def same_entity(
+        self, *, name: str, entity_type: str, candidates: list[str]
+    ) -> str | None:
+        return "paymentapi" if "paymentapi" in candidates else None
 
 
 async def test_backfill_lists_then_stores_embeddings(
@@ -52,7 +59,7 @@ async def test_backfill_lists_then_stores_embeddings(
     assert [(e.id, v) for e, v in cands] == [(entity.id, [1.0, 0.0, 0.0])]
 
 
-async def test_resolver_links_synonym_via_stored_embedding(
+async def test_resolver_links_judged_synonym_via_stored_embedding(
     sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
     group = f"p:{uuid7().hex[:12]}"
@@ -60,6 +67,7 @@ async def test_resolver_links_synonym_via_stored_embedding(
         _FakeEmbedder({"paymentapi": [1.0, 0.0, 0.0], "payment service": [0.95, 0.31, 0.0]}),
         threshold=0.86,
         enabled=True,
+        judge=_FakeJudge(),
     )
     async with SqlAlchemyUnitOfWork(sessionmaker) as uow:
         await uow.use_tenant(group)
@@ -77,3 +85,27 @@ async def test_resolver_links_synonym_via_stored_embedding(
         await uow.use_tenant(group)
         resolved = await uow.canonical.resolve(group_id=group, name="payment service")
     assert resolved is not None and resolved.id == first.id
+
+
+@pytest.mark.parametrize(
+    ("first_name", "second_name"),
+    [("Payment API", "paymentapi"), ("paymentapi", "Payment API")],
+)
+async def test_exact_resolver_links_compact_identifier_alias_without_provider(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    first_name: str,
+    second_name: str,
+) -> None:
+    group = f"p:{uuid7().hex[:12]}"
+    resolver = SemanticEntityResolver(None, enabled=False)
+    async with SqlAlchemyUnitOfWork(sessionmaker) as uow:
+        await uow.use_tenant(group)
+        first = await resolver.resolve_or_create(
+            uow.canonical, group_id=group, name=first_name, entity_type="Service"
+        )
+        second = await resolver.resolve_or_create(
+            uow.canonical, group_id=group, name=second_name, entity_type="Service"
+        )
+        await uow.commit()
+
+    assert second.id == first.id

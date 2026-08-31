@@ -15,6 +15,7 @@ import hashlib
 import random
 import time
 import zlib
+from datetime import datetime
 from typing import Any, cast
 from uuid import UUID
 
@@ -25,6 +26,7 @@ from vera.adapters.persistence.repositories import (
     SqlAlchemyAssertionRepository,
     SqlAlchemyCanonicalEntityRepository,
     SqlAlchemyEvidenceRepository,
+    SqlAlchemyFactEmbeddingRepository,
     SqlAlchemyFactRelationRepository,
     SqlAlchemyFactRepository,
     SqlAlchemyGraphMapRepository,
@@ -45,13 +47,14 @@ from vera.application.projection.service import FactProjectionService
 from vera.bootstrap import Container
 from vera.config.settings import active_embedding
 from vera.domain.curation.trust import TrustTier, authority_for_tier
+from vera.domain.knowledge.fabric import FactEmbedding, fact_semantic_text
 from vera.domain.ontology import is_edge_predicate
 from vera.domain.ports.job_queue import QueuedJob
 from vera.domain.ports.memory_engine import EpisodeSpec, IngestReceipt
 from vera.observability import bind_log_context, clear_log_context, get_logger, span
 from vera.observability.cost import UsageContext, reset_usage_context, set_usage_context
 from vera.observability.metrics import record_ingestion
-from vera.shared.ids import uuid7
+from vera.shared.ids import deterministic_id, uuid7
 from vera.shared.time import utc_now
 from vera.shared.types import GroupId, JsonDict, SourceId
 
@@ -61,6 +64,24 @@ _MARK_DONE = text("UPDATE ingestion_jobs SET status = 'done', last_error = NULL 
 _GROUP_LOCK = text("SELECT pg_advisory_xact_lock(hashtextextended(:g, 0))")
 _EPISODE_BY_SOURCE = text(
     "SELECT id FROM published_episodes WHERE group_id = :group_id AND source_id = :source_id"
+)
+_REFERENCE_TIME_BY_SOURCE = text(
+    "SELECT reference_time FROM published_episodes "
+    "WHERE group_id = :group_id AND source_id = :source_id"
+)
+_JOB_IS_INFLIGHT = text("SELECT 1 FROM ingestion_jobs WHERE id=:job_id AND status='inflight'")
+_FACTS_TO_EMBED = text(
+    "SELECT f.id, cs.canonical_name AS subject_name, f.predicate, "
+    "COALESCE(co.canonical_name, f.object_scalar, '') AS object_name, "
+    "f.object_type, f.qualifiers, fe.content_hash, fe.active "
+    "FROM facts f "
+    "JOIN canonical_entities cs ON cs.id = f.subject_entity_id AND cs.group_id = f.group_id "
+    "LEFT JOIN canonical_entities co ON co.id = f.object_entity_id AND co.group_id = f.group_id "
+    "LEFT JOIN fact_embeddings fe ON fe.fact_id = f.id AND fe.group_id = f.group_id "
+    "AND fe.provider = :provider AND fe.model = :model AND fe.model_version = :model_version "
+    "AND fe.dimension = :dimension "
+    "WHERE f.group_id = :g AND f.lifecycle_state IN ('active', 'disputed') "
+    "ORDER BY f.created_at, f.id"
 )
 
 
@@ -179,6 +200,7 @@ class LanePool:
             enabled=container.settings.memory.semantic_dedup_enabled,
             judge=container.entity_judge,
         )
+        self._fabric_resolver = SemanticEntityResolver(None, enabled=False)
 
     def start(self) -> None:
         self._workers = [
@@ -228,6 +250,13 @@ class LanePool:
         if job.payload.get("job_kind") == "project_facts":
             await self._process_project_facts(job)
             return
+        if job.payload.get("job_kind") == "embed_facts":
+            async with asyncio.timeout(self._container.settings.resilience.per_episode_timeout_s):
+                await self._process_embed_facts(job)
+            return
+        if job.payload.get("job_kind") == "ingest_graph":
+            await self._process_graph_ingest(job)
+            return
         bind_log_context(
             group_id=str(job.group_id),
             source_id=str(job.source_id),
@@ -245,9 +274,13 @@ class LanePool:
             # errors, the lane is freed, and the queue retries it (not left pinned).
             with span("ingest.job", group_id=str(job.group_id)):
                 async with asyncio.timeout(episode_budget):
+                    write_mode = self._container.settings.memory.effective_fabric_write_mode
                     async with self._container.workers() as session, session.begin():
                         await session.execute(_GROUP_LOCK, {"g": str(job.group_id)})
-                        write_mode = self._container.settings.memory.effective_fabric_write_mode
+                        if await session.scalar(_JOB_IS_INFLIGHT, {"job_id": job.id}) is None:
+                            await session.execute(_MARK_DONE, {"id": job.id})
+                            log.info("ingest.skipped_retracted", source_id=str(job.source_id))
+                            return
                         fabric_meta = cast("dict[str, Any]", job.payload.get("_fabric") or {})
                         triples = cast("list[dict[str, Any]]", job.payload.get("triples") or [])
                         needs_review = bool(fabric_meta.get("needs_review"))
@@ -259,33 +292,88 @@ class LanePool:
                                 triple=triple,
                             )
                         reconcile_only = job.payload.get("job_kind") == "fabric_reconcile_version"
-                        if not needs_review and not reconcile_only and write_mode != "fabric":
-                            # One embedding dimension per group: refuse a write under a changed
-                            # model/dim (job dead-letters with a clear message) until reprocess.
-                            model_name, dim = active_embedding(self._container.settings)
-                            await SqlAlchemyEmbeddingStateRepository(session).ensure_compatible(
-                                group_id=str(job.group_id), model=model_name, dim=dim
-                            )
-                            episode = EpisodeSpec(
-                                source_id=SourceId(str(job.source_id)),
-                                group_id=GroupId(str(job.group_id)),
-                                body=str(job.payload.get("body", "")),
-                                reference_time=utc_now(),
-                                metadata=job.payload,
-                            )
-                            receipt = await self._container.memory.ingest_episode(episode)
-                            episode_uuid = str(receipt.episode_uuid)
-                            await self._stitch(
-                                session, str(job.group_id), str(job.source_id), receipt
-                            )
                         if write_mode != "legacy":
                             await self._reconcile_to_fabric(session, job)
-                        await session.execute(_MARK_DONE, {"id": job.id})
+                            if not needs_review and not reconcile_only and write_mode != "fabric":
+                                await self._enqueue_graph_ingest(session, job)
+                            await session.execute(_MARK_DONE, {"id": job.id})
+                    if write_mode == "legacy":
+                        if not needs_review and not reconcile_only:
+                            episode_uuid = await self._ingest_graph(job)
+                            if episode_uuid is None:
+                                return
+                        async with self._container.workers() as session, session.begin():
+                            await session.execute(_MARK_DONE, {"id": job.id})
             record_ingestion(result="done", duration_s=time.perf_counter() - started)
             log.info("ingest.done", episode_uuid=episode_uuid)
         finally:
             reset_usage_context(usage_token)
             clear_log_context()
+
+    async def _enqueue_graph_ingest(self, session: AsyncSession, job: QueuedJob) -> None:
+        payload = dict(job.payload)
+        payload["job_kind"] = "ingest_graph"
+        await SqlAlchemyOutboxRepository(session).add(
+            group_id=str(job.group_id),
+            source_id=str(job.source_id),
+            dedup_uuid=deterministic_id(f"graph:{job.source_id}"),
+            payload=payload,
+            trace_context=job.trace_context,
+        )
+
+    async def _process_graph_ingest(self, job: QueuedJob) -> None:
+        bind_log_context(
+            group_id=str(job.group_id),
+            source_id=str(job.source_id),
+            **_correlation(job.trace_context),
+        )
+        usage_token = set_usage_context(
+            UsageContext(request_kind="ingest", group_id=str(job.group_id), ref=str(job.source_id))
+        )
+        started = time.perf_counter()
+        try:
+            with span("ingest.graph", group_id=str(job.group_id)):
+                async with asyncio.timeout(
+                    self._container.settings.resilience.per_episode_timeout_s
+                ):
+                    episode_uuid = await self._ingest_graph(job)
+                    if episode_uuid is None:
+                        return
+                    async with self._container.workers() as session, session.begin():
+                        await session.execute(_MARK_DONE, {"id": job.id})
+            record_ingestion(result="done", duration_s=time.perf_counter() - started)
+            log.info("ingest_graph.done", episode_uuid=episode_uuid)
+        finally:
+            reset_usage_context(usage_token)
+            clear_log_context()
+
+    async def _ingest_graph(self, job: QueuedJob) -> str | None:
+        group = str(job.group_id)
+        async with self._container.workers() as session, session.begin():
+            await session.execute(_GROUP_LOCK, {"g": group})
+            if await session.scalar(_JOB_IS_INFLIGHT, {"job_id": job.id}) is None:
+                log.info("ingest_graph.skipped_retracted", source_id=str(job.source_id))
+                return None
+            published_reference_time = await session.scalar(
+                _REFERENCE_TIME_BY_SOURCE,
+                {"group_id": group, "source_id": str(job.source_id)},
+            )
+            model_name, dim = active_embedding(self._container.settings)
+            await SqlAlchemyEmbeddingStateRepository(session).ensure_compatible(
+                group_id=group, model=model_name, dim=dim
+            )
+        episode = EpisodeSpec(
+            source_id=SourceId(str(job.source_id)),
+            group_id=GroupId(group),
+            body=str(job.payload.get("body", "")),
+            reference_time=published_reference_time or job.created_at,
+            metadata=job.payload,
+        )
+        receipt = await self._container.memory.ingest_episode(episode)
+        async with self._container.workers() as session, session.begin():
+            await session.execute(_GROUP_LOCK, {"g": group})
+            await self._stitch(session, group, str(job.source_id), receipt)
+        return str(receipt.episode_uuid)
 
     async def _reconcile_to_fabric(self, session: AsyncSession, job: QueuedJob) -> None:
         """Populate the authoritative fact store from the same triples, so the /v2 knowledge
@@ -310,9 +398,11 @@ class LanePool:
             {"g": group, "r": run_key},
         )
         if already:
+            await self._enqueue_fact_embeddings(session, group, str(job.source_id))
             return
 
         trust_tier = int(meta.get("trust_tier", int(TrustTier.UNVERIFIED)))
+        human_verified = meta.get("verification") == "human_verified"
         source_authority = float(meta.get("authority", authority_for_tier(trust_tier)))
         confidence = float(meta.get("confidence", 0.5))
         ontology_version_id = (
@@ -329,11 +419,13 @@ class LanePool:
         # new version of the same artifact drops a proposition (live update path).
         artifact_id: UUID | None = None
         knowledge_source_id: UUID | None = None
+        valid_from: datetime | None = None
         if version_id is not None:
             found = (
                 await session.execute(
                     text(
-                        "SELECT av.artifact_id, a.source_id FROM artifact_versions av "
+                        "SELECT av.artifact_id, av.reference_time, a.source_id "
+                        "FROM artifact_versions av "
                         "JOIN artifacts a ON a.id = av.artifact_id WHERE av.id = :v"
                     ),
                     {"v": str(version_id)},
@@ -342,6 +434,7 @@ class LanePool:
             if found is not None:
                 artifact_id = UUID(str(found.artifact_id))
                 knowledge_source_id = UUID(str(found.source_id))
+                valid_from = found.reference_time
 
         canonical = SqlAlchemyCanonicalEntityRepository(session)
         propositions: list[ResolvedProposition] = []
@@ -368,7 +461,7 @@ class LanePool:
                 meta=meta,
                 triple=triple,
             )
-            entity = await self._resolver.resolve_or_create(
+            entity = await self._fabric_resolver.resolve_or_create(
                 canonical,
                 group_id=group,
                 name=subject,
@@ -379,7 +472,7 @@ class LanePool:
             object_entity_id: UUID | None = None
             object_scalar: str | None = obj
             if is_edge_predicate(predicate):
-                object_entity = await self._resolver.resolve_or_create(
+                object_entity = await self._fabric_resolver.resolve_or_create(
                     canonical,
                     group_id=group,
                     name=obj,
@@ -421,6 +514,8 @@ class LanePool:
                 source_authority=source_authority,
                 trust_tier=trust_tier,
                 propositions=propositions,
+                human_verified=human_verified,
+                valid_from=valid_from,
                 artifact_version_id=version_id,
                 knowledge_source_id=knowledge_source_id,
                 artifact_id=artifact_id,
@@ -430,7 +525,33 @@ class LanePool:
                 actor="worker",
             )
         )
+        await self._enqueue_fact_embeddings(session, group, str(job.source_id))
         await self._enqueue_fact_projection(session, group, str(job.source_id))
+
+    async def _enqueue_fact_embeddings(
+        self, session: AsyncSession, group: str, source_id: str
+    ) -> None:
+        if (
+            not self._container.settings.memory.vector_search_enabled
+            or self._container.embedder is None
+        ):
+            return
+        pending = await session.scalar(
+            text(
+                "SELECT 1 FROM ingestion_jobs WHERE group_id = :g "
+                "AND status IN ('pending','inflight') "
+                "AND payload->>'job_kind' = 'embed_facts' LIMIT 1"
+            ),
+            {"g": group},
+        )
+        if pending:
+            return
+        await SqlAlchemyOutboxRepository(session).add(
+            group_id=group,
+            source_id=source_id,
+            dedup_uuid=uuid7(),
+            payload={"job_kind": "embed_facts", "group_id": group},
+        )
 
     async def _enqueue_fact_projection(
         self, session: AsyncSession, group: str, source_id: str
@@ -476,6 +597,68 @@ class LanePool:
             log.info("project_facts.done", group_id=group, projected=projected)
         async with self._container.workers() as session, session.begin():
             await session.execute(_MARK_DONE, {"id": job.id})
+
+    async def _process_embed_facts(self, job: QueuedJob) -> None:
+        group = str(job.group_id)
+        embedder = self._container.embedder
+        if not self._container.settings.memory.vector_search_enabled or embedder is None:
+            async with self._container.workers() as session, session.begin():
+                await session.execute(_MARK_DONE, {"id": job.id})
+            return
+        memory = self._container.settings.memory
+        model, dimension = active_embedding(self._container.settings)
+        params: dict[str, object] = {
+            "g": group,
+            "provider": memory.embedder,
+            "model": model,
+            "model_version": memory.embedding_model_version,
+            "dimension": dimension,
+        }
+        async with self._container.workers() as session:
+            rows = (await session.execute(_FACTS_TO_EMBED, params)).mappings().all()
+        usage_token = set_usage_context(
+            UsageContext(request_kind="ingest", group_id=group, ref=str(job.source_id))
+        )
+        embedded = 0
+        try:
+            for row in rows:
+                fact_text = fact_semantic_text(
+                    subject_name=str(row["subject_name"]),
+                    predicate=str(row["predicate"]),
+                    object_name=str(row["object_name"]),
+                    object_type=str(row["object_type"]),
+                    qualifiers=cast("JsonDict", row["qualifiers"] or {}),
+                )
+                content_hash = hashlib.sha256(fact_text.encode()).hexdigest()
+                if row["content_hash"] == content_hash and bool(row["active"]):
+                    continue
+                vector = await embedder.embed(fact_text)
+                if len(vector) != dimension:
+                    raise ValueError(
+                        f"embedding dimension mismatch: expected {dimension}, got {len(vector)}"
+                    )
+                async with self._container.workers() as session, session.begin():
+                    await session.execute(_GROUP_LOCK, {"g": group})
+                    await SqlAlchemyFactEmbeddingRepository(session).upsert(
+                        FactEmbedding(
+                            id=uuid7(),
+                            group_id=group,
+                            fact_id=UUID(str(row["id"])),
+                            provider=memory.embedder,
+                            model=model,
+                            model_version=memory.embedding_model_version,
+                            dimension=dimension,
+                            embedding=vector,
+                            content_hash=content_hash,
+                            created_at=utc_now(),
+                        )
+                    )
+                embedded += 1
+        finally:
+            reset_usage_context(usage_token)
+        async with self._container.workers() as session, session.begin():
+            await session.execute(_MARK_DONE, {"id": job.id})
+        log.info("embed_facts.done", group_id=group, embedded=embedded)
 
     async def _process_retract_cleanup(self, job: QueuedJob) -> None:
         # Idempotent: removing already-removed edges is a no-op and deleting an absent object

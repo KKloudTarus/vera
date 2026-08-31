@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vera.local/evals/judging/schemas/panel-policy.schema.json",
+  "title": "VERA external panel policy",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "policy_id", "minimum_judges", "required_roles", "minimum_distinct_model_families", "minimum_distinct_providers", "candidate_identity_blinded", "trusted_assignment_required", "allow_multiple_valid_outputs", "aggregation", "minimum_dimension_judges", "dimension_pass_threshold", "overall_pass_threshold", "grounding_pass_threshold", "max_panel_score_spread", "critical_failure_minimum_votes", "critical_failure_policy", "hard_gate_policy", "disagreement_policy", "human_override_allowed", "human_override_requires_rationale"],
+  "properties": {
+    "schema_version": {"type": "string", "const": "1.0"},
+    "policy_id": {"type": "string", "minLength": 1},
+    "minimum_judges": {"type": "integer", "minimum": 4},
+    "required_roles": {
+      "type": "array",
+      "minItems": 4,
+      "uniqueItems": true,
+      "items": {"type": "string", "enum": ["grounding", "task_utility", "adversarial_safety", "synthesis_uncertainty", "generalist", "human"]}
+    },
+    "minimum_distinct_model_families": {"type": "integer", "minimum": 3},
+    "minimum_distinct_providers": {"type": "integer", "minimum": 2},
+    "candidate_identity_blinded": {"type": "boolean", "const": true},
+    "trusted_assignment_required": {"type": "boolean", "const": true},
+    "allow_multiple_valid_outputs": {"type": "boolean", "const": true},
+    "aggregation": {"type": "string", "const": "median_by_dimension_then_weighted_applicable_mean"},
+    "minimum_dimension_judges": {"type": "integer", "minimum": 3},
+    "dimension_pass_threshold": {"type": "number", "minimum": 0, "maximum": 1},
+    "overall_pass_threshold": {"type": "number", "minimum": 0, "maximum": 1},
+    "grounding_pass_threshold": {"type": "number", "minimum": 0, "maximum": 1},
+    "max_panel_score_spread": {"type": "number", "minimum": 0, "maximum": 1},
+    "critical_failure_minimum_votes": {"type": "integer", "minimum": 2},
+    "critical_failure_policy": {"type": "string", "minLength": 1},
+    "hard_gate_policy": {"type": "string", "minLength": 1},
+    "disagreement_policy": {"type": "string", "minLength": 1},
+    "human_override_allowed": {"type": "boolean"},
+    "human_override_requires_rationale": {"type": "boolean"}
+  },
+  "allOf": [
+    {"properties": {"required_roles": {"contains": {"const": "grounding"}}}},
+    {"properties": {"required_roles": {"contains": {"const": "task_utility"}}}},
+    {"properties": {"required_roles": {"contains": {"const": "adversarial_safety"}}}},
+    {"properties": {"required_roles": {"contains": {"const": "synthesis_uncertainty"}}}}
+  ]
+}

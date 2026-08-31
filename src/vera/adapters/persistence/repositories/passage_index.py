@@ -15,12 +15,24 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from vera.domain.ports.retrieval_index import FactHit, PassageHit, RetrievalFilters
+from vera.domain.knowledge.fabric import fact_semantic_text
+from vera.domain.ports.retrieval_index import (
+    ContentAvailability,
+    FactHit,
+    PassageHit,
+    RetrievalFilters,
+)
 
 # Candidate generation favors recall: OR the query lexemes (plainto_tsquery ANDs them, so a
 # multi-word natural query would never match a terse fact doc). ts_rank still orders by how
 # well each row matches, and the downstream blend and diversity handle precision.
 _ORQ = "CAST(replace(CAST(plainto_tsquery('english', :q) AS text), ' & ', ' | ') AS tsquery)"
+_FACT_LEXICAL_SCORE = """(ts_rank(f.search_vector, q.q)
+         + ts_rank(to_tsvector('english', cs.canonical_name), q.q)
+         + ts_rank(to_tsvector('english', coalesce(co.canonical_name, '')), q.q))"""
+_FACT_LEXICAL_MATCH = """f.search_vector @@ q.q
+        OR to_tsvector('english', cs.canonical_name) @@ q.q
+        OR to_tsvector('english', coalesce(co.canonical_name, '')) @@ q.q"""
 
 _PASSAGE = f"""
 SELECT c.id, c.artifact_version_id, c.text, c.content_hash, c.heading_path, c.symbol_name,
@@ -38,6 +50,11 @@ WHERE c.group_id = :g AND c.search_vector @@ {_ORQ}
        OR (s.project_id IS NULL AND (w.group_id = c.group_id OR EXISTS (
            SELECT 1 FROM projects wp
            WHERE wp.workspace_id = s.workspace_id AND wp.group_id = c.group_id))))
+  AND av.version = (
+      SELECT max(visible.version) FROM artifact_versions visible
+      WHERE visible.artifact_id = av.artifact_id
+        AND (CAST(:created_before AS timestamptz) IS NULL
+             OR visible.observed_at <= :created_before))
   AND (CAST(:created_before AS timestamptz) IS NULL OR c.created_at <= :created_before)
 {{source_filters}}
   AND (CAST(:code_path AS text) IS NULL
@@ -80,14 +97,103 @@ _SNAPSHOT_SOURCE_FILTERS = """
   AND (CAST(:max_trust_tier AS integer) IS NULL OR ss.trust_tier <= :max_trust_tier)
 """
 
-_FACTS_TMPL = f"""
-SELECT f.fact_key AS fact_key, f.id AS fact_id, cs.canonical_name AS subject_name,
-       f.predicate AS predicate, COALESCE(co.canonical_name, f.object_scalar) AS object_name,
+_CONTENT_AVAILABILITY = """
+SELECT EXISTS (
+           SELECT 1 FROM chunks WHERE group_id = :g
+       ) AS passages,
+       EXISTS (
+           SELECT 1 FROM chunks WHERE group_id = :g AND symbol_name IS NOT NULL
+       ) AS code
+"""
+_SNAPSHOT_CONTENT_AVAILABILITY = """
+SELECT EXISTS (
+           SELECT 1 FROM snapshot_chunks
+           WHERE snapshot_id = CAST(:snapshot_id AS uuid) AND group_id = :g
+       ) AS passages,
+       EXISTS (
+           SELECT 1 FROM snapshot_chunks
+           WHERE snapshot_id = CAST(:snapshot_id AS uuid) AND group_id = :g
+             AND symbol_name IS NOT NULL
+       ) AS code
+"""
+_FACTS_TMPL = """
+WITH candidates AS MATERIALIZED (
+    SELECT f.fact_key AS fact_key, f.id AS fact_id, f.group_id AS group_id,
+           cs.canonical_name AS subject_name, f.predicate AS predicate,
+           COALESCE(co.canonical_name, f.object_scalar) AS object_name,
+           f.object_type AS object_type, f.qualifiers AS qualifiers,
+           fv.authority AS authority, fv.confidence AS confidence,
+           fv.lifecycle_state AS lifecycle_state, fv.valid_from AS valid_from,
+           {score} AS score
+    FROM facts f
+    JOIN canonical_entities cs ON cs.id = f.subject_entity_id AND cs.group_id = f.group_id
+    LEFT JOIN canonical_entities co ON co.id = f.object_entity_id AND co.group_id = f.group_id
+    JOIN LATERAL (
+        SELECT fr.lifecycle_state, fr.authority, fr.confidence,
+               fr.valid_from, fr.valid_to, fr.expires_at
+        FROM fact_revisions fr
+        WHERE fr.fact_id = f.id AND fr.group_id = f.group_id
+          AND ((CAST(:known_as_of AS timestamptz) IS NULL AND fr.system_to IS NULL)
+               OR (CAST(:known_as_of AS timestamptz) IS NOT NULL
+                   AND fr.system_from <= :known_as_of
+                   AND (fr.system_to IS NULL OR fr.system_to > :known_as_of)))
+        ORDER BY fr.system_from DESC, fr.id DESC
+        LIMIT 1
+    ) fv ON true
+    {query_join}
+    WHERE f.group_id = :g
+      AND ({match})
+      AND {membership}
+      AND {support_requirement}
+      AND (CAST(:min_authority AS double precision) IS NULL OR fv.authority >= :min_authority)
+      AND (cardinality(CAST(:include_predicates AS text[])) = 0
+           OR f.predicate = ANY(CAST(:include_predicates AS text[])))
+      AND NOT (f.predicate = ANY(CAST(:exclude_predicates AS text[])))
+      AND (:conflict_handling = 'include'
+           OR (:conflict_handling = 'exclude' AND fv.lifecycle_state <> 'disputed')
+           OR (:conflict_handling = 'only' AND fv.lifecycle_state = 'disputed'))
+      AND ((CAST(:repository AS text) IS NULL AND CAST(:branch AS text) IS NULL
+            AND CAST(:code_path AS text) IS NULL AND CAST(:document_type AS text) IS NULL
+            AND CAST(:source_type AS text) IS NULL
+            AND CAST(:max_trust_tier AS integer) IS NULL) OR EXISTS (
+          SELECT 1 FROM assertions af
+          JOIN knowledge_sources fs ON fs.id = af.knowledge_source_id
+          LEFT JOIN projects fp ON fp.id = fs.project_id
+          JOIN workspaces fw ON fw.id = fs.workspace_id
+          WHERE af.fact_id = f.id AND af.group_id = f.group_id
+            AND {source_assertion_membership} AND af.polarity = 'supports'
+            AND ((fs.project_id IS NOT NULL AND fp.group_id = f.group_id)
+                 OR (fs.project_id IS NULL AND (fw.group_id = f.group_id OR EXISTS (
+                     SELECT 1 FROM projects fwp
+                     WHERE fwp.workspace_id = fs.workspace_id AND fwp.group_id = f.group_id))))
+            AND (CAST(:repository AS text) IS NULL OR fs.config->>'repository' = :repository)
+            AND (CAST(:branch AS text) IS NULL OR fs.config->>'branch' = :branch)
+            AND (CAST(:document_type AS text) IS NULL
+                 OR fs.config->>'document_type' = :document_type)
+            AND (CAST(:source_type AS text) IS NULL OR fs.kind = :source_type)
+            AND (CAST(:max_trust_tier AS integer) IS NULL
+                 OR fs.trust_tier <= :max_trust_tier)
+            AND (CAST(:code_path AS text) IS NULL OR EXISTS (
+                SELECT 1 FROM evidence fe
+                JOIN chunks fc ON fc.id = fe.chunk_id AND fc.group_id = f.group_id
+                JOIN artifact_versions fav ON fav.id = fc.artifact_version_id
+                JOIN artifacts fart ON fart.id = fav.artifact_id
+                WHERE fe.assertion_id = af.id AND fe.group_id = f.group_id
+                  AND fe.artifact_version_id = fc.artifact_version_id
+                  AND af.artifact_version_id = fc.artifact_version_id
+                  AND af.artifact_id = fart.id AND af.knowledge_source_id = fart.source_id
+                  AND coalesce(fc.heading_path, '') LIKE '%' || :code_path || '%'
+            ))
+      ))
+    ORDER BY score DESC, f.id ASC
+    LIMIT :lim
+)
+SELECT f.fact_key AS fact_key, f.fact_id AS fact_id, f.subject_name AS subject_name,
+       f.predicate AS predicate, f.object_name AS object_name,
+       f.object_type AS object_type, f.qualifiers AS qualifiers,
        f.authority AS authority, f.confidence AS confidence,
        f.lifecycle_state AS lifecycle_state, f.valid_from AS valid_from,
-       (ts_rank(f.search_vector, q.q)
-        + ts_rank(to_tsvector('english', cs.canonical_name), q.q)
-        + ts_rank(to_tsvector('english', coalesce(co.canonical_name, '')), q.q)) AS score,
+       f.score AS score,
        sup.sources AS sources, ev.evidence_id, ev.assertion_id AS evidence_assertion_id,
        ev.source_id AS evidence_source_id, ev.excerpt AS evidence_excerpt,
        ev.chunk_id AS evidence_chunk_id,
@@ -95,13 +201,10 @@ SELECT f.fact_key AS fact_key, f.id AS fact_id, cs.canonical_name AS subject_nam
         ev.quote_start AS evidence_start_offset, ev.quote_end AS evidence_end_offset,
         ev.quote_hash AS evidence_quote_hash, ev.content_hash AS evidence_content_hash,
         ev.extraction_run_id AS evidence_extraction_run_id,
-         ev.source_coordinates AS evidence_source_coordinates,
-         ev.structured_record AS evidence_structured_record,
-         ev.citation_uri AS evidence_citation_uri
-FROM facts f
-JOIN canonical_entities cs ON cs.id = f.subject_entity_id AND cs.group_id = f.group_id
-LEFT JOIN canonical_entities co ON co.id = f.object_entity_id AND co.group_id = f.group_id
-CROSS JOIN (SELECT {_ORQ} AS q) q
+       ev.source_coordinates AS evidence_source_coordinates,
+       ev.structured_record AS evidence_structured_record,
+       ev.citation_uri AS evidence_citation_uri
+FROM candidates f
 LEFT JOIN LATERAL (
     SELECT array_agg(DISTINCT a.knowledge_source_id::text ORDER BY a.knowledge_source_id::text)
            FILTER (WHERE a.knowledge_source_id IS NOT NULL) AS sources
@@ -109,8 +212,9 @@ LEFT JOIN LATERAL (
     LEFT JOIN knowledge_sources ss ON ss.id = a.knowledge_source_id
     LEFT JOIN projects sp ON sp.id = ss.project_id
     LEFT JOIN workspaces sw ON sw.id = ss.workspace_id
-    WHERE a.fact_id = f.id AND a.group_id = f.group_id
-      AND a.polarity = 'supports' AND {{assertion_membership}}
+    WHERE CAST(:include_provenance AS boolean)
+      AND a.fact_id = f.fact_id AND a.group_id = f.group_id
+      AND a.polarity = 'supports' AND {assertion_membership}
       AND (a.knowledge_source_id IS NULL
            OR (ss.project_id IS NOT NULL AND sp.group_id = f.group_id)
            OR (ss.project_id IS NULL AND (sw.group_id = f.group_id OR EXISTS (
@@ -137,9 +241,10 @@ LEFT JOIN LATERAL (
       AND c.artifact_version_id = e.artifact_version_id
     LEFT JOIN projects ep ON ep.id = es.project_id
     JOIN workspaces ew ON ew.id = es.workspace_id
-    WHERE a.fact_id = f.id AND a.group_id = f.group_id
-      AND a.polarity = 'supports' AND {{assertion_membership}}
-      AND {{evidence_membership}}
+    WHERE CAST(:include_provenance AS boolean)
+      AND a.fact_id = f.fact_id AND a.group_id = f.group_id
+      AND a.polarity = 'supports' AND {assertion_membership}
+      AND {evidence_membership}
       AND ((c.id IS NOT NULL AND e.quote_start IS NOT NULL AND e.quote_end IS NOT NULL
             AND e.quote_hash IS NOT NULL)
            OR (e.chunk_id IS NULL AND (e.structured_record IS NOT NULL
@@ -162,103 +267,116 @@ LEFT JOIN LATERAL (
     ORDER BY a.recorded_at DESC, e.created_at DESC, a.id DESC, e.id DESC
     LIMIT 1
 ) ev ON true
-WHERE f.group_id = :g
-  AND (f.search_vector @@ q.q
-       OR to_tsvector('english', cs.canonical_name) @@ q.q
-       OR to_tsvector('english', coalesce(co.canonical_name, '')) @@ q.q)
-  AND {{membership}}
-  AND {{support_requirement}}
-  AND (CAST(:min_authority AS double precision) IS NULL OR f.authority >= :min_authority)
-  AND (cardinality(CAST(:include_predicates AS text[])) = 0
-       OR f.predicate = ANY(CAST(:include_predicates AS text[])))
-  AND NOT (f.predicate = ANY(CAST(:exclude_predicates AS text[])))
-  AND (:conflict_handling = 'include'
-       OR (:conflict_handling = 'exclude' AND f.lifecycle_state <> 'disputed')
-       OR (:conflict_handling = 'only' AND f.lifecycle_state = 'disputed'))
-  AND ((CAST(:repository AS text) IS NULL AND CAST(:branch AS text) IS NULL
-        AND CAST(:code_path AS text) IS NULL AND CAST(:document_type AS text) IS NULL
-        AND CAST(:source_type AS text) IS NULL
-        AND CAST(:max_trust_tier AS integer) IS NULL) OR EXISTS (
-      SELECT 1 FROM assertions af
-      JOIN knowledge_sources fs ON fs.id = af.knowledge_source_id
-      LEFT JOIN projects fp ON fp.id = fs.project_id
-      JOIN workspaces fw ON fw.id = fs.workspace_id
-      WHERE af.fact_id = f.id AND af.group_id = f.group_id
-        AND {{source_assertion_membership}} AND af.polarity = 'supports'
-        AND ((fs.project_id IS NOT NULL AND fp.group_id = f.group_id)
-             OR (fs.project_id IS NULL AND (fw.group_id = f.group_id OR EXISTS (
-                 SELECT 1 FROM projects fwp
-                 WHERE fwp.workspace_id = fs.workspace_id AND fwp.group_id = f.group_id))))
-        AND (CAST(:repository AS text) IS NULL OR fs.config->>'repository' = :repository)
-        AND (CAST(:branch AS text) IS NULL OR fs.config->>'branch' = :branch)
-        AND (CAST(:document_type AS text) IS NULL
-             OR fs.config->>'document_type' = :document_type)
-        AND (CAST(:source_type AS text) IS NULL OR fs.kind = :source_type)
-        AND (CAST(:max_trust_tier AS integer) IS NULL
-             OR fs.trust_tier <= :max_trust_tier)
-        AND (CAST(:code_path AS text) IS NULL OR EXISTS (
-            SELECT 1 FROM evidence fe
-            JOIN chunks fc ON fc.id = fe.chunk_id AND fc.group_id = f.group_id
-            JOIN artifact_versions fav ON fav.id = fc.artifact_version_id
-            JOIN artifacts fart ON fart.id = fav.artifact_id
-            WHERE fe.assertion_id = af.id AND fe.group_id = f.group_id
-              AND fe.artifact_version_id = fc.artifact_version_id
-              AND af.artifact_version_id = fc.artifact_version_id
-              AND af.artifact_id = fart.id AND af.knowledge_source_id = fart.source_id
-              AND coalesce(fc.heading_path, '') LIKE '%' || :code_path || '%'
-        ))
-  ))
-ORDER BY score DESC, f.id ASC
-LIMIT :lim
+ORDER BY f.score DESC, f.fact_id ASC
 """
 
 # Latest view: currently active or disputed facts, honoring an optional as_of valid-time.
 _FACTS_LATEST = _FACTS_TMPL.format(
+    score=_FACT_LEXICAL_SCORE,
+    query_join=f"CROSS JOIN (SELECT {_ORQ} AS q) q",
+    match=_FACT_LEXICAL_MATCH,
     assertion_membership=(
-        "((CAST(:as_of AS timestamptz) IS NULL AND a.state = 'active') OR "
-        "(CAST(:as_of AS timestamptz) IS NOT NULL AND a.state <> 'needs_review' "
-        "AND a.recorded_at <= :as_of AND (a.withdrawn_at IS NULL OR a.withdrawn_at > :as_of)))"
+        "((CAST(:known_as_of AS timestamptz) IS NULL AND a.state = 'active') OR "
+        "(CAST(:known_as_of AS timestamptz) IS NOT NULL AND a.state <> 'needs_review' "
+        "AND a.recorded_at <= :known_as_of "
+        "AND (a.withdrawn_at IS NULL OR a.withdrawn_at > :known_as_of)))"
     ),
     source_assertion_membership=(
-        "((CAST(:as_of AS timestamptz) IS NULL AND af.state = 'active') OR "
-        "(CAST(:as_of AS timestamptz) IS NOT NULL AND af.state <> 'needs_review' "
-        "AND af.recorded_at <= :as_of "
-        "AND (af.withdrawn_at IS NULL OR af.withdrawn_at > :as_of)))"
+        "((CAST(:known_as_of AS timestamptz) IS NULL AND af.state = 'active') OR "
+        "(CAST(:known_as_of AS timestamptz) IS NOT NULL AND af.state <> 'needs_review' "
+        "AND af.recorded_at <= :known_as_of "
+        "AND (af.withdrawn_at IS NULL OR af.withdrawn_at > :known_as_of)))"
     ),
-    evidence_membership=("(CAST(:as_of AS timestamptz) IS NULL OR e.created_at <= :as_of)"),
+    evidence_membership=(
+        "(CAST(:known_as_of AS timestamptz) IS NULL OR e.created_at <= :known_as_of)"
+    ),
     support_requirement=(
-        "(CAST(:as_of AS timestamptz) IS NULL OR EXISTS ("
+        "(CAST(:known_as_of AS timestamptz) IS NULL OR EXISTS ("
         "SELECT 1 FROM assertions am WHERE am.fact_id = f.id AND am.group_id = f.group_id "
         "AND am.polarity = 'supports' AND am.state <> 'needs_review' "
-        "AND am.recorded_at <= :as_of "
-        "AND (am.withdrawn_at IS NULL OR am.withdrawn_at > :as_of)))"
+        "AND am.recorded_at <= :known_as_of "
+        "AND (am.withdrawn_at IS NULL OR am.withdrawn_at > :known_as_of)))"
     ),
     membership=(
         "((CAST(:as_of AS timestamptz) IS NULL "
-        "  AND f.lifecycle_state IN ('active', 'disputed') "
-        "  AND (f.valid_from IS NULL OR f.valid_from <= now()) "
-        "  AND (f.valid_to IS NULL OR f.valid_to > now())) "
+        "  AND fv.lifecycle_state IN ('active', 'disputed') "
+        "  AND (fv.valid_from IS NULL OR fv.valid_from <= now()) "
+        "  AND (fv.valid_to IS NULL OR fv.valid_to > now())) "
         " OR (CAST(:as_of AS timestamptz) IS NOT NULL "
-        "  AND f.lifecycle_state <> 'proposed' "
-        "  AND (f.valid_from IS NULL OR f.valid_from <= :as_of) "
-        "  AND (f.valid_to IS NULL OR f.valid_to > :as_of)))"
+        "  AND fv.lifecycle_state <> 'proposed' "
+        "  AND (fv.valid_from IS NULL OR fv.valid_from <= :as_of) "
+        "  AND (fv.valid_to IS NULL OR fv.valid_to > :as_of)))"
     ),
 )
 _FACTS_RESTRICTED = _FACTS_TMPL.format(
+    score=_FACT_LEXICAL_SCORE,
+    query_join=f"CROSS JOIN (SELECT {_ORQ} AS q) q",
+    match=_FACT_LEXICAL_MATCH,
     assertion_membership="a.state = 'active'",
     source_assertion_membership="af.state = 'active'",
     evidence_membership="true",
     support_requirement="true",
     membership="f.id = ANY(CAST(:ids AS uuid[]))",
 )
+_FACTS_RESTRICTED_MATCHED = _FACTS_TMPL.format(
+    score="matched.score",
+    query_join=(
+        "JOIN unnest(CAST(:match_ids AS uuid[]), CAST(:match_scores AS double precision[])) "
+        "AS matched(fact_id, score) ON matched.fact_id = f.id"
+    ),
+    match="true",
+    assertion_membership="a.state = 'active'",
+    source_assertion_membership="af.state = 'active'",
+    evidence_membership="true",
+    support_requirement="true",
+    membership="f.id = ANY(CAST(:ids AS uuid[]))",
+)
+_FACTS_MATCHED = _FACTS_TMPL.format(
+    score="matched.score",
+    query_join=(
+        "JOIN unnest(CAST(:match_ids AS uuid[]), CAST(:match_scores AS double precision[])) "
+        "AS matched(fact_id, score) ON matched.fact_id = f.id"
+    ),
+    match="true",
+    assertion_membership=(
+        "((CAST(:known_as_of AS timestamptz) IS NULL AND a.state = 'active') OR "
+        "(CAST(:known_as_of AS timestamptz) IS NOT NULL AND a.state <> 'needs_review' "
+        "AND a.recorded_at <= :known_as_of "
+        "AND (a.withdrawn_at IS NULL OR a.withdrawn_at > :known_as_of)))"
+    ),
+    source_assertion_membership=(
+        "((CAST(:known_as_of AS timestamptz) IS NULL AND af.state = 'active') OR "
+        "(CAST(:known_as_of AS timestamptz) IS NOT NULL AND af.state <> 'needs_review' "
+        "AND af.recorded_at <= :known_as_of "
+        "AND (af.withdrawn_at IS NULL OR af.withdrawn_at > :known_as_of)))"
+    ),
+    evidence_membership=(
+        "(CAST(:known_as_of AS timestamptz) IS NULL OR e.created_at <= :known_as_of)"
+    ),
+    support_requirement=(
+        "(CAST(:known_as_of AS timestamptz) IS NULL OR EXISTS ("
+        "SELECT 1 FROM assertions am WHERE am.fact_id = f.id AND am.group_id = f.group_id "
+        "AND am.polarity = 'supports' AND am.state <> 'needs_review' "
+        "AND am.recorded_at <= :known_as_of "
+        "AND (am.withdrawn_at IS NULL OR am.withdrawn_at > :known_as_of)))"
+    ),
+    membership=(
+        "((CAST(:as_of AS timestamptz) IS NULL "
+        "  AND fv.lifecycle_state IN ('active', 'disputed') "
+        "  AND (fv.valid_from IS NULL OR fv.valid_from <= now()) "
+        "  AND (fv.valid_to IS NULL OR fv.valid_to > now())) "
+        " OR (CAST(:as_of AS timestamptz) IS NOT NULL "
+        "  AND fv.lifecycle_state <> 'proposed' "
+        "  AND (fv.valid_from IS NULL OR fv.valid_from <= :as_of) "
+        "  AND (fv.valid_to IS NULL OR fv.valid_to > :as_of)))"
+    ),
+)
 
-_FACTS_SNAPSHOT = f"""
+_FACTS_SNAPSHOT_TMPL = """
 SELECT sf.fact_key, sf.fact_id, sf.subject_name, sf.predicate, sf.object_name,
+       sf.object_type, sf.qualifiers,
        sf.authority, sf.confidence, sf.lifecycle_state, sf.valid_from,
-       (ts_rank(to_tsvector('english', sf.predicate || ' ' || sf.normalized_object || ' ' ||
-                            coalesce(sf.object_scalar, '')), q.q)
-        + ts_rank(to_tsvector('english', sf.subject_name), q.q)
-        + ts_rank(to_tsvector('english', sf.object_name), q.q)) AS score,
+       {score} AS score,
        sup.sources, cit.evidence_id, cit.assertion_id AS evidence_assertion_id,
        cit.source_id AS evidence_source_id, cit.excerpt AS evidence_excerpt,
        cit.chunk_id AS evidence_chunk_id,
@@ -270,12 +388,13 @@ SELECT sf.fact_key, sf.fact_id, sf.subject_name, sf.predicate, sf.object_name,
          cit.structured_record AS evidence_structured_record,
          cit.citation_uri AS evidence_citation_uri
 FROM snapshot_facts sf
-CROSS JOIN (SELECT {_ORQ} AS q) q
+{query_join}
 LEFT JOIN LATERAL (
     SELECT array_agg(DISTINCT s.knowledge_source_id::text ORDER BY s.knowledge_source_id::text)
            FILTER (WHERE s.knowledge_source_id IS NOT NULL) AS sources
     FROM snapshot_fact_sources s
-    WHERE s.snapshot_id = sf.snapshot_id AND s.fact_id = sf.fact_id
+    WHERE CAST(:include_provenance AS boolean)
+      AND s.snapshot_id = sf.snapshot_id AND s.fact_id = sf.fact_id
       AND s.group_id = sf.group_id
 ) sup ON true
 LEFT JOIN LATERAL (
@@ -288,7 +407,8 @@ LEFT JOIN LATERAL (
     JOIN snapshot_fact_sources s ON s.snapshot_id = c.snapshot_id
       AND s.assertion_id = c.assertion_id AND s.fact_id = c.fact_id
       AND s.group_id = c.group_id
-    WHERE c.snapshot_id = sf.snapshot_id AND c.fact_id = sf.fact_id
+    WHERE CAST(:include_provenance AS boolean)
+      AND c.snapshot_id = sf.snapshot_id AND c.fact_id = sf.fact_id
       AND c.group_id = sf.group_id
       AND (CAST(:repository AS text) IS NULL OR s.repository = :repository)
       AND (CAST(:branch AS text) IS NULL OR s.branch = :branch)
@@ -303,10 +423,7 @@ LEFT JOIN LATERAL (
 ) cit ON true
 WHERE sf.snapshot_id = CAST(:snapshot_id AS uuid) AND sf.group_id = :g
   AND (CAST(:restrict_ids AS uuid[]) IS NULL OR sf.fact_id = ANY(CAST(:restrict_ids AS uuid[])))
-  AND (to_tsvector('english', sf.predicate || ' ' || sf.normalized_object || ' ' ||
-                   coalesce(sf.object_scalar, '')) @@ q.q
-       OR to_tsvector('english', sf.subject_name) @@ q.q
-       OR to_tsvector('english', sf.object_name) @@ q.q)
+  AND ({match})
   AND (CAST(:min_authority AS double precision) IS NULL OR sf.authority >= :min_authority)
   AND (cardinality(CAST(:include_predicates AS text[])) = 0
        OR sf.predicate = ANY(CAST(:include_predicates AS text[])))
@@ -336,6 +453,27 @@ WHERE sf.snapshot_id = CAST(:snapshot_id AS uuid) AND sf.group_id = :g
 ORDER BY score DESC, sf.fact_id ASC
 LIMIT :lim
 """
+_SNAPSHOT_LEXICAL_SCORE = """(ts_rank(to_tsvector('english', sf.predicate || ' ' ||
+                             sf.normalized_object || ' ' || coalesce(sf.object_scalar, '')), q.q)
+        + ts_rank(to_tsvector('english', sf.subject_name), q.q)
+        + ts_rank(to_tsvector('english', sf.object_name), q.q))"""
+_SNAPSHOT_LEXICAL_MATCH = """to_tsvector('english', sf.predicate || ' ' ||
+                   sf.normalized_object || ' ' || coalesce(sf.object_scalar, '')) @@ q.q
+       OR to_tsvector('english', sf.subject_name) @@ q.q
+       OR to_tsvector('english', sf.object_name) @@ q.q"""
+_FACTS_SNAPSHOT = _FACTS_SNAPSHOT_TMPL.format(
+    score=_SNAPSHOT_LEXICAL_SCORE,
+    query_join=f"CROSS JOIN (SELECT {_ORQ} AS q) q",
+    match=_SNAPSHOT_LEXICAL_MATCH,
+)
+_FACTS_SNAPSHOT_MATCHED = _FACTS_SNAPSHOT_TMPL.format(
+    score="matched.score",
+    query_join=(
+        "JOIN unnest(CAST(:match_ids AS uuid[]), CAST(:match_scores AS double precision[])) "
+        "AS matched(fact_id, score) ON matched.fact_id = sf.fact_id"
+    ),
+    match="true",
+)
 
 
 def passage_hit(row: Any) -> PassageHit:
@@ -369,6 +507,21 @@ def retrieval_filter_params(filters: RetrievalFilters | None) -> dict[str, objec
         "max_trust_tier": selected.max_trust_tier,
         "conflict_handling": selected.conflict_handling,
     }
+
+
+class SqlAlchemyContentAvailability:
+    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+        self._session_factory = session_factory
+
+    async def get(self, *, group_id: str, snapshot_id: str | None = None) -> ContentAvailability:
+        sql = _SNAPSHOT_CONTENT_AVAILABILITY if snapshot_id is not None else _CONTENT_AVAILABILITY
+        async with self._session_factory() as session:
+            row = (
+                (await session.execute(text(sql), {"g": group_id, "snapshot_id": snapshot_id}))
+                .mappings()
+                .one()
+            )
+        return ContentAvailability(passages=bool(row["passages"]), code=bool(row["code"]))
 
 
 class SqlAlchemyPassageIndex:
@@ -466,8 +619,14 @@ class SqlAlchemyCodeIndex:
 
 
 class SqlAlchemyFactCandidateSource:
-    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+    def __init__(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        *,
+        include_provenance: bool = True,
+    ) -> None:
         self._session_factory = session_factory
+        self._include_provenance = include_provenance
 
     async def search(
         self,
@@ -476,6 +635,7 @@ class SqlAlchemyFactCandidateSource:
         query: str,
         limit: int,
         as_of: datetime | None = None,
+        known_as_of: datetime | None = None,
         restrict_fact_ids: set[str] | None = None,
         snapshot_id: str | None = None,
         filters: RetrievalFilters | None = None,
@@ -490,6 +650,7 @@ class SqlAlchemyFactCandidateSource:
                 "lim": limit,
                 "snapshot_id": snapshot_id,
                 "restrict_ids": list(restrict_fact_ids) if restrict_fact_ids is not None else None,
+                "include_provenance": self._include_provenance,
                 **retrieval_filter_params(filters),
             }
         elif restrict_fact_ids is not None:
@@ -501,6 +662,8 @@ class SqlAlchemyFactCandidateSource:
                 "q": query,
                 "lim": limit,
                 "ids": list(restrict_fact_ids),
+                "known_as_of": None,
+                "include_provenance": self._include_provenance,
                 **retrieval_filter_params(filters),
             }
         else:
@@ -510,42 +673,107 @@ class SqlAlchemyFactCandidateSource:
                 "q": query,
                 "lim": limit,
                 "as_of": as_of,
+                "known_as_of": known_as_of,
+                "include_provenance": self._include_provenance,
                 **retrieval_filter_params(filters),
             }
         async with self._session_factory() as session:
             rows = (await session.execute(sql, params)).mappings().all()
-        hits: list[FactHit] = []
-        for row in rows:
-            object_name = row["object_name"] or ""
-            sources: Any = row["sources"] or []
-            hits.append(
-                FactHit(
-                    fact_key=row["fact_key"],
-                    fact_id=str(row["fact_id"]),
+        return fact_hits(rows)
+
+    async def hydrate(
+        self,
+        *,
+        group_id: str,
+        matches: list[tuple[str, float]],
+        limit: int,
+        as_of: datetime | None = None,
+        known_as_of: datetime | None = None,
+        restrict_fact_ids: set[str] | None = None,
+        snapshot_id: str | None = None,
+        filters: RetrievalFilters | None = None,
+    ) -> list[FactHit]:
+        if not matches:
+            return []
+        params: dict[str, object] = {
+            "g": group_id,
+            "lim": limit,
+            "as_of": as_of,
+            "known_as_of": known_as_of,
+            "match_ids": [fact_id for fact_id, _ in matches],
+            "match_scores": [score for _, score in matches],
+            "include_provenance": self._include_provenance,
+            **retrieval_filter_params(filters),
+        }
+        sql = _FACTS_MATCHED
+        if snapshot_id is not None:
+            sql = _FACTS_SNAPSHOT_MATCHED
+            params |= {
+                "snapshot_id": snapshot_id,
+                "restrict_ids": (
+                    list(restrict_fact_ids) if restrict_fact_ids is not None else None
+                ),
+            }
+        elif restrict_fact_ids is not None:
+            if not restrict_fact_ids:
+                return []
+            sql = _FACTS_RESTRICTED_MATCHED
+            params["ids"] = list(restrict_fact_ids)
+        async with self._session_factory() as session:
+            rows = (await session.execute(text(sql), params)).mappings().all()
+        return fact_hits(rows)
+
+
+def fact_hits(rows: Any) -> list[FactHit]:
+    hits: list[FactHit] = []
+    for row in rows:
+        object_name = row["object_name"] or ""
+        sources: Any = row["sources"] or []
+        hits.append(
+            FactHit(
+                fact_key=row["fact_key"],
+                fact_id=str(row["fact_id"]),
+                subject_name=row["subject_name"],
+                predicate=row["predicate"],
+                object_name=object_name,
+                text=fact_semantic_text(
                     subject_name=row["subject_name"],
                     predicate=row["predicate"],
                     object_name=object_name,
-                    text=f"{row['subject_name']} {row['predicate']} {object_name}".strip(),
-                    authority=float(row["authority"]),
-                    confidence=float(row["confidence"]),
-                    lifecycle_state=row["lifecycle_state"],
-                    score=float(row["score"]),
-                    valid_from=row["valid_from"],
-                    supporting_source_ids=tuple(str(s) for s in sources),
-                    evidence_id=row["evidence_id"],
-                    evidence_assertion_id=row["evidence_assertion_id"],
-                    evidence_source_id=row["evidence_source_id"],
-                    evidence_excerpt=row["evidence_excerpt"],
-                    evidence_chunk_id=row["evidence_chunk_id"],
-                    evidence_artifact_version_id=row["evidence_artifact_version_id"],
-                    evidence_start_offset=row["evidence_start_offset"],
-                    evidence_end_offset=row["evidence_end_offset"],
-                    evidence_quote_hash=row["evidence_quote_hash"],
-                    evidence_content_hash=row["evidence_content_hash"],
-                    evidence_extraction_run_id=row["evidence_extraction_run_id"],
-                    evidence_source_coordinates=row["evidence_source_coordinates"],
-                    evidence_structured_record=row["evidence_structured_record"],
-                    evidence_citation_uri=row["evidence_citation_uri"],
-                )
+                    object_type=row["object_type"],
+                    qualifiers=dict(row["qualifiers"] or {}),
+                ),
+                authority=float(row["authority"]),
+                confidence=float(row["confidence"]),
+                lifecycle_state=row["lifecycle_state"],
+                score=float(row["score"]),
+                valid_from=row["valid_from"],
+                supporting_source_ids=tuple(str(s) for s in sources),
+                evidence_id=row["evidence_id"],
+                evidence_assertion_id=row["evidence_assertion_id"],
+                evidence_source_id=row["evidence_source_id"],
+                evidence_excerpt=row["evidence_excerpt"],
+                evidence_chunk_id=row["evidence_chunk_id"],
+                evidence_artifact_version_id=row["evidence_artifact_version_id"],
+                evidence_start_offset=row["evidence_start_offset"],
+                evidence_end_offset=row["evidence_end_offset"],
+                evidence_quote_hash=row["evidence_quote_hash"],
+                evidence_content_hash=row["evidence_content_hash"],
+                evidence_extraction_run_id=row["evidence_extraction_run_id"],
+                evidence_source_coordinates=row["evidence_source_coordinates"],
+                evidence_structured_record=row["evidence_structured_record"],
+                evidence_citation_uri=row["evidence_citation_uri"],
             )
-        return hits
+        )
+    return hits
+
+
+def fact_candidate_queries() -> tuple[str, str, str, str, str, str]:
+    return (
+        _FACTS_LATEST,
+        _FACTS_MATCHED,
+        _FACTS_RESTRICTED,
+        _FACTS_RESTRICTED_MATCHED,
+        _FACTS_SNAPSHOT,
+        _FACTS_SNAPSHOT_MATCHED,
+    )

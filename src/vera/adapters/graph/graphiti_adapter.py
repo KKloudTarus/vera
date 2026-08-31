@@ -282,8 +282,9 @@ class GraphitiMemoryEngine:
             predicate = str(triple["predicate"])
             obj = str(triple["object"])
             entity_type = str(triple.get("entity_type", "Entity"))
+            object_type = str(triple.get("object_type") or "Entity")
             source_node = EntityNode(name=subject, group_id=gid, labels=["Entity", entity_type])
-            target_node = EntityNode(name=obj, group_id=gid, labels=["Entity", entity_type])
+            target_node = EntityNode(name=obj, group_id=gid, labels=["Entity", object_type])
             edge = EntityEdge(
                 group_id=gid,
                 source_node_uuid=source_node.uuid,

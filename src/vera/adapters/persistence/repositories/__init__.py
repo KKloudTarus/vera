@@ -28,6 +28,9 @@ from vera.adapters.persistence.repositories.fabric import (
     SqlAlchemyFactRepository,
     SqlAlchemyKnowledgeEventLog,
 )
+from vera.adapters.persistence.repositories.fact_embedding import (
+    SqlAlchemyFactEmbeddingRepository,
+)
 from vera.adapters.persistence.repositories.graph_map import SqlAlchemyGraphMapRepository
 from vera.adapters.persistence.repositories.identity import SqlAlchemyIdentityRepository
 from vera.adapters.persistence.repositories.ontology import SqlAlchemyOntologyRepository
@@ -53,6 +56,7 @@ __all__ = [
     "SqlAlchemyContextPackRepository",
     "SqlAlchemyEvidenceRepository",
     "SqlAlchemyExtractionRunRepository",
+    "SqlAlchemyFactEmbeddingRepository",
     "SqlAlchemyFactExpiryRepository",
     "SqlAlchemyFactRelationRepository",
     "SqlAlchemyFactRepository",

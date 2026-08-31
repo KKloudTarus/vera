@@ -12,6 +12,10 @@ from collections.abc import Sequence
 from typing import Protocol
 
 
+class RerankerUnavailableError(Exception):
+    """The configured reranker could not produce trustworthy scores."""
+
+
 class Reranker(Protocol):
     async def rerank(self, *, query: str, facts: Sequence[str]) -> list[float]:
         """A relevance score in [0, 1] for each fact against the query, in input order."""

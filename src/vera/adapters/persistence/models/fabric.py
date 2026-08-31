@@ -1,9 +1,6 @@
-"""Knowledge Fabric tables (Phase 1): chunks, facts, assertions, evidence, fact_relations,
-and the append-only knowledge_events ledger.
+"""Knowledge Fabric tables and the append-only knowledge event ledger.
 
-All are tenant-scoped by ``group_id`` and take the same ``tenant_isolation`` RLS policy as
-the existing knowledge tables (added in the Phase 1 migration). These are additive: no
-existing table changes. See docs/design/knowledge-fabric.md and docs/adr/0001, 0004.
+Every table is tenant-scoped by ``group_id`` and uses the shared tenant isolation policy.
 """
 
 from __future__ import annotations
@@ -18,6 +15,7 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Integer,
     PrimaryKeyConstraint,
@@ -185,6 +183,38 @@ class FactRow(Base, UUIDPK, Timestamps):
             postgresql_where=text("lifecycle_state = 'active' AND expires_at IS NOT NULL"),
         ),
         Index("ix_facts_fts", "search_vector", postgresql_using="gin"),
+    )
+
+
+class FactRevisionRow(Base, UUIDPK):
+    __tablename__ = "fact_revisions"
+
+    group_id: Mapped[str] = mapped_column(String(256), nullable=False)
+    fact_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    lifecycle_state: Mapped[str] = mapped_column(String(16), nullable=False)
+    authority: Mapped[float] = mapped_column(Float, nullable=False)
+    confidence: Mapped[float] = mapped_column(Float, nullable=False)
+    valid_from: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    valid_to: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    system_from: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    system_to: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["fact_id", "group_id"],
+            ["facts.id", "facts.group_id"],
+            ondelete="CASCADE",
+        ),
+        CheckConstraint(f"lifecycle_state IN ({_LIFECYCLE})", name="ck_fact_revision_lifecycle"),
+        Index("ix_fact_revisions_lookup", "group_id", "fact_id", system_from.desc()),
+        Index(
+            "uq_fact_revision_current",
+            "group_id",
+            "fact_id",
+            unique=True,
+            postgresql_where=text("system_to IS NULL"),
+        ),
     )
 
 

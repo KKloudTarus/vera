@@ -4,14 +4,15 @@ published episodes. Each maps ORM rows to domain records at its boundary.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, cast
 from uuid import UUID
 
-from sqlalchemy import CursorResult, select, update
+from sqlalchemy import CursorResult, exists, func, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from vera.adapters.persistence.models.fabric import ExtractionRunRow
 from vera.adapters.persistence.models.knowledge import (
     ArtifactRow,
     ArtifactVersionRow,
@@ -20,7 +21,12 @@ from vera.adapters.persistence.models.knowledge import (
     PublishedEpisodeRow,
     ReviewRow,
 )
-from vera.domain.curation.models import ArtifactHead, ArtifactRef, ClaimRecord
+from vera.domain.curation.models import (
+    ArtifactHead,
+    ArtifactRef,
+    ArtifactVersionRecord,
+    ClaimRecord,
+)
 from vera.domain.knowledge.models import ClaimType, VerificationStatus
 from vera.domain.ports.curation import ExtractedClaim, SourceRecord
 from vera.shared.types import JsonDict
@@ -99,10 +105,64 @@ class SqlAlchemyKnowledgeSourceRepository:
             trust_tier=4,
         )
 
+    async def claim_sync_lease(
+        self, *, source_id: UUID, owner_token: UUID, lease_duration_s: float
+    ) -> bool:
+        claimed = await self._session.scalar(
+            update(KnowledgeSourceRow)
+            .where(
+                KnowledgeSourceRow.id == source_id,
+                or_(
+                    KnowledgeSourceRow.sync_lease_owner == owner_token,
+                    KnowledgeSourceRow.sync_lease_expires_at.is_(None),
+                    KnowledgeSourceRow.sync_lease_expires_at <= func.now(),
+                ),
+            )
+            .values(
+                sync_lease_owner=owner_token,
+                sync_lease_expires_at=func.now() + timedelta(seconds=lease_duration_s),
+            )
+            .returning(KnowledgeSourceRow.id)
+        )
+        return claimed is not None
+
+    async def renew_sync_lease(
+        self, *, source_id: UUID, owner_token: UUID, lease_duration_s: float
+    ) -> bool:
+        renewed = await self._session.scalar(
+            update(KnowledgeSourceRow)
+            .where(
+                KnowledgeSourceRow.id == source_id,
+                KnowledgeSourceRow.sync_lease_owner == owner_token,
+                KnowledgeSourceRow.sync_lease_expires_at > func.now(),
+            )
+            .values(sync_lease_expires_at=func.now() + timedelta(seconds=lease_duration_s))
+            .returning(KnowledgeSourceRow.id)
+        )
+        return renewed is not None
+
+    async def release_sync_lease(self, *, source_id: UUID, owner_token: UUID) -> bool:
+        released = await self._session.scalar(
+            update(KnowledgeSourceRow)
+            .where(
+                KnowledgeSourceRow.id == source_id,
+                KnowledgeSourceRow.sync_lease_owner == owner_token,
+            )
+            .values(sync_lease_owner=None, sync_lease_expires_at=None)
+            .returning(KnowledgeSourceRow.id)
+        )
+        return released is not None
+
 
 class SqlAlchemyArtifactRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
+
+    async def lock_version_allocation(self, *, source_id: UUID, external_id: str) -> None:
+        await self._session.execute(
+            text("SELECT pg_advisory_xact_lock(hashtextextended(:lock_key, 0))"),
+            {"lock_key": f"{source_id}:{external_id}"},
+        )
 
     async def create_with_version(
         self,
@@ -126,6 +186,9 @@ class SqlAlchemyArtifactRepository:
             s3_key=s3_key,
             reference_time=reference_time,
             current_version=1,
+            source_revision=source_revision,
+            source_updated_at=source_updated_at,
+            source_version_id=source_version_id,
         )
         self._session.add(artifact)
         await self._session.flush()
@@ -176,11 +239,57 @@ class SqlAlchemyArtifactRepository:
             version_id=version.id,
             version=row.current_version,
             content_hash=row.content_hash,
+            source_revision=row.source_revision,
+            source_updated_at=row.source_updated_at,
+            source_version_id=row.source_version_id,
+            observed_at=version.observed_at,
+        )
+
+    async def get_version(self, version_id: UUID, *, group_id: str) -> ArtifactVersionRecord | None:
+        result = await self._session.execute(
+            select(ArtifactVersionRow, ArtifactRow)
+            .join(ArtifactRow, ArtifactRow.id == ArtifactVersionRow.artifact_id)
+            .where(
+                ArtifactVersionRow.id == version_id,
+                exists().where(
+                    ExtractionRunRow.artifact_version_id == ArtifactVersionRow.id,
+                    ExtractionRunRow.group_id == group_id,
+                ),
+            )
+        )
+        row = result.one_or_none()
+        if row is None:
+            return None
+        version, artifact = row
+        return ArtifactVersionRecord(
+            artifact_id=artifact.id,
+            version_id=version.id,
+            version=version.version,
+            source_id=artifact.source_id,
+            external_id=artifact.external_id,
+            content_hash=version.content_hash,
+            s3_key=version.s3_key,
+            reference_time=version.reference_time,
             source_revision=version.source_revision,
             source_updated_at=version.source_updated_at,
             source_version_id=version.source_version_id,
             observed_at=version.observed_at,
         )
+
+    async def advance_watermark(
+        self,
+        *,
+        artifact_id: UUID,
+        source_revision: int | None,
+        source_updated_at: datetime | None,
+        source_version_id: str | None,
+    ) -> None:
+        artifact = await self._session.get(ArtifactRow, artifact_id)
+        if artifact is None:
+            raise ValueError(f"artifact {artifact_id} not found")
+        artifact.source_revision = source_revision
+        artifact.source_updated_at = source_updated_at
+        artifact.source_version_id = source_version_id
 
     async def add_version(
         self,
@@ -194,7 +303,9 @@ class SqlAlchemyArtifactRepository:
         source_version_id: str | None = None,
         observed_at: datetime | None = None,
     ) -> ArtifactRef:
-        artifact = await self._session.get(ArtifactRow, artifact_id)
+        artifact = await self._session.scalar(
+            select(ArtifactRow).where(ArtifactRow.id == artifact_id).with_for_update()
+        )
         if artifact is None:
             raise ValueError(f"artifact {artifact_id} not found")
         head_version_id = await self._session.scalar(
@@ -210,6 +321,9 @@ class SqlAlchemyArtifactRepository:
         artifact.content_hash = content_hash
         artifact.s3_key = s3_key
         artifact.reference_time = reference_time
+        artifact.source_revision = source_revision
+        artifact.source_updated_at = source_updated_at
+        artifact.source_version_id = source_version_id
         version = ArtifactVersionRow(
             artifact_id=artifact_id,
             version=next_version,
@@ -365,6 +479,7 @@ class SqlAlchemyPublishedEpisodeRepository:
         reference_time: datetime,
         payload: JsonDict,
         dedup_uuid: UUID,
+        artifact_version_id: UUID | None = None,
         ontology_version_id: UUID | None = None,
         pipeline: JsonDict | None = None,
         confidence: float = 1.0,
@@ -373,6 +488,7 @@ class SqlAlchemyPublishedEpisodeRepository:
             pg_insert(PublishedEpisodeRow)
             .values(
                 source_id=source_id,
+                artifact_version_id=artifact_version_id,
                 group_id=group_id,
                 knowledge_type=knowledge_type,
                 verification=verification,

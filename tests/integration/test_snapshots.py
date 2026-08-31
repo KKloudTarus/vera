@@ -646,31 +646,49 @@ async def test_context_pack_over_snapshot_excludes_later_ingested_passages(
         )
         s.add(ver)
         await s.flush()
+        artifact_id = art.id
         version_id = ver.id
 
-    async def _chunk(ordinal: int, body: str) -> UUID:
+    async def _chunk(version: UUID, ordinal: int, body: str) -> UUID:
         chunk_id = uuid7()
         ck = fabric.chunk_key(
-            artifact_version_id=version_id, ordinal=ordinal, content_hash=f"c{ordinal}"
+            artifact_version_id=version, ordinal=ordinal, content_hash=f"{version}:c{ordinal}"
         )
         async with _tenant(sessionmaker, group) as s:
             await SqlAlchemyChunkRepository(s).upsert(
                 Chunk(
                     id=chunk_id,
-                    artifact_version_id=version_id,
+                    artifact_version_id=version,
                     group_id=group,
                     chunk_key=ck,
                     ordinal=ordinal,
                     text=body,
-                    content_hash=f"c{ordinal}",
+                    content_hash=f"{version}:c{ordinal}",
                     token_count=len(body) // 4,
                 )
             )
         return chunk_id
 
-    alpha_id = await _chunk(1, "deployment runbook alpha describes the rollout")
+    alpha_id = await _chunk(version_id, 1, "deployment runbook alpha describes the stale rollout")
+    async with _tenant(sessionmaker, group) as session:
+        current = ArtifactVersionRow(
+            artifact_id=artifact_id,
+            version=2,
+            content_hash="h2",
+            s3_key="k2",
+            reference_time=utc_now(),
+            predecessor_version_id=version_id,
+        )
+        session.add(current)
+        await session.flush()
+        current_version_id = current.id
+    await _chunk(
+        current_version_id,
+        1,
+        "deployment runbook current describes the rollout",
+    )
     snapshot = await _snapshot_service(sessionmaker).create(group_id=group)
-    assert snapshot.source_boundaries[str(source_id)] == str(version_id)
+    assert snapshot.source_boundaries[str(source_id)] == str(current_version_id)
     async with _tenant(sessionmaker, group) as session:
         await session.execute(
             text(
@@ -679,7 +697,7 @@ async def test_context_pack_over_snapshot_excludes_later_ingested_passages(
             ),
             {"source_id": source_id},
         )
-    await _chunk(2, "deployment runbook bravo describes a later rollout")
+    await _chunk(current_version_id, 2, "deployment runbook bravo describes a later rollout")
     with pytest.raises(exc.DBAPIError, match=r"chunks are immutable|permission denied"):
         async with _tenant(sessionmaker, group) as session:
             await session.execute(
@@ -700,8 +718,8 @@ async def test_context_pack_over_snapshot_excludes_later_ingested_passages(
         filters=RetrievalFilters(repository="original"),
     )
     texts = " ".join(r["text"] for r in pack.results)
-    assert "alpha describes" in texts
-    assert "alpha changed" not in texts
+    assert "current describes" in texts
+    assert "alpha" not in texts
     assert "bravo" not in texts
 
     repeated = await packs.create(
@@ -710,10 +728,11 @@ async def test_context_pack_over_snapshot_excludes_later_ingested_passages(
         snapshot_id=snapshot.id,
         filters=RetrievalFilters(repository="original"),
     )
-    assert "alpha describes" in " ".join(r["text"] for r in repeated.results)
+    assert "current describes" in " ".join(r["text"] for r in repeated.results)
     assert repeated.results == pack.results
 
     # Live retrieval includes the later chunk; the snapshot remains at its captured membership.
     live = await packs.create(group_id=group, query="deployment runbook rollout")
     live_texts = " ".join(r["text"] for r in live.results)
-    assert "alpha" in live_texts and "bravo" in live_texts
+    assert "current" in live_texts and "bravo" in live_texts
+    assert "alpha" not in live_texts

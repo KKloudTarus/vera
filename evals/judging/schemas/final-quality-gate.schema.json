@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vera.local/evals/judging/schemas/final-quality-gate.schema.json",
+  "title": "VERA final quality gate",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "run_id", "profile", "generated_at", "execution_report", "panel_results", "quality_status", "status", "reason"],
+  "properties": {
+    "schema_version": {"type": "string", "const": "1.0"},
+    "run_id": {"type": "string", "minLength": 1},
+    "profile": {"type": "string", "enum": ["daily", "nightly", "weekly", "release"]},
+    "generated_at": {"type": "string", "format": "date-time"},
+    "execution_report": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ref", "sha256", "status", "quality_status"],
+      "properties": {
+        "ref": {"type": "string", "minLength": 1},
+        "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "status": {"type": "string", "enum": ["PASS", "FAIL", "BLOCKED"]},
+        "quality_status": {"type": "string", "const": "PENDING_JUDGMENT"}
+      }
+    },
+    "panel_results": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["packet_id", "ref", "sha256", "status", "quality_status", "overall_score", "judge_count"],
+        "properties": {
+          "packet_id": {"type": "string", "minLength": 1},
+          "ref": {"type": "string", "minLength": 1},
+          "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+          "status": {"type": "string", "enum": ["PASS", "FAIL", "BLOCKED"]},
+          "quality_status": {"type": "string", "enum": ["PASS", "FAIL", "DISPUTED", "INSUFFICIENT_PANEL"]},
+          "overall_score": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+          "judge_count": {"type": "integer", "minimum": 0}
+        }
+      }
+    },
+    "quality_status": {"type": "string", "enum": ["PASS", "FAIL", "BLOCKED"]},
+    "status": {"type": "string", "enum": ["PASS", "FAIL", "BLOCKED"]},
+    "reason": {"type": "string", "minLength": 1}
+  }
+}

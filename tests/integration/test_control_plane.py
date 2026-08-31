@@ -84,7 +84,7 @@ async def test_tenancy_hierarchy_round_trip(
     assert fetched.group_id == f"p:{sfx}"
 
 
-async def test_canonical_resolve_exact_and_fuzzy(
+async def test_canonical_resolve_requires_exact_normalized_alias(
     sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
     sfx = _suffix()
@@ -102,10 +102,10 @@ async def test_canonical_resolve_exact_and_fuzzy(
     async with SqlAlchemyUnitOfWork(sessionmaker) as uow:
         await uow.use_tenant(group)
         exact = await uow.canonical.resolve(group_id=group, name="Payment  API")
-        fuzzy = await uow.canonical.resolve(group_id=group, name="payment apis")
+        near_miss = await uow.canonical.resolve(group_id=group, name="payment apis")
     assert exact is not None
     assert exact.canonical_name == "payment-api"
-    assert fuzzy is not None  # trgm near-miss still resolves
+    assert near_miss is None
 
 
 async def test_rls_blocks_cross_tenant_reads(

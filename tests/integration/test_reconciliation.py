@@ -10,13 +10,14 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import timedelta
+from datetime import datetime, timedelta
 from uuid import UUID
 
 import pytest
 from sqlalchemy import exc, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from vera.adapters.persistence.models.fabric import ExtractionRunRow
 from vera.adapters.persistence.models.knowledge import ArtifactRow, ArtifactVersionRow
 from vera.adapters.persistence.repositories import (
     SqlAlchemyAssertionRepository,
@@ -156,6 +157,9 @@ def _req(
     source_id: UUID,
     tier: int,
     props: list[ResolvedProposition],
+    *,
+    extraction_run_id: UUID | None = None,
+    valid_from: datetime | None = None,
 ) -> ArtifactReconciliation:
     return ArtifactReconciliation(
         group_id=group,
@@ -165,6 +169,8 @@ def _req(
         propositions=props,
         knowledge_source_id=source_id,
         artifact_id=artifact_id,
+        extraction_run_id=extraction_run_id,
+        valid_from=valid_from,
     )
 
 
@@ -207,6 +213,62 @@ async def test_repeated_proposition_reaffirms_and_does_not_duplicate(
         == 1
     )
     assert await _count(sessionmaker, group, "SELECT count(*) FROM evidence") == 1
+
+
+async def test_new_extraction_run_withdraws_dropped_claims_from_the_same_version(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    group = f"p:reextract-{uuid7().hex[:12]}"
+    source, artifact, version, _ = await _bootstrap(sessionmaker, group)
+    subject = await _subject(sessionmaker, group)
+    first_run = uuid7()
+    second_run = uuid7()
+    async with _tenant(sessionmaker, group) as session:
+        session.add_all(
+            [
+                ExtractionRunRow(
+                    id=run_id,
+                    group_id=group,
+                    artifact_version_id=version,
+                    model="test",
+                    provider="test",
+                    prompt_version="test",
+                    pipeline_version={},
+                    started_at=utc_now(),
+                )
+                for run_id in (first_run, second_run)
+            ]
+        )
+        await session.flush()
+        await _service(session).reconcile(
+            _req(
+                group,
+                artifact,
+                version,
+                source,
+                1,
+                [_runs_on(subject, "eks")],
+                extraction_run_id=first_run,
+            )
+        )
+        report = await _service(session).reconcile(
+            _req(
+                group,
+                artifact,
+                version,
+                source,
+                1,
+                [],
+                extraction_run_id=second_run,
+            )
+        )
+
+    assert report.assertions_withdrawn == 1
+    assert (
+        await _count(sessionmaker, group, "SELECT count(*) FROM assertions WHERE state='active'")
+        == 0
+    )
+    assert await _fact_states(sessionmaker, group) == {"scalar:eks": "retracted"}
 
 
 async def test_uri_only_evidence_survives_live_and_snapshot_retrieval(
@@ -339,6 +401,44 @@ async def test_lower_authority_does_not_overwrite(
     states = await _fact_states(sessionmaker, group)
     assert states["scalar:eks"] == "active"  # Tier 1 authority untouched
     assert states["scalar:ecs"] != "active"  # the Tier 3 value did not overwrite it
+
+
+async def test_later_lower_authority_does_not_overwrite(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    group = f"p:d-{uuid7().hex[:12]}"
+    source_a, art_a, va, _ = await _bootstrap(sessionmaker, group, external_id="A")
+    source_b, art_b, vb, _ = await _bootstrap_second_artifact(sessionmaker, group)
+    subject = await _subject(sessionmaker, group)
+    earlier = utc_now() - timedelta(days=1)
+    later = utc_now()
+    async with _tenant(sessionmaker, group) as s:
+        await _service(s).reconcile(
+            _req(
+                group,
+                art_a,
+                va,
+                source_a,
+                1,
+                [_runs_on(subject, "eks")],
+                valid_from=earlier,
+            )
+        )
+    async with _tenant(sessionmaker, group) as s:
+        await _service(s).reconcile(
+            _req(
+                group,
+                art_b,
+                vb,
+                source_b,
+                2,
+                [_runs_on(subject, "ecs")],
+                valid_from=later,
+            )
+        )
+    states = await _fact_states(sessionmaker, group)
+    assert states["scalar:eks"] == "active"
+    assert states["scalar:ecs"] == "proposed"
 
 
 async def test_equal_authority_contradiction_is_disputed(
@@ -620,22 +720,50 @@ async def test_ttl_freshness_expires_active_fact_and_emits_event(
             facts=SqlAlchemyFactExpiryRepository(session),
             events=SqlAlchemyKnowledgeEventLog(session),
         ).run(at=expires_at + timedelta(seconds=1))
+        repeated = await FactExpiryService(
+            facts=SqlAlchemyFactExpiryRepository(session),
+            events=SqlAlchemyKnowledgeEventLog(session),
+        ).run(at=expires_at + timedelta(seconds=2))
 
     assert report.expired == 1
     assert report.group_ids == (group,)
+    assert repeated.expired == 0
+    assert repeated.group_ids == ()
     async with _tenant(sessionmaker, group) as session:
-        lifecycle = await session.scalar(
-            text("SELECT lifecycle_state FROM facts WHERE group_id = :group"), {"group": group}
-        )
-        event = await session.scalar(
+        lifecycle, valid_to = (
+            await session.execute(
+                text("SELECT lifecycle_state, valid_to FROM facts WHERE group_id = :group"),
+                {"group": group},
+            )
+        ).one()
+        current_revision = (
+            await session.execute(
+                text(
+                    "SELECT valid_to, system_to FROM fact_revisions "
+                    "WHERE group_id = :group AND system_to IS NULL"
+                ),
+                {"group": group},
+            )
+        ).one()
+        open_revisions = await session.scalar(
             text(
-                "SELECT event_type FROM knowledge_events WHERE group_id = :group "
-                "ORDER BY occurred_at DESC LIMIT 1"
+                "SELECT count(*) FROM fact_revisions WHERE group_id = :group AND system_to IS NULL"
+            ),
+            {"group": group},
+        )
+        event_count = await session.scalar(
+            text(
+                "SELECT count(*) FROM knowledge_events WHERE group_id = :group "
+                "AND event_type = 'FACT_EXPIRED'"
             ),
             {"group": group},
         )
     assert lifecycle == "expired"
-    assert event == "FACT_EXPIRED"
+    assert valid_to == expires_at
+    assert current_revision.valid_to == expires_at
+    assert current_revision.system_to is None
+    assert open_revisions == 1
+    assert event_count == 1
 
 
 async def test_community_fact_lineage_is_scope_safe_and_paginated(

@@ -20,13 +20,17 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from typing import Any
 from uuid import UUID
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from vera.adapters.persistence.repositories import SqlAlchemyKnowledgeEventLog
+from vera.domain.knowledge.fabric import KnowledgeEvent, KnowledgeEventType
 from vera.domain.ports.memory_engine import MemoryEngine
 from vera.domain.ports.object_store import ObjectStore
+from vera.domain.ports.projection import FactProjection
 from vera.observability import get_logger
 from vera.shared.errors import DomainError, Err, NotFound, Ok, Result
 from vera.shared.ids import uuid7
@@ -49,6 +53,41 @@ _S3_KEYS = text(
 )
 _ARTIFACT_VERSION_IDS = text(
     "SELECT DISTINCT artifact_version_id FROM candidate_claims WHERE group_id = :g AND id = :cid"
+)
+_AFFECTED_ASSERTIONS_BY_RUN = text(
+    "SELECT a.id, a.fact_id, a.artifact_id, f.fact_key FROM assertions a "
+    "JOIN facts f ON f.id=a.fact_id AND f.group_id=a.group_id "
+    # Both the live-ingest (episode:) and the migration backfill (backfill:) run keys, so a
+    # backfilled group's assertions are withdrawn too. The projection matches both keys
+    # (repositories/projection.py), so retraction must as well or the fact stays projected.
+    "WHERE a.group_id=:g AND a.run_key IN (:run_key_episode, :run_key_backfill) "
+    "AND a.state='active'"
+)
+_AFFECTED_ASSERTIONS_BY_VERSION = text(
+    "SELECT a.id, a.fact_id, a.artifact_id, f.fact_key FROM assertions a "
+    "JOIN facts f ON f.id=a.fact_id AND f.group_id=a.group_id "
+    "WHERE a.group_id=:g AND a.artifact_version_id = ANY(CAST(:version_ids AS uuid[])) "
+    "AND a.state='active'"
+)
+_WITHDRAW_ASSERTIONS = text(
+    "UPDATE assertions SET state='withdrawn', withdrawn_at=:now, "
+    "valid_to=COALESCE(valid_to, :now) WHERE group_id=:g "
+    "AND id = ANY(CAST(:assertion_ids AS uuid[])) AND state='active'"
+)
+_RECOMPUTE_SUPPORTED_FACTS = text(
+    "WITH support AS (SELECT fact_id, max(source_authority) AS authority, "
+    "max(extractor_confidence) AS confidence FROM assertions WHERE group_id=:g "
+    "AND fact_id = ANY(CAST(:fact_ids AS uuid[])) AND state='active' "
+    "AND polarity='supports' GROUP BY fact_id) UPDATE facts f SET authority=s.authority, "
+    "confidence=s.confidence, updated_at=:now FROM support s "
+    "WHERE f.group_id=:g AND f.id=s.fact_id"
+)
+_RETRACT_UNSUPPORTED_FACTS = text(
+    "UPDATE facts f SET lifecycle_state='retracted', valid_to=COALESCE(f.valid_to, :now), "
+    "updated_at=:now WHERE f.group_id=:g AND f.id = ANY(CAST(:fact_ids AS uuid[])) "
+    "AND NOT EXISTS (SELECT 1 FROM assertions a WHERE a.group_id=f.group_id "
+    "AND a.fact_id=f.id AND a.state='active' AND a.polarity='supports') "
+    "RETURNING f.id, f.fact_key"
 )
 _ERASE_RETRIEVAL_INPUTS = text(
     "SELECT erase_artifact_retrieval_inputs(:g, CAST(:version_ids AS uuid[]))"
@@ -74,6 +113,16 @@ _ENQUEUE_CLEANUP = text(
     "RETURNING id"
 )
 _MARK_JOB_DONE = text("UPDATE ingestion_jobs SET status = 'done', last_error = NULL WHERE id = :id")
+_GROUP_LOCK = text("SELECT pg_advisory_xact_lock(hashtextextended(:g, 0))")
+_CANCEL_SOURCE_JOBS = text(
+    "UPDATE ingestion_jobs SET status='done', last_error='cancelled: source retracted', "
+    "locked_until=NULL WHERE group_id=:g AND source_id=:s AND status IN ('pending','inflight') "
+    "AND COALESCE(payload->>'job_kind', '') NOT IN ('project_facts', 'retract_cleanup')"
+)
+_ENQUEUE_PROJECTION = text(
+    "INSERT INTO ingestion_jobs (group_id, source_id, dedup_uuid, payload) "
+    "VALUES (:g, :s, :dedup, CAST(:payload AS jsonb))"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,10 +147,12 @@ class RetractionService:
         session_factory: async_sessionmaker[AsyncSession],
         memory: MemoryEngine,
         object_store: ObjectStore | None = None,
+        fact_projection: FactProjection | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._memory = memory
         self._object_store = object_store
+        self._fact_projection = fact_projection
 
     async def retract_source(
         self,
@@ -115,21 +166,24 @@ class RetractionService:
         # Trusted read/write with an explicit group filter (same pattern as the read model),
         # so retraction works across the control-plane tables without an RLS tenant switch.
         async with self._session_factory() as session, session.begin():
+            await session.execute(_GROUP_LOCK, {"g": group_id})
+            await session.execute(
+                text("SELECT set_config('vera.group_id', :group_id, true)"),
+                {"group_id": group_id},
+            )
             episode_id = await session.scalar(_FIND, {"g": group_id, "s": source_id})
-            if episode_id is None:
-                return Err(NotFound(f"published source {source_id} not found in {group_id}"))
-            edge_uuids = [
-                str(r)
-                for (r,) in (await session.execute(_EDGES, {"g": group_id, "eid": episode_id}))
-            ]
+            edge_uuids = (
+                [
+                    str(r)
+                    for (r,) in (await session.execute(_EDGES, {"g": group_id, "eid": episode_id}))
+                ]
+                if episode_id is not None
+                else []
+            )
             s3_keys: list[str] = []
             artifact_version_ids: list[UUID] = []
             claim_id = _claim_id(source_id)
-            if erase_artifact and claim_id is not None:
-                s3_keys = [
-                    str(r)
-                    for (r,) in (await session.execute(_S3_KEYS, {"g": group_id, "cid": claim_id}))
-                ]
+            if claim_id is not None:
                 artifact_version_ids = [
                     r
                     for (r,) in (
@@ -138,21 +192,105 @@ class RetractionService:
                         )
                     )
                 ]
-            if artifact_version_ids:
+            if episode_id is None and not artifact_version_ids:
+                return Err(NotFound(f"published source {source_id} not found in {group_id}"))
+            if erase_artifact and claim_id is not None:
+                s3_keys = [
+                    str(r)
+                    for (r,) in (await session.execute(_S3_KEYS, {"g": group_id, "cid": claim_id}))
+                ]
+            # Always match by run key (episode: and backfill:); on erase also match by artifact
+            # version, then union, so both live and backfilled assertions are caught even when a
+            # backfilled legacy assertion has a NULL artifact_version_id.
+            affected_by_id: dict[UUID, dict[str, Any]] = {}
+            for row in (
                 await session.execute(
-                    text("SELECT set_config('vera.group_id', :group_id, true)"),
-                    {"group_id": group_id},
+                    _AFFECTED_ASSERTIONS_BY_RUN,
+                    {
+                        "g": group_id,
+                        "run_key_episode": f"episode:{source_id}",
+                        "run_key_backfill": f"backfill:{source_id}",
+                    },
                 )
+            ).mappings():
+                affected_by_id[row["id"]] = dict(row)
+            if erase_artifact and artifact_version_ids:
+                for row in (
+                    await session.execute(
+                        _AFFECTED_ASSERTIONS_BY_VERSION,
+                        {"g": group_id, "version_ids": artifact_version_ids},
+                    )
+                ).mappings():
+                    affected_by_id[row["id"]] = dict(row)
+            affected_assertions = list(affected_by_id.values())
+            assertion_ids = [row["id"] for row in affected_assertions]
+            affected_fact_ids = list({row["fact_id"] for row in affected_assertions})
+            retracted_fact_keys: list[str] = []
+            events = SqlAlchemyKnowledgeEventLog(session)
+            if assertion_ids:
+                await session.execute(
+                    _WITHDRAW_ASSERTIONS,
+                    {"g": group_id, "assertion_ids": assertion_ids, "now": now},
+                )
+                for row in affected_assertions:
+                    await events.append(
+                        KnowledgeEvent(
+                            id=uuid7(),
+                            group_id=group_id,
+                            event_type=KnowledgeEventType.ASSERTION_WITHDRAWN,
+                            occurred_at=now,
+                            actor=str(actor_principal_id) if actor_principal_id else None,
+                            source_id=source_id,
+                            fact_id=row["fact_id"],
+                            assertion_id=row["id"],
+                            artifact_id=row["artifact_id"],
+                            previous_state={"state": "active"},
+                            next_state={"state": "withdrawn"},
+                            reason="source retracted",
+                        )
+                    )
+            if affected_fact_ids:
+                await session.execute(
+                    _RECOMPUTE_SUPPORTED_FACTS,
+                    {"g": group_id, "fact_ids": affected_fact_ids, "now": now},
+                )
+                retracted_facts = list(
+                    (
+                        await session.execute(
+                            _RETRACT_UNSUPPORTED_FACTS,
+                            {"g": group_id, "fact_ids": affected_fact_ids, "now": now},
+                        )
+                    ).mappings()
+                )
+                retracted_fact_keys = [str(row["fact_key"]) for row in retracted_facts]
+                for row in retracted_facts:
+                    await events.append(
+                        KnowledgeEvent(
+                            id=uuid7(),
+                            group_id=group_id,
+                            event_type=KnowledgeEventType.FACT_RETRACTED,
+                            occurred_at=now,
+                            actor=str(actor_principal_id) if actor_principal_id else None,
+                            source_id=source_id,
+                            fact_id=row["id"],
+                            previous_state={"lifecycle_state": "active"},
+                            next_state={"lifecycle_state": "retracted"},
+                            reason="final supporting assertion withdrawn",
+                        )
+                    )
+            if erase_artifact and artifact_version_ids:
                 await session.execute(
                     _ERASE_RETRIEVAL_INPUTS,
                     {"g": group_id, "version_ids": artifact_version_ids},
                 )
-            await session.execute(_DELETE_EDGES, {"g": group_id, "eid": episode_id})
-            await session.execute(_DELETE_NODES, {"g": group_id, "eid": episode_id})
-            if erase_artifact:
-                await session.execute(_DELETE_EPISODE, {"eid": episode_id})
-            else:
-                await session.execute(_MARK, {"now": now, "eid": episode_id})
+            if episode_id is not None:
+                await session.execute(_DELETE_EDGES, {"g": group_id, "eid": episode_id})
+                await session.execute(_DELETE_NODES, {"g": group_id, "eid": episode_id})
+                if erase_artifact:
+                    await session.execute(_DELETE_EPISODE, {"eid": episode_id})
+                else:
+                    await session.execute(_MARK, {"now": now, "eid": episode_id})
+            await session.execute(_CANCEL_SOURCE_JOBS, {"g": group_id, "s": source_id})
             await session.execute(
                 _AUDIT,
                 {
@@ -183,6 +321,16 @@ class RetractionService:
                         "delay": _CLEANUP_SAFETY_DELAY_S,
                     },
                 )
+            if affected_assertions:
+                await session.execute(
+                    _ENQUEUE_PROJECTION,
+                    {
+                        "g": group_id,
+                        "s": source_id,
+                        "dedup": uuid7(),
+                        "payload": json.dumps({"job_kind": "project_facts", "group_id": group_id}),
+                    },
+                )
 
         # Postgres committed. Clean the projection and (for erasure) the object store now; on
         # any failure the queued job guarantees the same cleanup runs later, so the operation
@@ -190,6 +338,9 @@ class RetractionService:
         cleaned = True
         try:
             await self._memory.retract_episode(group_id=group_id, edge_uuids=edge_uuids)
+            if self._fact_projection is not None:
+                for fact_key in retracted_fact_keys:
+                    await self._fact_projection.remove(group_id=group_id, fact_key=fact_key)
             if erase_artifact and self._object_store is not None:
                 for key in s3_keys:
                     await self._object_store.delete(key=key)
@@ -217,6 +368,8 @@ class RetractionService:
         )
         return Ok(
             RetractionResult(
-                source_id=source_id, edges_removed=len(edge_uuids), erased=erase_artifact
+                source_id=source_id,
+                edges_removed=len(edge_uuids) + len(retracted_fact_keys),
+                erased=erase_artifact,
             )
         )

@@ -135,7 +135,7 @@ class RerankSettings(BaseModel):
     w_recency: float = 0.12
     w_feedback: float = 0.08
     w_confidence: float = 0.10
-    recency_half_life_days: float = 30.0
+    recency_half_life_days: float = Field(default=30.0, gt=0.0)
     # Calibration applies (persists) new weights only with at least this many labeled
     # feedback samples, so a handful of votes cannot swing ranking.
     min_calibration_samples: int = 20
@@ -144,6 +144,9 @@ class RerankSettings(BaseModel):
     cross_encoder_enabled: bool = False
     cross_encoder_weight: float = 0.5
     cross_encoder_top_n: int = 20
+    # Semantic fact retrieval fails closed below this relevance score, preserving abstention
+    # when dense nearest-neighbor search has no genuinely relevant fact.
+    cross_encoder_min_score: float = Field(default=0.35, ge=0.0, le=1.0)
     # Which reranker backs stage 3: "llm" (an LLM scores relevance) or "voyage" (a
     # purpose-built reranker, cheaper and faster). Needs the matching provider's key.
     cross_encoder_provider: Literal["llm", "voyage"] = "llm"

@@ -1,0 +1,105 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vera.local/evals/schemas/drift-artifact.schema.json",
+  "title": "VERA weekly drift inspection artifact",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "artifact_id",
+    "window",
+    "input_fixture",
+    "search_trend",
+    "feedback",
+    "quality_panel",
+    "human_label",
+    "thresholds"
+  ],
+  "properties": {
+    "schema_version": {"type": "string", "const": "1.0"},
+    "artifact_id": {"type": "string", "minLength": 1},
+    "window": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["started_at", "ended_at"],
+      "properties": {
+        "started_at": {"type": "string", "format": "date-time"},
+        "ended_at": {"type": "string", "format": "date-time"}
+      }
+    },
+    "input_fixture": {"$ref": "#/$defs/file_binding"},
+    "search_trend": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["baseline", "current"],
+      "properties": {
+        "baseline": {"$ref": "#/$defs/search_snapshot"},
+        "current": {"$ref": "#/$defs/search_snapshot"}
+      }
+    },
+    "feedback": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["downvote_sample_size", "disposition", "replacement_label_count"],
+      "properties": {
+        "downvote_sample_size": {"type": "integer", "minimum": 0},
+        "disposition": {
+          "type": "string",
+          "enum": ["accepted", "investigated", "converted_to_labeled_scenario"]
+        },
+        "replacement_label_count": {"type": "integer", "minimum": 0}
+      }
+    },
+    "quality_panel": {"$ref": "#/$defs/file_binding"},
+    "human_label": {"$ref": "#/$defs/file_binding"},
+    "thresholds": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "max_no_hit_delta",
+        "search_p95_slo_ms",
+        "max_search_p95_delta_ms",
+        "minimum_panel_judges"
+      ],
+      "properties": {
+        "max_no_hit_delta": {"type": "number", "minimum": 0, "maximum": 1},
+        "search_p95_slo_ms": {"type": "number", "exclusiveMinimum": 0},
+        "max_search_p95_delta_ms": {"type": "number", "minimum": 0},
+        "minimum_panel_judges": {"type": "integer", "minimum": 1}
+      }
+    }
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "file_binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ref", "sha256"],
+      "properties": {
+        "ref": {"type": "string", "minLength": 1},
+        "sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "metric": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["value", "sample_size"],
+      "properties": {
+        "value": {"type": "number"},
+        "sample_size": {"type": "integer", "minimum": 1}
+      }
+    },
+    "search_snapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["run_id", "report_sha256", "metric_evidence", "hit_at_5", "p95_ms"],
+      "properties": {
+        "run_id": {"type": "string", "minLength": 1},
+        "report_sha256": {"$ref": "#/$defs/sha256"},
+        "metric_evidence": {"$ref": "#/$defs/file_binding"},
+        "hit_at_5": {"$ref": "#/$defs/metric"},
+        "p95_ms": {"$ref": "#/$defs/metric"}
+      }
+    }
+  }
+}

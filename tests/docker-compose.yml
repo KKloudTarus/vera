@@ -1,0 +1,86 @@
+name: vera-test
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg18@sha256:2ba9ca5f2e7daa0f0e7723cba1ee9167bab54efd3640516a44ac1a928dd67e7a
+    environment:
+      POSTGRES_USER: vera
+      POSTGRES_PASSWORD: vera
+      POSTGRES_DB: vera
+    tmpfs:
+      - /var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U vera"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  neo4j:
+    image: neo4j:5.26@sha256:037cf5756f0135cbfd66b739b6df7c7c4bb100f9ce11602f6f9538e17e02c74d
+    environment:
+      NEO4J_AUTH: neo4j/vera-local-pass
+      NEO4J_PLUGINS: '["apoc"]'
+    tmpfs:
+      - /data
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:7474 >/dev/null || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  valkey:
+    image: valkey/valkey:8@sha256:f0ba225266310efba5fb33383e21c64fbd07907304224786c780606e7ebd7327
+    command: ["valkey-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  falkordb:
+    image: falkordb/falkordb@sha256:adbddd418916c25618564ff8597a919b08bc76452ebeb74eb985c38d7281df62
+    tmpfs:
+      - /data
+
+  minio:
+    image: minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
+    command: server /data
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    tmpfs:
+      - /data
+
+  test:
+    build:
+      context: ..
+      dockerfile: tests/Dockerfile
+    working_dir: /workspace
+    environment:
+      VERA_DB__DSN: postgresql+asyncpg://vera:vera@postgres:5432/vera
+      VERA_ENVIRONMENT: local
+      VERA_LOG_JSON: "false"
+      VERA_NEO4J__URI: bolt://neo4j:7687
+      VERA_NEO4J__USER: neo4j
+      VERA_NEO4J__PASSWORD: vera-local-pass
+      VERA_FALKOR__HOST: falkordb
+      VERA_FALKOR__PORT: "6379"
+      VERA_RESILIENCE__VALKEY_URL: redis://valkey:6379/0
+      VERA_OBJECTSTORE__ENDPOINT_URL: http://minio:9000
+      VERA_OBJECTSTORE__ACCESS_KEY: minioadmin
+      VERA_OBJECTSTORE__SECRET_KEY: minioadmin
+      PYTHONPATH: /workspace/src
+      PYTHONDONTWRITEBYTECODE: "1"
+      RUFF_CACHE_DIR: /tmp/ruff-cache
+      XDG_CACHE_HOME: /tmp/cache
+    depends_on:
+      postgres:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
+      valkey:
+        condition: service_healthy
+      falkordb:
+        condition: service_started
+      minio:
+        condition: service_started

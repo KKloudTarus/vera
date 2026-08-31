@@ -1,0 +1,29 @@
+{
+  "schema_version": "1.0",
+  "dataset_id": "vera-load-seed-v1",
+  "generator": {
+    "version": "1.1",
+    "file": "evals/generate_load_fixture.py",
+    "canonical_format": "UTF-8 JSONL; sorted object keys; compact separators; LF after every record",
+    "corpus_sha256": "a281d5c4630dc143bc89f938bfdb93f74c175c300d45a83742761f1aff2fb38d",
+    "seed": 20260828,
+    "scope_count": 20,
+    "facts_per_scope": 200,
+    "predicate_distribution": {"RUNS_ON": 0.2, "DEPENDS_ON": 0.4, "OWNS": 0.2, "DEPLOYED_TO": 0.2},
+    "query_count": 200,
+    "negative_query_fraction": 0.1
+  },
+  "search_matrix": {
+    "entrypoints": ["http", "mcp"],
+    "cache_states": ["cold", "warm"],
+    "scope_counts": [1, 5, 20],
+    "result_limits": [5, 10, 50],
+    "virtual_users": [1, 20],
+    "duration_s": 120
+  },
+  "ingestion_matrix": {
+    "record_counts": [100, 500],
+    "claims_per_record": 2,
+    "concurrency": [1, 8]
+  }
+}

@@ -138,7 +138,12 @@ async def retract_source(
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN, detail="retraction requires an admin role"
         )
-    service = RetractionService(container.sessionmaker, container.memory, container.object_store)
+    service = RetractionService(
+        container.sessionmaker,
+        container.memory,
+        container.object_store,
+        container.fact_projection,
+    )
     result = await service.retract_source(
         group_id=group_id,
         source_id=source_id,

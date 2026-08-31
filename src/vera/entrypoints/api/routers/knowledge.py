@@ -41,6 +41,7 @@ class SearchRequest(BaseModel):
     project: str | None = None
     limit: int = Field(default=10, ge=1, le=50)
     as_of: AwareDatetime | None = None
+    known_as_of: AwareDatetime | None = None
 
 
 class ProposeRequest(BaseModel):
@@ -85,7 +86,12 @@ async def search(
 ) -> dict[str, Any]:
     try:
         return await service.search(
-            principal.id, query=req.query, project=req.project, limit=req.limit, as_of=req.as_of
+            principal.id,
+            query=req.query,
+            project=req.project,
+            limit=req.limit,
+            as_of=req.as_of,
+            known_as_of=req.known_as_of,
         )
     except ScopeError as exc:
         raise _forbidden(exc) from exc

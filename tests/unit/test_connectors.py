@@ -18,8 +18,10 @@ from vera.adapters.connectors.jira import JiraConnector
 from vera.adapters.connectors.pdf import PdfConnector
 from vera.adapters.connectors.registry import build_connector
 from vera.adapters.connectors.slack import SlackConnector
-from vera.application.connectors import SyncRegistration, SyncScheduler
-from vera.domain.ports.connectors import SyncOutcome
+from vera.adapters.curation.extractor import StructuredClaimExtractor
+from vera.application.connectors import SyncRegistration, SyncRunner, SyncScheduler
+from vera.application.connectors.service import SyncRecordRejected
+from vera.domain.ports.connectors import ConnectorBatch, ConnectorRecord, SyncOutcome
 from vera.shared.errors import VeraError
 from vera.shared.ids import uuid7
 from vera.shared.types import JsonDict
@@ -232,11 +234,34 @@ async def test_scheduler_isolates_a_failed_connector() -> None:
                 raise RuntimeError("broken source")
             return SyncOutcome(processed=1, unchanged=0, cursor={})
 
+    class _Sources:
+        async def claim_sync_lease(self, **_kwargs):
+            return True
+
+        async def renew_sync_lease(self, **_kwargs):
+            return True
+
+        async def release_sync_lease(self, **_kwargs):
+            return True
+
+    class _Uow:
+        sources = _Sources()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def commit(self):
+            return None
+
     runner = _Runner()
     connector = FilesystemConnector(".")
     scheduler = SyncScheduler(
         runner=runner,  # type: ignore[arg-type]
         state=_State(),  # type: ignore[arg-type]
+        uow_factory=lambda: _Uow(),  # type: ignore[arg-type,return-value]
         registrations=[
             SyncRegistration(
                 source_id=source_id,
@@ -253,6 +278,95 @@ async def test_scheduler_isolates_a_failed_connector() -> None:
     assert runner.calls == 2
     assert len(outcomes) == 1
     assert outcomes[0].processed == 1
+
+
+@pytest.mark.asyncio
+async def test_sync_rejection_rolls_back_and_keeps_the_page_cursor_retryable() -> None:
+    source_id = uuid7()
+    uows: list[object] = []
+
+    class _Sources:
+        async def get(self, _source_id):
+            return None
+
+    class _Uow:
+        def __init__(self) -> None:
+            self.sources = _Sources()
+            self.commits = 0
+            self.rollbacks = 0
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, *_args):
+            if exc_type is not None:
+                await self.rollback()
+
+        async def use_tenant(self, _group_id):
+            return None
+
+        async def commit(self):
+            self.commits += 1
+
+        async def rollback(self):
+            self.rollbacks += 1
+
+    class _State:
+        def __init__(self) -> None:
+            self.saved: list[JsonDict] = []
+            self.failed = False
+            self.finished = False
+
+        async def get_cursor(self, _source_id):
+            return {"after": "previous-page"}
+
+        async def save_cursor(self, _source_id, cursor):
+            self.saved.append(cursor)
+
+        async def start_job(self, _source_id):
+            return uuid7()
+
+        async def finish_job(self, _job_id, **_kwargs):
+            self.finished = True
+
+        async def fail_job(self, _job_id, **_kwargs):
+            self.failed = True
+
+    class _Connector:
+        kind = "fake"
+
+        async def fetch_changes(self, cursor):
+            assert cursor == {"after": "previous-page"}
+            return ConnectorBatch(
+                records=(
+                    ConnectorRecord(external_id="rejected", body="first"),
+                    ConnectorRecord(external_id="must-not-run", body="second"),
+                ),
+                next_cursor={"after": "rejected-page"},
+            )
+
+    def _uow_factory():
+        uow = _Uow()
+        uows.append(uow)
+        return uow
+
+    state = _State()
+    runner = SyncRunner(
+        uow_factory=_uow_factory,  # type: ignore[arg-type]
+        extractor=StructuredClaimExtractor(),
+        state=state,  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(SyncRecordRejected, match="record rejected rejected"):
+        await runner.sync(source_id=source_id, group_id="p:test", connector=_Connector())
+
+    uow = uows[0]
+    assert isinstance(uow, _Uow)
+    assert uow.commits == 0
+    assert uow.rollbacks == 1
+    assert state.saved == []
+    assert state.failed is True
+    assert state.finished is False
 
 
 @pytest.mark.asyncio

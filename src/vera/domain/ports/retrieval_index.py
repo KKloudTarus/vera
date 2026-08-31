@@ -30,6 +30,18 @@ class RetrievalFilters:
 
 
 @dataclass(frozen=True, slots=True)
+class ContentAvailability:
+    passages: bool
+    code: bool
+
+
+class ContentAvailabilitySource(Protocol):
+    async def get(
+        self, *, group_id: str, snapshot_id: str | None = None
+    ) -> ContentAvailability: ...
+
+
+@dataclass(frozen=True, slots=True)
 class PassageHit:
     chunk_id: str
     artifact_version_id: str
@@ -75,6 +87,27 @@ class FactHit:
     evidence_citation_uri: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class FactCandidateSets:
+    lexical: tuple[FactHit, ...]
+    semantic: tuple[FactHit, ...]
+
+
+class FactCandidateBatchSource(Protocol):
+    async def search(
+        self,
+        *,
+        group_id: str,
+        query: str,
+        limit: int,
+        as_of: datetime | None = None,
+        known_as_of: datetime | None = None,
+        restrict_fact_ids: set[str] | None = None,
+        snapshot_id: str | None = None,
+        filters: RetrievalFilters | None = None,
+    ) -> FactCandidateSets: ...
+
+
 class PassageIndex(Protocol):
     async def search(
         self,
@@ -113,13 +146,30 @@ class FactCandidateSource(Protocol):
         query: str,
         limit: int,
         as_of: datetime | None = None,
+        known_as_of: datetime | None = None,
         restrict_fact_ids: set[str] | None = None,
         snapshot_id: str | None = None,
         filters: RetrievalFilters | None = None,
     ) -> list[FactHit]:
         """Search active facts, or, when ``restrict_fact_ids`` is given (a snapshot's frozen
         membership), only those facts regardless of their current lifecycle, for reproducible
-        snapshot retrieval. ``snapshot_id`` reads the fact, source, and citation values frozen
-        by that snapshot rather than mutable live rows.
+        snapshot retrieval. ``known_as_of`` independently bounds transaction time; when omitted,
+        the current transaction-time view is used. ``snapshot_id`` reads the fact, source, and
+        citation values frozen by that snapshot rather than mutable live rows.
         """
         ...
+
+
+class FactCandidateHydrator(Protocol):
+    async def hydrate(
+        self,
+        *,
+        group_id: str,
+        matches: list[tuple[str, float]],
+        limit: int,
+        as_of: datetime | None = None,
+        known_as_of: datetime | None = None,
+        restrict_fact_ids: set[str] | None = None,
+        snapshot_id: str | None = None,
+        filters: RetrievalFilters | None = None,
+    ) -> list[FactHit]: ...

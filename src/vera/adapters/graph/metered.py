@@ -1,9 +1,8 @@
 """Metering wrappers around Graphiti's embedder and LLM clients.
 
-Each wrapper delegates to the inner client, then records a usage event tagged with the
-current request context (set by the worker for ingest, by the search handler for a
-query). Wrap the embedder INSIDE the cache so only real provider calls are metered:
-a cache hit costs nothing and must not be counted.
+Each wrapper delegates to the inner client, then records a usage event tagged with
+the current request context. Wrap the embedder inside the cache so only real provider
+calls are metered. A cache hit costs nothing and must not be counted.
 
 Token counts come from the provider when it reports them; the offline embedder does
 not, so its usage is estimated from text length. Estimated or exact, the event still
@@ -13,8 +12,9 @@ episode and per query queryable.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterable
-from typing import Any
+from typing import Any, cast
 
 from graphiti_core.embedder.client import EmbedderClient
 from graphiti_core.llm_client.client import LLMClient
@@ -67,7 +67,14 @@ def build_metered_llm_client(
 ) -> LLMClient:
     """Build a resilient, metered Graphiti client for OpenAI or a compatible endpoint."""
     if config.base_url:
-        from graphiti_core.llm_client.openai_generic_client import OpenAIGenericClient
+        import openai
+        from graphiti_core.llm_client.errors import EmptyResponseError, RateLimitError
+        from graphiti_core.llm_client.openai_generic_client import (
+            DEFAULT_MODEL,
+            OpenAIGenericClient,
+        )
+        from openai.types.chat import ChatCompletionMessageParam
+        from openai.types.shared_params import ResponseFormatJSONObject
 
         class _MeteredOpenAIGenericClient(OpenAIGenericClient):
             async def _generate_response(
@@ -77,23 +84,53 @@ def build_metered_llm_client(
                 max_tokens: int = 16384,
                 model_size: Any = None,
             ) -> dict[str, Any]:
-                async def _raw() -> dict[str, Any]:
-                    return await OpenAIGenericClient._generate_response(
-                        self, messages, response_model, max_tokens, model_size
-                    )
+                async def _raw() -> tuple[dict[str, Any], int, int]:
+                    openai_messages: list[ChatCompletionMessageParam] = []
+                    for message in messages:
+                        message.content = self._clean_input(message.content)
+                        if message.role in {"user", "system"}:
+                            openai_messages.append(
+                                cast(
+                                    "ChatCompletionMessageParam",
+                                    {"role": message.role, "content": message.content},
+                                )
+                            )
+                    try:
+                        provider_response = await self.client.chat.completions.create(
+                            model=self.model or DEFAULT_MODEL,
+                            messages=openai_messages,
+                            temperature=self.temperature,
+                            max_tokens=max_tokens,
+                            response_format=cast(
+                                "ResponseFormatJSONObject",
+                                self._build_response_format(response_model),
+                            ),
+                        )
+                        content = provider_response.choices[0].message.content or ""
+                        if not content:
+                            raise EmptyResponseError("LLM returned an empty response")
+                        usage = provider_response.usage
+                        if usage is None:
+                            raise RuntimeError("OpenAI-compatible response omitted token usage")
+                        parsed = json.loads(self._strip_code_fences(content))
+                        return parsed, int(usage.prompt_tokens), int(usage.completion_tokens)
+                    except openai.RateLimitError as exc:
+                        raise RateLimitError from exc
 
                 prompt_estimate = sum(
                     estimate_tokens(str(getattr(m, "content", "") or "")) for m in messages
                 )
                 if policy is not None:
-                    response = await policy.call(_raw, tokens=prompt_estimate)
+                    response, prompt_tokens, completion_tokens = await policy.call(
+                        _raw, tokens=prompt_estimate
+                    )
                 else:
-                    response = await _raw()
+                    response, prompt_tokens, completion_tokens = await _raw()
                 event = build_usage_event(
                     model=llm_model,
                     operation="llm",
-                    prompt_tokens=prompt_estimate,
-                    completion_tokens=estimate_tokens(str(response)),
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
                 )
                 await emit_usage(sink, event)
                 return response

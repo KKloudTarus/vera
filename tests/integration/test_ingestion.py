@@ -5,15 +5,19 @@ per-group serialization with cross-group parallelism. Runs against the live data
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import time
 from collections.abc import Callable, Sequence
+from datetime import UTC, datetime
 
 import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from vera.adapters.persistence.models.knowledge import PublishedEpisodeRow
 from vera.bootstrap import Container
 from vera.domain.ports.memory_engine import EpisodeSpec, GraphHit, IngestReceipt
+from vera.entrypoints.reprocess import rebuild_group
 from vera.entrypoints.worker.lane_pool import LanePool
 from vera.entrypoints.worker.main import run_until_empty
 from vera.shared.ids import deterministic_id, uuid7
@@ -50,6 +54,24 @@ class RecordingMemoryEngine:
         return True
 
 
+class ReferenceRecordingMemoryEngine(RecordingMemoryEngine):
+    def __init__(self, *, failures: int = 0) -> None:
+        super().__init__(delay_s=0)
+        self.failures = failures
+        self.episodes: list[EpisodeSpec] = []
+        self.cleared_groups: list[str] = []
+
+    async def ingest_episode(self, episode: EpisodeSpec) -> IngestReceipt:
+        self.episodes.append(episode)
+        if self.failures:
+            self.failures -= 1
+            raise RuntimeError("graph provider unavailable")
+        return IngestReceipt(episode_uuid=deterministic_id(str(episode.source_id)).hex)
+
+    async def clear_group(self, group_id: str) -> None:
+        self.cleared_groups.append(group_id)
+
+
 async def _enqueue(container: Container, *, group: str, source: str) -> None:
     await container.queue.enqueue(
         group_id=GroupId(group),
@@ -57,6 +79,43 @@ async def _enqueue(container: Container, *, group: str, source: str) -> None:
         dedup_uuid=deterministic_id(source),
         payload={"body": f"content for {source}"},
     )
+
+
+def _legacy_container(
+    make_container: Callable[[object], Container], memory: ReferenceRecordingMemoryEngine
+) -> Container:
+    container = make_container(memory)
+    settings = container.settings.model_copy(
+        update={
+            "memory": container.settings.memory.model_copy(
+                update={"fabric_enabled": False, "fabric_write_mode": "legacy"}
+            )
+        }
+    )
+    return dataclasses.replace(container, settings=settings)
+
+
+async def _seed_published_episode(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    group: str,
+    source: str,
+    reference_time: datetime,
+) -> None:
+    async with sessionmaker() as session, session.begin():
+        session.add(
+            PublishedEpisodeRow(
+                source_id=source,
+                group_id=group,
+                knowledge_type="text",
+                verification="human_verified",
+                authority=1.0,
+                confidence=1.0,
+                reference_time=reference_time,
+                payload={"body": f"content for {source}"},
+                dedup_uuid=deterministic_id(source),
+            )
+        )
 
 
 async def test_enqueue_is_idempotent(
@@ -166,6 +225,63 @@ async def test_reclaim_stuck_returns_inflight_to_pending(
             text("SELECT status FROM ingestion_jobs WHERE id = :id"), {"id": job.id}
         )
     assert status == "pending"
+
+
+async def test_published_reference_time_is_stable_across_retry(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    make_container: Callable[[object], Container],
+) -> None:
+    memory = ReferenceRecordingMemoryEngine(failures=1)
+    container = _legacy_container(make_container, memory)
+    suffix = uuid7().hex[:12]
+    group = f"p:{suffix}"
+    source = f"cmdb:{suffix}"
+    reference_time = datetime(2024, 5, 6, 7, 8, tzinfo=UTC)
+    await _seed_published_episode(
+        sessionmaker, group=group, source=source, reference_time=reference_time
+    )
+    await _enqueue(container, group=group, source=source)
+
+    pool = LanePool(
+        container,
+        lanes=1,
+        queue_maxsize=2,
+        backoff_base_s=0,
+        backoff_cap_s=0,
+    )
+    pool.start()
+    try:
+        for _ in range(2):
+            jobs = await container.queue.claim(batch_size=1)
+            assert len(jobs) == 1
+            await pool.submit(jobs[0])
+            await pool.join()
+    finally:
+        await pool.stop()
+
+    assert [episode.reference_time for episode in memory.episodes] == [
+        reference_time,
+        reference_time,
+    ]
+
+
+async def test_rebuild_preserves_published_reference_time(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    make_container: Callable[[object], Container],
+) -> None:
+    memory = ReferenceRecordingMemoryEngine()
+    container = _legacy_container(make_container, memory)
+    suffix = uuid7().hex[:12]
+    group = f"p:{suffix}"
+    source = f"cmdb:{suffix}"
+    reference_time = datetime(2023, 2, 3, 4, 5, tzinfo=UTC)
+    await _seed_published_episode(
+        sessionmaker, group=group, source=source, reference_time=reference_time
+    )
+
+    assert await rebuild_group(container, group) == 1
+    assert memory.cleared_groups == [group]
+    assert [episode.reference_time for episode in memory.episodes] == [reference_time]
 
 
 async def test_lane_pool_serializes_per_group_and_parallelizes_across_groups(

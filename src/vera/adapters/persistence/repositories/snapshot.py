@@ -29,10 +29,11 @@ _INSERT_SNAPSHOT = text(
 _CAPTURE_ACTIVE = text(
     "INSERT INTO snapshot_facts "
     "(snapshot_id, fact_id, group_id, fact_key, subject_name, predicate, object_name, "
-    "normalized_object, object_scalar, authority, confidence, lifecycle_state, valid_from) "
+    "object_type, normalized_object, object_scalar, qualifiers, authority, confidence, "
+    "lifecycle_state, valid_from) "
     "SELECT :sid, f.id, f.group_id, f.fact_key, cs.canonical_name, f.predicate, "
-    "coalesce(co.canonical_name, f.object_scalar, ''), f.normalized_object, f.object_scalar, "
-    "f.authority, f.confidence, "
+    "coalesce(co.canonical_name, f.object_scalar, ''), f.object_type, f.normalized_object, "
+    "f.object_scalar, f.qualifiers, f.authority, f.confidence, "
     "f.lifecycle_state, f.valid_from FROM facts f "
     "JOIN canonical_entities cs ON cs.id = f.subject_entity_id AND cs.group_id = f.group_id "
     "LEFT JOIN canonical_entities co ON co.id = f.object_entity_id AND co.group_id = f.group_id "
@@ -43,10 +44,11 @@ _CAPTURE_ACTIVE = text(
 _CAPTURE_AS_OF = text(
     "INSERT INTO snapshot_facts "
     "(snapshot_id, fact_id, group_id, fact_key, subject_name, predicate, object_name, "
-    "normalized_object, object_scalar, authority, confidence, lifecycle_state, valid_from) "
+    "object_type, normalized_object, object_scalar, qualifiers, authority, confidence, "
+    "lifecycle_state, valid_from) "
     "SELECT :sid, f.id, f.group_id, f.fact_key, cs.canonical_name, f.predicate, "
-    "coalesce(co.canonical_name, f.object_scalar, ''), f.normalized_object, f.object_scalar, "
-    "f.authority, f.confidence, "
+    "coalesce(co.canonical_name, f.object_scalar, ''), f.object_type, f.normalized_object, "
+    "f.object_scalar, f.qualifiers, f.authority, f.confidence, "
     "f.lifecycle_state, f.valid_from FROM facts f "
     "JOIN canonical_entities cs ON cs.id = f.subject_entity_id AND cs.group_id = f.group_id "
     "LEFT JOIN canonical_entities co ON co.id = f.object_entity_id AND co.group_id = f.group_id "
@@ -75,7 +77,10 @@ _CAPTURE_CHUNKS = text(
     "(src.project_id IS NOT NULL AND p.group_id = c.group_id) OR "
     "(src.project_id IS NULL AND (w.group_id = c.group_id OR EXISTS ("
     "SELECT 1 FROM projects wp WHERE wp.workspace_id = src.workspace_id "
-    "AND wp.group_id = c.group_id))))"
+    "AND wp.group_id = c.group_id)))) "
+    "AND av.version = (SELECT max(visible.version) FROM artifact_versions visible "
+    "WHERE visible.artifact_id = av.artifact_id AND visible.observed_at <= :st) "
+    "AND c.created_at <= :st"
 )
 _CAPTURE_SOURCE_CONFIGS = text(
     "INSERT INTO snapshot_sources "
@@ -98,6 +103,18 @@ _CAPTURE_EMBEDDINGS = text(
     "WHERE sc.snapshot_id = :sid AND sc.group_id = CAST(:g AS varchar) "
     "AND ce.provider = :provider AND ce.model = :model "
     "AND ce.model_version = :model_version AND ce.dimension = :dimension AND ce.active"
+)
+_CAPTURE_FACT_EMBEDDINGS = text(
+    "INSERT INTO snapshot_fact_embeddings "
+    "(snapshot_id, fact_id, group_id, provider, model, model_version, dimension, "
+    "embedding, content_hash, created_at) "
+    "SELECT sf.snapshot_id, sf.fact_id, sf.group_id, fe.provider, fe.model, "
+    "fe.model_version, fe.dimension, fe.embedding, fe.content_hash, fe.created_at "
+    "FROM snapshot_facts sf JOIN fact_embeddings fe ON fe.fact_id = sf.fact_id "
+    "AND fe.group_id = sf.group_id "
+    "WHERE sf.snapshot_id = :sid AND sf.group_id = CAST(:g AS varchar) "
+    "AND fe.provider = :provider AND fe.model = :model "
+    "AND fe.model_version = :model_version AND fe.dimension = :dimension AND fe.active"
 )
 _CAPTURE_SOURCES = text(
     "INSERT INTO snapshot_fact_sources "
@@ -255,7 +272,10 @@ class SqlAlchemySnapshotRepository:
             )
         ).one()
         snapshot_id = row.id
-        await session.execute(_CAPTURE_CHUNKS, {"sid": snapshot_id, "g": group_id})
+        await session.execute(
+            _CAPTURE_CHUNKS,
+            {"sid": snapshot_id, "g": group_id, "st": row.frozen_at_system_time},
+        )
         await session.execute(_CAPTURE_SOURCE_CONFIGS, {"sid": snapshot_id, "g": group_id})
         if embedding_version:
             await session.execute(
@@ -274,6 +294,18 @@ class SqlAlchemySnapshotRepository:
             capture,
             {"sid": snapshot_id, "g": group_id, "vt": row.as_of_valid_time},
         )
+        if embedding_version:
+            await session.execute(
+                _CAPTURE_FACT_EMBEDDINGS,
+                {
+                    "sid": snapshot_id,
+                    "g": group_id,
+                    "provider": embedding_version["provider"],
+                    "model": embedding_version["model"],
+                    "model_version": embedding_version["model_version"],
+                    "dimension": embedding_version["dimension"],
+                },
+            )
         await session.execute(
             _CAPTURE_SOURCES,
             {

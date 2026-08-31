@@ -8,12 +8,13 @@ from vera.application.retrieval.context_assembler import (
     ScoredCandidate,
     Signals,
 )
-from vera.application.retrieval.hybrid_index import HybridPassageIndex
+from vera.application.retrieval.hybrid_index import HybridFactCandidateSource, HybridPassageIndex
 
 __all__ = [
     "AssembledContext",
     "Citation",
     "ContextAssembler",
+    "HybridFactCandidateSource",
     "HybridPassageIndex",
     "RetrievalWeights",
     "ScoredCandidate",

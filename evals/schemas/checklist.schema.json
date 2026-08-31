@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vera.local/evals/schemas/checklist.schema.json",
+  "title": "VERA evaluation checklist",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "title", "instructions", "items"],
+  "properties": {
+    "schema_version": {"type": "string", "const": "1.0"},
+    "title": {"type": "string", "minLength": 1},
+    "instructions": {"type": "string", "minLength": 1},
+    "items": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "priority", "layer", "profiles", "question", "evidence", "pass_condition", "scenario_ids"],
+        "properties": {
+          "id": {"type": "string", "pattern": "^[A-Z]+-[0-9]{3}$"},
+          "priority": {"type": "string", "enum": ["P0", "P1", "P2"]},
+          "layer": {
+            "type": "string",
+            "enum": ["L0_OUTCOME", "L1_ANSWER", "L2_RETRIEVAL", "L3_PROJECTION", "L4_TEMPORAL", "L5_CURATION", "L6_INGESTION", "L7_RUNTIME", "CROSS_CUTTING"]
+          },
+          "profiles": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": {"type": "string", "enum": ["daily", "nightly", "weekly", "release"]}
+          },
+          "question": {"type": "string", "minLength": 1},
+          "evidence": {
+            "type": "array",
+            "minItems": 1,
+            "items": {"type": "string", "minLength": 1}
+          },
+          "pass_condition": {"type": "string", "minLength": 1},
+          "scenario_ids": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": {"type": "string", "pattern": "^[A-Z][A-Z0-9]*-[0-9]{3}$"}
+          }
+        }
+      }
+    }
+  }
+}

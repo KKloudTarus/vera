@@ -20,7 +20,7 @@ from vera.adapters.persistence.unit_of_work import SqlAlchemyUnitOfWork
 from vera.application.connectors import SyncRegistration, SyncRunner, SyncScheduler
 from vera.application.curation.reconciliation import FactExpiryService
 from vera.bootstrap import Container, build_container, dispose_container, verify_ontology
-from vera.config.settings import Settings, get_settings
+from vera.config.settings import Settings, active_embedding, get_settings
 from vera.entrypoints.worker.lane_pool import LanePool
 from vera.observability import (
     configure_logging,
@@ -78,6 +78,7 @@ def _build_scheduler(container: Container) -> SyncScheduler | None:
     registrations = build_sync_registrations(container)
     if not registrations:
         return None
+    embedding_model, embedding_dimension = active_embedding(container.settings)
     runner = SyncRunner(
         uow_factory=lambda: SqlAlchemyUnitOfWork(container.sessionmaker),
         extractor=container.extractor,
@@ -86,11 +87,16 @@ def _build_scheduler(container: Container) -> SyncScheduler | None:
         judge=container.judge,
         embedder=(container.embedder if container.settings.memory.vector_search_enabled else None),
         embedding_provider=container.settings.memory.embedder,
-        embedding_model=container.settings.memory.embedding_model,
+        embedding_model=embedding_model,
         embedding_model_version=container.settings.memory.embedding_model_version,
-        embedding_dimension=container.settings.memory.embedding_dim,
+        embedding_dimension=embedding_dimension,
     )
-    return SyncScheduler(runner=runner, state=container.sync_state, registrations=registrations)
+    return SyncScheduler(
+        runner=runner,
+        state=container.sync_state,
+        uow_factory=lambda: SqlAlchemyUnitOfWork(container.sessionmaker),
+        registrations=registrations,
+    )
 
 
 def _build_pool(container: Container, settings: Settings) -> LanePool:

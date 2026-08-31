@@ -7,6 +7,7 @@ queue and fact timeline are readable governance surfaces.
 
 from __future__ import annotations
 
+import dataclasses
 from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from uuid import uuid4
@@ -28,9 +29,17 @@ from vera.domain.identity.models import Role
 from vera.domain.knowledge import fabric
 from vera.domain.knowledge.fabric import Fact, FactLifecycle, ObjectType
 from vera.entrypoints.api.main import create_app
+from vera.entrypoints.worker.lane_pool import LanePool
+from vera.entrypoints.worker.main import run_until_empty
 from vera.shared.ids import uuid7
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
+
+
+class _FactEmbedder:
+    async def embed(self, text: str) -> list[float]:
+        del text
+        return [1.0, 0.0]
 
 
 @asynccontextmanager
@@ -85,10 +94,28 @@ async def _proposed_fact(sessionmaker: async_sessionmaker[AsyncSession], group: 
         return fk
 
 
+@pytest.fixture
+def governance_container(make_container: Callable[[object], Container]) -> Container:
+    container = make_container(NullMemoryEngine())
+    memory = container.settings.memory.model_copy(
+        update={
+            "vector_search_enabled": True,
+            "embedder": "deterministic",
+            "embedding_model": "fact-test",
+            "embedding_dim": 2,
+        }
+    )
+    return dataclasses.replace(
+        container,
+        settings=container.settings.model_copy(update={"memory": memory}),
+        embedder=_FactEmbedder(),
+    )
+
+
 @pytest_asyncio.fixture
-async def app_client(make_container: Callable[[object], Container]) -> AsyncIterator[AsyncClient]:
+async def app_client(governance_container: Container) -> AsyncIterator[AsyncClient]:
     app = create_app()
-    app.state.container = make_container(NullMemoryEngine())
+    app.state.container = governance_container
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         yield client
 
@@ -136,7 +163,9 @@ async def test_retraction_requires_an_admin_role(
 
 
 async def test_promote_and_reject_require_admin_and_review_queue_lists_proposals(
-    sessionmaker: async_sessionmaker[AsyncSession], app_client: AsyncClient
+    sessionmaker: async_sessionmaker[AsyncSession],
+    app_client: AsyncClient,
+    governance_container: Container,
 ) -> None:
     group, admin_key, viewer_key = await _tenancy(sessionmaker)
     fact_key = await _proposed_fact(sessionmaker, group)
@@ -163,7 +192,29 @@ async def test_promote_and_reject_require_admin_and_review_queue_lists_proposals
         state = await s.scalar(
             text("SELECT lifecycle_state FROM facts WHERE fact_key = :fk"), {"fk": fact_key}
         )
+        embedding_jobs = await s.scalar(
+            text(
+                "SELECT count(*) FROM ingestion_jobs WHERE group_id = :g "
+                "AND payload->>'job_kind' = 'embed_facts'"
+            ),
+            {"g": group},
+        )
     assert state == "active"
+    assert embedding_jobs == 1
+
+    pool = LanePool(governance_container, lanes=1, queue_maxsize=8)
+    pool.start()
+    try:
+        await run_until_empty(governance_container, pool, batch_size=10)
+    finally:
+        await pool.stop()
+    async with _tenant(sessionmaker, group) as session:
+        assert (
+            await session.scalar(
+                text("SELECT count(*) FROM fact_embeddings WHERE group_id = :g"), {"g": group}
+            )
+            == 1
+        )
 
     # The promotion is recorded on the fact's timeline.
     timeline = await app_client.get(

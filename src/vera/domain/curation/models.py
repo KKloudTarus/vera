@@ -37,6 +37,22 @@ class ArtifactHead:
 
 
 @dataclass(frozen=True, slots=True)
+class ArtifactVersionRecord:
+    artifact_id: UUID
+    version_id: UUID
+    version: int
+    source_id: UUID
+    external_id: str
+    content_hash: str
+    s3_key: str
+    reference_time: datetime
+    source_revision: int | None = None
+    source_updated_at: datetime | None = None
+    source_version_id: str | None = None
+    observed_at: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class ClaimRecord:
     id: UUID
     group_id: str

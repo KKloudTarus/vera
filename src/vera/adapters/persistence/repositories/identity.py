@@ -193,6 +193,21 @@ class SqlAlchemyIdentityRepository:
         ).scalar_one_or_none()
         return _to_credential(row) if row is not None else None
 
+    async def get_credential_principal_by_prefix(
+        self, key_prefix: str
+    ) -> tuple[Credential, Principal] | None:
+        row = (
+            await self._session.execute(
+                select(CredentialRow, PrincipalRow)
+                .join(PrincipalRow, PrincipalRow.id == CredentialRow.principal_id)
+                .where(CredentialRow.key_prefix == key_prefix)
+            )
+        ).one_or_none()
+        if row is None:
+            return None
+        credential, principal = row
+        return _to_credential(credential), _to_principal(principal)
+
     async def get_credential(self, credential_id: UUID) -> Credential | None:
         row = (
             await self._session.execute(

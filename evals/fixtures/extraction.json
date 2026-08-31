@@ -1,0 +1,14 @@
+{
+  "schema_version": "1.0",
+  "dataset_id": "vera-extraction-seed-v1",
+  "records": [
+    {"record_id": "x1", "body": "Platform Team owns Payment API.", "expected_triples": [{"subject": "Platform Team", "predicate": "OWNS", "object": "Payment API"}]},
+    {"record_id": "x2", "body": "Payment API runs on prod-cluster.", "expected_triples": [{"subject": "Payment API", "predicate": "RUNS_ON", "object": "prod-cluster"}]},
+    {"record_id": "x3", "body": "Checkout Service depends on Inventory API and Tax API.", "expected_triples": [{"subject": "Checkout Service", "predicate": "DEPENDS_ON", "object": "Inventory API"}, {"subject": "Checkout Service", "predicate": "DEPENDS_ON", "object": "Tax API"}]},
+    {"record_id": "x4", "body": "Inventory API is deployed to prod-east.", "expected_triples": [{"subject": "Inventory API", "predicate": "DEPLOYED_TO", "object": "prod-east"}]},
+    {"record_id": "x5", "body": "Payments repository is maintained by Platform Team.", "expected_triples": [{"subject": "Platform Team", "predicate": "OWNS", "object": "payments-repository"}]},
+    {"record_id": "x6", "body": "The payment service, also called paymentapi, runs on prod-cluster.", "expected_triples": [{"subject": "Payment API", "predicate": "RUNS_ON", "object": "prod-cluster"}]},
+    {"record_id": "x7", "body": "Dich vu Checkout phu thuoc vao Inventory API.", "expected_triples": [{"subject": "Checkout Service", "predicate": "DEPENDS_ON", "object": "Inventory API"}]},
+    {"record_id": "x8", "body": "This page contains onboarding prose but no organizational or runtime fact.", "expected_triples": []}
+  ]
+}

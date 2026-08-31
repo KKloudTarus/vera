@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vera.local/evals/judging/schemas/panel-assignment.schema.json",
+  "title": "VERA trusted panel assignment",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "panel_id", "packet_id", "packet_sha256", "issued_by", "created_at", "judges"],
+  "properties": {
+    "schema_version": {"type": "string", "const": "1.0"},
+    "panel_id": {"type": "string", "minLength": 1},
+    "packet_id": {"type": "string", "minLength": 1},
+    "packet_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "issued_by": {"type": "string", "minLength": 1},
+    "created_at": {"type": "string", "format": "date-time"},
+    "judges": {
+      "type": "array",
+      "minItems": 4,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["actor_id", "role", "provider", "model_family", "model_id", "version"],
+        "properties": {
+          "actor_id": {"type": "string", "minLength": 1},
+          "role": {"type": "string", "enum": ["grounding", "task_utility", "adversarial_safety", "synthesis_uncertainty", "generalist", "human"]},
+          "provider": {"type": "string", "minLength": 1},
+          "model_family": {"type": "string", "minLength": 1},
+          "model_id": {"type": "string", "minLength": 1},
+          "version": {"type": "string", "minLength": 1}
+        }
+      }
+    }
+  }
+}

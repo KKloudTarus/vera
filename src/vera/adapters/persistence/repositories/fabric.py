@@ -329,7 +329,14 @@ class SqlAlchemyFactRepository:
         )
         return _to_fact(row) if row is not None else None
 
-    async def set_lifecycle(self, *, group_id: str, fact_id: str, state: FactLifecycle) -> None:
+    async def set_lifecycle(
+        self,
+        *,
+        group_id: str,
+        fact_id: str,
+        state: FactLifecycle,
+        valid_to: datetime | None = None,
+    ) -> None:
         now = utc_now()
         values: dict[str, object] = {"lifecycle_state": state.value, "updated_at": now}
         if state in {
@@ -337,7 +344,7 @@ class SqlAlchemyFactRepository:
             FactLifecycle.RETRACTED,
             FactLifecycle.EXPIRED,
         }:
-            values["valid_to"] = func.coalesce(FactRow.valid_to, now)
+            values["valid_to"] = func.coalesce(FactRow.valid_to, valid_to or now)
         await self._session.execute(
             update(FactRow)
             .where(FactRow.group_id == group_id, FactRow.id == UUID(fact_id))
@@ -383,6 +390,7 @@ class SqlAlchemyFactExpiryRepository:
         )
         for row in rows:
             row.lifecycle_state = FactLifecycle.EXPIRED.value
+            row.valid_to = row.valid_to or row.expires_at
             row.updated_at = at
         await self._session.flush()
         return [_to_fact(row) for row in rows]

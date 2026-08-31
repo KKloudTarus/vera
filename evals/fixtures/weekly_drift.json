@@ -1,0 +1,53 @@
+{
+  "schema_version": "1.0",
+  "artifact_id": "weekly-drift-20260831-v1",
+  "window": {
+    "started_at": "2026-08-30T23:27:47Z",
+    "ended_at": "2026-08-31T04:23:45Z"
+  },
+  "input_fixture": {
+    "ref": "/workspace/evals/fixtures/daily_real_world.json",
+    "sha256": "c06f40217e3cbe1638368d81810203a9b1437bbeb827fd415e5a92fbb61039b0"
+  },
+  "search_trend": {
+    "baseline": {
+      "run_id": "20260830T232746Z-44da8cff-weekly",
+      "report_sha256": "2a49d10e75b88a803ba9ebc8ecb4a344fa2613482c257f2fca11e13e5bf59f43",
+      "metric_evidence": {
+        "ref": "/workspace/evals/fixtures/drift/20260830-search-metrics.json",
+        "sha256": "6be135c023d1b65cbd5ba90a3f954846935ff48be92a55b5d42d4f1239da41cd"
+      },
+      "hit_at_5": {"value": 0.9887005649717514, "sample_size": 1416},
+      "p95_ms": {"value": 495.743, "sample_size": 200}
+    },
+    "current": {
+      "run_id": "20260831T004659Z-44da8cff-weekly",
+      "report_sha256": "f9dace58f559357a7b85912dcd24f0dc5e2fcf08e0bb35ee21d66cf2b2890e12",
+      "metric_evidence": {
+        "ref": "/workspace/evals/fixtures/drift/20260831-search-metrics.json",
+        "sha256": "6a68e43448f63d64b8f272fc27008b4459d934c7f4028ba6ce51568c83574bec"
+      },
+      "hit_at_5": {"value": 0.9872881355932204, "sample_size": 1416},
+      "p95_ms": {"value": 657.171, "sample_size": 200}
+    }
+  },
+  "feedback": {
+    "downvote_sample_size": 0,
+    "disposition": "converted_to_labeled_scenario",
+    "replacement_label_count": 1
+  },
+  "quality_panel": {
+    "ref": "/workspace/evals/fixtures/drift/20260831-real001-panel-result.json",
+    "sha256": "a3fca4640aa0b03f2ac090cdb250a8335e8d808ccd815697787b3f48d6dc2c2c"
+  },
+  "human_label": {
+    "ref": "/workspace/evals/fixtures/drift/20260831-real001-human-label.json",
+    "sha256": "c91b383f167bff7581cf2b42c236426bdc19f29bd6b7362a8f87586b7a373590"
+  },
+  "thresholds": {
+    "max_no_hit_delta": 0.02,
+    "search_p95_slo_ms": 800,
+    "max_search_p95_delta_ms": 200,
+    "minimum_panel_judges": 4
+  }
+}
