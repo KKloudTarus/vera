@@ -246,3 +246,139 @@ async def test_backfill_reextracts_free_text_with_episode_provenance(
             {"g": group},
         )
     assert auth == 0.7  # provenance from the episode, not invented
+
+
+async def test_retract_source_withdraws_backfilled_assertions(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    make_container,
+) -> None:
+    """P0 regression: retraction must match the backfill: run key, not only episode:. A
+    backfilled group's source must retract (assertions withdrawn), not stay active + projected.
+    """
+    from vera.adapters.graph.null import NullMemoryEngine
+    from vera.adapters.persistence.retraction import RetractionService
+    from vera.shared.errors import Ok
+
+    group = f"p:bfret-{uuid7().hex[:12]}"
+    source_id = f"{group}:{uuid7()}"
+    async with _tenant(sessionmaker, group) as s:
+        s.add(
+            PublishedEpisodeRow(
+                source_id=source_id,
+                group_id=group,
+                knowledge_type="fact_triple",
+                verification="verified",
+                authority=1.0,
+                confidence=0.9,
+                reference_time=utc_now(),
+                payload={
+                    "triples": [{"subject": "paymentapi", "predicate": "RUNS_ON", "object": "eks"}]
+                },
+                dedup_uuid=uuid7(),
+            )
+        )
+    await _run_backfill(
+        sessionmaker, group
+    )  # creates an assertion with run_key backfill:{source_id}
+    async with _tenant(sessionmaker, group) as s:
+        active_before = await s.scalar(
+            text("SELECT count(*) FROM assertions WHERE group_id=:g AND state='active'"),
+            {"g": group},
+        )
+    assert active_before == 1
+
+    container = make_container(NullMemoryEngine())
+    result = await RetractionService(
+        container.sessionmaker, container.memory, container.object_store
+    ).retract_source(group_id=group, source_id=source_id)
+    assert isinstance(result, Ok)
+
+    async with _tenant(sessionmaker, group) as s:
+        active_after = await s.scalar(
+            text("SELECT count(*) FROM assertions WHERE group_id=:g AND state='active'"),
+            {"g": group},
+        )
+        episode_retracted = await s.scalar(
+            text(
+                "SELECT count(*) FROM published_episodes "
+                "WHERE group_id=:g AND retracted_at IS NOT NULL"
+            ),
+            {"g": group},
+        )
+    assert active_after == 0  # before the fix the backfill: assertion was never withdrawn
+    assert episode_retracted == 1
+
+
+async def test_erasure_deletes_candidate_claims_verbatim_quote(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """P0 (privacy) regression: erase_artifact_retrieval_inputs must also delete candidate_claims,
+    which store the verbatim source_quote; otherwise erasure leaves the quoted text behind.
+    """
+    from vera.adapters.persistence.models.knowledge import (
+        ArtifactRow,
+        ArtifactVersionRow,
+        CandidateClaimRow,
+    )
+
+    group = f"p:erase-{uuid7().hex[:12]}"
+    async with SqlAlchemyUnitOfWork(sessionmaker) as uow:
+        await uow.use_tenant(group)
+        org = await uow.tenancy.create_organization(
+            slug=f"o-{group}", name="O", group_id=f"o:{group}"
+        )
+        ws = await uow.tenancy.create_workspace(
+            org_id=org.id, slug=f"w-{group}", name="W", group_id=f"w:{group}"
+        )
+        proj = await uow.tenancy.create_project(
+            workspace_id=ws.id, slug=f"pr-{group}", name="P", group_id=group
+        )
+        source_id = await uow.sources.create(
+            workspace_id=ws.id, project_id=proj.id, kind="confluence", name="C", trust_tier=1
+        )
+        await uow.commit()
+
+    async with _tenant(sessionmaker, group) as s:
+        art = ArtifactRow(
+            source_id=source_id,
+            external_id="a",
+            content_hash="h",
+            s3_key="k",
+            reference_time=utc_now(),
+        )
+        s.add(art)
+        await s.flush()
+        ver = ArtifactVersionRow(
+            artifact_id=art.id, version=1, content_hash="h", s3_key="k", reference_time=utc_now()
+        )
+        s.add(ver)
+        await s.flush()
+        version_id = ver.id
+        s.add(
+            CandidateClaimRow(
+                artifact_version_id=version_id,
+                group_id=group,
+                statement="paymentapi runs on eks",
+                claim_type="fact",
+                source_quote="verbatim personal data that must be erased",
+            )
+        )
+
+    async with _tenant(sessionmaker, group) as s:
+        assert (
+            await s.scalar(
+                text("SELECT count(*) FROM candidate_claims WHERE group_id=:g"), {"g": group}
+            )
+        ) == 1
+
+    async with _tenant(sessionmaker, group) as s:
+        await s.execute(
+            text("SELECT erase_artifact_retrieval_inputs(:g, ARRAY[:v]::uuid[])"),
+            {"g": group, "v": str(version_id)},
+        )
+
+    async with _tenant(sessionmaker, group) as s:
+        remaining = await s.scalar(
+            text("SELECT count(*) FROM candidate_claims WHERE group_id=:g"), {"g": group}
+        )
+    assert remaining == 0  # before the fix the verbatim source_quote survived erasure

@@ -108,6 +108,8 @@ def _recency(
         return 0.0
     if valid_at is None:
         return 0.5
+    if half_life_s <= 0:
+        return 1.0  # a non-positive half-life means no decay (guards divide-by-zero)
     delta = max((now - valid_at).total_seconds(), 0.0)
     return math.exp(-math.log(2) * delta / half_life_s)
 

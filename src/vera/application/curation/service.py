@@ -13,7 +13,7 @@ import hashlib
 import json
 import unicodedata
 from dataclasses import dataclass, replace
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import cast
 from uuid import UUID
 
@@ -161,12 +161,18 @@ def _align_document_quote(
     return claim, None
 
 
+def _aware_utc(value: datetime) -> datetime:
+    # A connector may hand back a naive source_updated_at; comparing naive to the tz-aware DB
+    # value raises TypeError and escapes the Result contract. Assume UTC for a naive input.
+    return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+
+
 def _is_stale_version(head: ArtifactHead, cmd: IngestArtifact) -> bool:
     if cmd.source_revision is not None and head.source_revision is not None:
         return cmd.source_revision <= head.source_revision
     if cmd.source_updated_at is not None and head.source_updated_at is not None:
-        incoming = (cmd.source_updated_at, cmd.source_version_id or "")
-        current = (head.source_updated_at, head.source_version_id or "")
+        incoming = (_aware_utc(cmd.source_updated_at), cmd.source_version_id or "")
+        current = (_aware_utc(head.source_updated_at), head.source_version_id or "")
         return incoming <= current
     return False
 
@@ -177,8 +183,8 @@ def _same_source_position(head: ArtifactHead, cmd: IngestArtifact) -> bool:
     if cmd.source_revision is not None and head.source_revision is not None:
         return cmd.source_revision == head.source_revision
     if cmd.source_updated_at is not None and head.source_updated_at is not None:
-        return (cmd.source_updated_at, cmd.source_version_id or "") == (
-            head.source_updated_at,
+        return (_aware_utc(cmd.source_updated_at), cmd.source_version_id or "") == (
+            _aware_utc(head.source_updated_at),
             head.source_version_id or "",
         )
     return False

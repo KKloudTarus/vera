@@ -201,6 +201,8 @@ def _normalized_relevance(values: list[float]) -> list[float]:
 def _recency(ts: datetime | None, now: datetime, half_life_s: float) -> float:
     if ts is None:
         return 0.5  # unknown recency is neutral
+    if half_life_s <= 0:
+        return 1.0  # a non-positive half-life means no decay (guards divide-by-zero)
     age = max(0.0, (now - ts).total_seconds())
     return math.exp(-math.log(2) * age / half_life_s)
 

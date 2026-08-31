@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from typing import Any
 from uuid import UUID
 
 from sqlalchemy import text
@@ -56,7 +57,11 @@ _ARTIFACT_VERSION_IDS = text(
 _AFFECTED_ASSERTIONS_BY_RUN = text(
     "SELECT a.id, a.fact_id, a.artifact_id, f.fact_key FROM assertions a "
     "JOIN facts f ON f.id=a.fact_id AND f.group_id=a.group_id "
-    "WHERE a.group_id=:g AND a.run_key=:run_key AND a.state='active'"
+    # Both the live-ingest (episode:) and the migration backfill (backfill:) run keys, so a
+    # backfilled group's assertions are withdrawn too. The projection matches both keys
+    # (repositories/projection.py), so retraction must as well or the fact stays projected.
+    "WHERE a.group_id=:g AND a.run_key IN (:run_key_episode, :run_key_backfill) "
+    "AND a.state='active'"
 )
 _AFFECTED_ASSERTIONS_BY_VERSION = text(
     "SELECT a.id, a.fact_id, a.artifact_id, f.fact_key FROM assertions a "
@@ -194,24 +199,30 @@ class RetractionService:
                     str(r)
                     for (r,) in (await session.execute(_S3_KEYS, {"g": group_id, "cid": claim_id}))
                 ]
+            # Always match by run key (episode: and backfill:); on erase also match by artifact
+            # version, then union, so both live and backfilled assertions are caught even when a
+            # backfilled legacy assertion has a NULL artifact_version_id.
+            affected_by_id: dict[UUID, dict[str, Any]] = {}
+            for row in (
+                await session.execute(
+                    _AFFECTED_ASSERTIONS_BY_RUN,
+                    {
+                        "g": group_id,
+                        "run_key_episode": f"episode:{source_id}",
+                        "run_key_backfill": f"backfill:{source_id}",
+                    },
+                )
+            ).mappings():
+                affected_by_id[row["id"]] = dict(row)
             if erase_artifact and artifact_version_ids:
-                affected_assertions = list(
-                    (
-                        await session.execute(
-                            _AFFECTED_ASSERTIONS_BY_VERSION,
-                            {"g": group_id, "version_ids": artifact_version_ids},
-                        )
-                    ).mappings()
-                )
-            else:
-                affected_assertions = list(
-                    (
-                        await session.execute(
-                            _AFFECTED_ASSERTIONS_BY_RUN,
-                            {"g": group_id, "run_key": f"episode:{source_id}"},
-                        )
-                    ).mappings()
-                )
+                for row in (
+                    await session.execute(
+                        _AFFECTED_ASSERTIONS_BY_VERSION,
+                        {"g": group_id, "version_ids": artifact_version_ids},
+                    )
+                ).mappings():
+                    affected_by_id[row["id"]] = dict(row)
+            affected_assertions = list(affected_by_id.values())
             assertion_ids = [row["id"] for row in affected_assertions]
             affected_fact_ids = list({row["fact_id"] for row in affected_assertions})
             retracted_fact_keys: list[str] = []

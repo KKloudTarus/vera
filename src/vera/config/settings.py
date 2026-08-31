@@ -135,7 +135,7 @@ class RerankSettings(BaseModel):
     w_recency: float = 0.12
     w_feedback: float = 0.08
     w_confidence: float = 0.10
-    recency_half_life_days: float = 30.0
+    recency_half_life_days: float = Field(default=30.0, gt=0.0)
     # Calibration applies (persists) new weights only with at least this many labeled
     # feedback samples, so a handful of votes cannot swing ranking.
     min_calibration_samples: int = 20
