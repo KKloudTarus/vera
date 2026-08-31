@@ -67,6 +67,8 @@ nav:
   - Loading knowledge: loading-knowledge.md
   - Using the API: usage.md
   - MCP (AI agents): mcp.md
+  - Integrations:
+      - Agent integration GUIDE: integrations/GUIDE.md
   - Deployment: deployment.md
   - Architecture & algorithms: architecture.md
   - Disaster recovery: dr-runbook.md

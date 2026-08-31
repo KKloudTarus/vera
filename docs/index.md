@@ -12,9 +12,11 @@ application or an AI agent.
    and retraction, with `curl` examples.
 4. [Connecting an AI agent (MCP)](mcp.md) - what the MCP server exposes and how a client
    connects to it.
-5. [Deployment](deployment.md) - Docker Compose and Kubernetes, plus the operational
+5. [Agent integration GUIDE](integrations/GUIDE.md) - the versioned, normative contract a
+   coding runtime follows to wire VERA into an agent safely.
+6. [Deployment](deployment.md) - Docker Compose and Kubernetes, plus the operational
    commands.
-6. [Architecture and algorithms](architecture.md) - how VERA is built and the methods it
+7. [Architecture and algorithms](architecture.md) - how VERA is built and the methods it
    uses: scoring, ranking, embeddings, the temporal model, and more.
 
 ## The mental model in one minute
