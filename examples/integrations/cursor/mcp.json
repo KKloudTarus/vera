@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "vera": {
+      "url": "https://mcp.vera.example/mcp",
+      "headers": {
+        "Authorization": "Bearer ${env:VERA_MCP_TOKEN}"
+      }
+    }
+  }
+}

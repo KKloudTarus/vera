@@ -1,0 +1,13 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "vera": {
+      "type": "remote",
+      "url": "https://mcp.vera.example/mcp",
+      "enabled": true,
+      "headers": {
+        "Authorization": "Bearer {env:VERA_MCP_TOKEN}"
+      }
+    }
+  }
+}
