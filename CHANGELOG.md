@@ -4,6 +4,30 @@ All notable changes to VERA are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project aims to
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-09-01
+
+Multilingual knowledge: VERA now ingests and retrieves non-English content (for example
+Vietnamese) alongside English.
+
+### Changed
+
+- **Full-text search** uses the `simple` text-search configuration instead of `english`, so
+  tokens in any language index and match by their exact form (no English stemming or stopword
+  filtering). Applies to the `chunks` and `facts` `search_vector` columns and every query site.
+- **Entity alias normalization** is Unicode-aware and preserves diacritics: `alias_norm` is
+  written by the app from `normalize_name` (not a database expression), so `Đội nền tảng`
+  resolves correctly and accents stay significant (`má`, `ma`, and `mà` are distinct names).
+- **Chunking** breaks sentences before an accented uppercase start, and the graph full-text
+  tokenizer keeps Unicode letters, so non-English queries reach the lexical search half.
+
+### Notes
+
+- Cross-lingual *semantic* retrieval (query one language, find facts in another) needs a
+  multilingual embedder (`openai` or `voyage`); the default deterministic embedder is a
+  non-semantic hash for offline runs.
+- `simple` full-text search trades English stemming for correct multilingual tokenization;
+  vector retrieval covers morphological and cross-lingual matches when a real embedder is set.
+
 ## [0.1.0] - 2026-09-01
 
 First tagged release. VERA (Verified Episodic Recall for Agents) is a shared,
