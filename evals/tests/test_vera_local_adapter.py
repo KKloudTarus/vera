@@ -540,6 +540,16 @@ def test_mcp_failure_categories_are_stable_and_redacted() -> None:
         )
         == "protocol"
     )
+    assert (
+        adapter._mcp_failure_category(
+            adapter.MCPError(
+                code=-32003,
+                message="secret",
+                data={"code": "quota_exceeded", "token": "secret"},
+            )
+        )
+        == "quota"
+    )
 
 
 def test_mcp_call_reports_category_without_exception_text(
@@ -611,6 +621,89 @@ def test_graph_fault_scenarios_restore_the_dependency_during_cleanup() -> None:
         assert cleanup[0]["action"] == "dependency.configure"
         assert cleanup[0]["input"] == {"dependency": "graph", "state": "available"}
         assert cleanup[0]["observe"] == ["graph.state"]
+
+
+@pytest.mark.parametrize("database_count", [0, 1])
+def test_cleanup_reconciles_requested_resource_ids_only_after_empty_store_verification(
+    monkeypatch: pytest.MonkeyPatch, database_count: int
+) -> None:
+    requested = ["source:rolled-back", "group:p:removed-by-cascade"]
+
+    async def mcp_ready(_settings: Any, _principal_id: str) -> int:
+        return 20
+
+    async def inventory(_container: Any) -> list[str]:
+        return ["source:discovered"]
+
+    async def clear_database(_container: Any) -> dict[str, int]:
+        return {"facts": database_count}
+
+    async def clear_graph(_settings: Any) -> dict[str, int]:
+        return {"nodes": 0, "edges": 0}
+
+    async def clear_count(_settings: Any) -> int:
+        return 0
+
+    async def api_ready() -> dict[str, str]:
+        return {"status": "ok"}
+
+    monkeypatch.setenv("VERA_EVAL_SCOPE_ID", "scope-1")
+    monkeypatch.delenv("VERA_EVAL_DEPENDENCY_CONTROL_URL", raising=False)
+    monkeypatch.setattr(adapter, "_settings_fingerprint", lambda _settings: "fingerprint")
+    monkeypatch.setattr(adapter, "_assert_disposable_endpoints", lambda _settings: None)
+    monkeypatch.setattr(adapter, "_mcp_readiness", mcp_ready)
+    monkeypatch.setattr(adapter, "_database_inventory", inventory)
+    monkeypatch.setattr(adapter, "_clear_database", clear_database)
+    monkeypatch.setattr(adapter, "_clear_graph", clear_graph)
+    monkeypatch.setattr(adapter, "_clear_objects", clear_count)
+    monkeypatch.setattr(adapter, "_clear_valkey", clear_count)
+    monkeypatch.setattr(adapter, "_api_readiness", api_ready)
+    request = {
+        "run_id": "run-1",
+        "inputs": {"created_resource_ids": requested},
+        "run_context": {
+            "evaluation_scope": {
+                "kind": "ephemeral_stack",
+                "run_owned": True,
+                "production_writable": False,
+                "id": "scope-1",
+            }
+        },
+    }
+    state = {
+        "preflight": {
+            "run_id": "run-1",
+            "scope_id": "scope-1",
+            "disposable_full_store": True,
+            "settings_fingerprint": "fingerprint",
+            "mcp_principal_id": "principal-1",
+        }
+    }
+
+    outcome = asyncio.run(
+        adapter._cleanup(SimpleNamespace(settings=object()), request, state)  # type: ignore[arg-type]
+    )
+
+    ledger = sorted([*requested, "source:discovered"])
+    cleanup = outcome.observations["cleanup"]
+    assert cleanup["created_resource_ids"] == ledger
+    if database_count == 0:
+        assert outcome.status == "PASS"
+        assert cleanup["removed_resource_ids"] == ledger
+        assert cleanup["remaining_resource_ids"] == []
+        assert outcome.removed == ledger
+    else:
+        assert outcome.status == "FAIL"
+        assert cleanup["removed_resource_ids"] == []
+        assert cleanup["remaining_resource_ids"] == ledger
+        assert outcome.removed == []
+
+
+def test_p95_tail_samples_cover_recent_observation_history() -> None:
+    assert adapter._p95_tail_sample_count(0) == 2
+    assert adapter._p95_tail_sample_count(18) == 2
+    assert adapter._p95_tail_sample_count(19) == 3
+    assert adapter._p95_tail_sample_count(40) == 4
 
 
 def test_http_search_uses_public_api_and_only_normalizes_actual_fields(
@@ -1047,9 +1140,11 @@ def test_feedback_search_persists_distinct_attribution_packs(
     clock = 0.0
 
     async def search(_settings: Any, **kwargs: Any) -> dict[str, Any]:
+        nonlocal clock
         persist = bool(kwargs["persist"])
         token_budget = int(kwargs["token_budget"])
         calls.append((persist, token_budget))
+        clock += 0.5
         return {
             "facts": [
                 {
@@ -1119,7 +1214,7 @@ def test_feedback_search_persists_distinct_attribution_packs(
     assert [event["context_pack_id"] for event in outcome.observations["retrieval"]["events"]] == [
         f"pack-{2000 + index}" for index in range(5)
     ]
-    assert sleeps == pytest.approx([60.25, 60.25])
+    assert sleeps == pytest.approx([59.75, 59.75])
 
 
 def test_visibility_poll_waits_for_the_ingested_artifact(

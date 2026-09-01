@@ -96,6 +96,15 @@ class _FactBatchSource:
         )
 
 
+class _ExactFactBatchSource:
+    async def search(self, **_kwargs: object) -> FactCandidateSets:
+        return FactCandidateSets(
+            lexical=(_fact("exact", 1.0),),
+            semantic=(),
+            hydrated=True,
+        )
+
+
 def _hit(chunk_id: str, score: float) -> PassageHit:
     return PassageHit(
         chunk_id=chunk_id,
@@ -154,6 +163,16 @@ async def test_fact_rrf_accepts_candidate_sets_from_one_batch() -> None:
 
     assert [hit.fact_key for hit in hits] == ["shared", "lexical-only", "semantic-only"]
     assert hits[0].score > hits[1].score
+
+
+@pytest.mark.asyncio
+async def test_fact_rrf_preserves_hydrated_exact_score() -> None:
+    hybrid = HybridFactCandidateSource(batch_source=_ExactFactBatchSource())
+
+    hits = await hybrid.search(group_id="p:test", query="exact fact", limit=3)
+
+    assert [hit.fact_key for hit in hits] == ["exact"]
+    assert hits[0].score == 1.0
 
 
 @pytest.mark.asyncio

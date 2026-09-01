@@ -427,6 +427,8 @@ services:
         required: false
     environment:
       <<: *eval-app-env
+      OTEL_TRACES_SAMPLER: parentbased_always_on
+      OTEL_TRACES_SAMPLER_ARG: "1"
       VERA_DB__DSN: postgresql+asyncpg://vera:vera@neo4j-proxy:5432/vera
       VERA_DB__ROLE_ENFORCEMENT: "false"
       VERA_EVAL_API_URL: http://api:8000

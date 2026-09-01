@@ -123,6 +123,8 @@ class HybridFactCandidateSource:
                 filters=filters,
             )
             result_sets = [batch.lexical, batch.semantic]
+            if batch.hydrated and not batch.semantic:
+                return list(batch.lexical[:limit])
         hits: dict[str, FactHit] = {}
         scores: dict[str, float] = {}
         for result_set in result_sets:

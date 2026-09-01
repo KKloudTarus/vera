@@ -168,6 +168,12 @@ def _mcp_failure_category(exc: BaseException) -> str:
         return "http"
     if any(isinstance(value, httpx2.TransportError) for value in leaves):
         return "transport"
+    for value in leaves:
+        if not isinstance(value, MCPError):
+            continue
+        data = value.error.data
+        if isinstance(data, dict) and data.get("code") == "quota_exceeded":
+            return "quota"
     if any(isinstance(value, (MCPError, json.JSONDecodeError)) for value in leaves):
         return "protocol"
     return "unknown"
@@ -2627,7 +2633,11 @@ async def _cleanup(
         for dependency in ("postgres", "object_store", "graph", "valkey"):
             await _configure_dependency(dependency, "available")
     tools = await _mcp_readiness(container.settings, mcp_principal_id)
-    inventory = await _database_inventory(container)
+    discovered = await _database_inventory(container)
+    requested = request["inputs"].get("created_resource_ids", [])
+    inventory = sorted(
+        set(discovered) | {value for value in requested if isinstance(value, str) and value}
+    )
     database = await _clear_database(container)
     graph = await _clear_graph(container.settings)
     objects = await _clear_objects(container.settings)
@@ -3255,7 +3265,6 @@ async def _handle_search(
                 context_call_times[:] = [
                     started for started in context_call_times if now - started < 60
                 ]
-            context_call_times.append(now)
         result = await _search_mcp(
             container.settings,
             principal_id=str(principal["principal_id"]),
@@ -3267,6 +3276,8 @@ async def _handle_search(
             persist=attribution_repetitions > 1,
             token_budget=2000 + attribution_index,
         )
+        if attribution_repetitions > 1 and context_quota > 0:
+            context_call_times.append(time.monotonic())
         return 200, result
 
     queries = inputs.get("queries_ref")
@@ -6179,6 +6190,28 @@ async def _prometheus_payload(path: str) -> dict[str, Any]:
     return cast(dict[str, Any], payload)
 
 
+async def _recent_metric_observations(metric: str) -> float:
+    query = httpx.QueryParams({"query": f"sum(increase({metric}_count[5m]))"})
+    payload = await _prometheus_payload(f"/api/v1/query?{query}")
+    data = payload.get("data")
+    results = data.get("result") if isinstance(data, dict) else None
+    if not isinstance(results, list) or not results:
+        return 0.0
+    result = results[0]
+    value = result.get("value") if isinstance(result, dict) else None
+    try:
+        count = float(value[1]) if isinstance(value, list) and len(value) == 2 else 0.0
+    except (TypeError, ValueError):
+        count = 0.0
+    if not math.isfinite(count) or count < 0:
+        raise AdapterFailed("Prometheus returned an invalid recent observation count")
+    return count
+
+
+def _p95_tail_sample_count(recent_observations: float) -> int:
+    return max(2, math.floor(recent_observations / 19) + 2)
+
+
 async def _wait_for_prometheus_scrape(*, timeout_s: float) -> None:
     deadline = time.monotonic() + timeout_s
     jobs = {"vera-api", "vera-worker", "vera-eval-product-exercises"}
@@ -6273,8 +6306,14 @@ async def _exercise_product_signals(
     started_at = time.monotonic()
     trace_ids: dict[str, str] = {}
     early_fired: dict[str, float] = {}
-    queue_job_id: Any = None
+    queue_job_ids: list[Any] = []
     projection_removed = False
+    freshness_history, retrieval_history = await asyncio.gather(
+        _recent_metric_observations("vera_time_to_searchable_seconds"),
+        _recent_metric_observations("vera_search_duration_seconds"),
+    )
+    freshness_samples = _p95_tail_sample_count(freshness_history)
+    retrieval_samples = _p95_tail_sample_count(retrieval_history)
     try:
         with span("eval.production_signal", signal_id="write_failure") as current_span:
             context = current_span.get_span_context()
@@ -6326,23 +6365,29 @@ async def _exercise_product_signals(
             queue_trace_id = f"{context.trace_id:032x}" if context.is_valid else ""
             trace_ids["queue_lag"] = queue_trace_id
             async with container.sessionmaker() as session, session.begin():
-                queue_job_id = await session.scalar(
-                    text(
-                        "INSERT INTO ingestion_jobs "
-                        "(group_id, source_id, dedup_uuid, payload, trace_context, created_at, "
-                        "next_visible_at) SELECT group_id, source_id, :dedup_uuid, payload, "
-                        "CAST(:trace_context AS jsonb), now() - interval '20 minutes', "
-                        "now() + interval '1 day' FROM ingestion_jobs "
-                        "WHERE group_id=:group_id AND status='done' AND payload ? '_fabric' "
-                        "ORDER BY created_at LIMIT 1 RETURNING id"
-                    ),
-                    {
-                        "group_id": group_id,
-                        "dedup_uuid": uuid4(),
-                        "trace_context": json.dumps({"trace_id": queue_trace_id}),
-                    },
+                queue_job_ids = list(
+                    await session.scalars(
+                        text(
+                            "INSERT INTO ingestion_jobs "
+                            "(group_id, source_id, dedup_uuid, payload, trace_context, created_at, "
+                            "next_visible_at) SELECT group_id, source_id, "
+                            "gen_random_uuid(), payload, "
+                            "CAST(:trace_context AS jsonb), now() - interval '20 minutes', "
+                            "now() + interval '1 day' FROM ("
+                            "SELECT group_id, source_id, payload FROM ingestion_jobs "
+                            "WHERE group_id=:group_id AND status='done' AND payload ? '_fabric' "
+                            "ORDER BY created_at LIMIT 1"
+                            ") AS replayable CROSS JOIN generate_series(1, :sample_count) "
+                            "RETURNING id"
+                        ),
+                        {
+                            "group_id": group_id,
+                            "trace_context": json.dumps({"trace_id": queue_trace_id}),
+                            "sample_count": freshness_samples,
+                        },
+                    )
                 )
-            if queue_job_id is None:
+            if len(queue_job_ids) != freshness_samples:
                 raise AdapterFailed("observability fixture has no replayable ingestion job")
             queue_fired = await _wait_for_prometheus_alerts(
                 ["queue_lag"], started_at=started_at, timeout_s=deadline_s
@@ -6356,22 +6401,30 @@ async def _exercise_product_signals(
             trace_ids["freshness"] = f"{context.trace_id:032x}" if context.is_valid else ""
             async with container.sessionmaker() as session, session.begin():
                 await session.execute(
-                    text("UPDATE ingestion_jobs SET next_visible_at=now() WHERE id=:job_id"),
-                    {"job_id": queue_job_id},
+                    text(
+                        "UPDATE ingestion_jobs SET next_visible_at=now() "
+                        "WHERE id=ANY(CAST(:job_ids AS uuid[]))"
+                    ),
+                    {"job_ids": queue_job_ids},
                 )
             await _wait_for_group_jobs(container, group_id, timeout_s=60.0)
 
         with span("eval.production_signal", signal_id="retrieval_latency") as current_span:
             context = current_span.get_span_context()
             trace_ids["retrieval_latency"] = f"{context.trace_id:032x}" if context.is_valid else ""
-            await _configure_dependency_latency("postgres", 100)
+            await _configure_dependency_latency("postgres", 150)
             try:
-                await _api_json(
-                    "POST",
-                    "/v2/knowledge/search",
-                    api_key=str(principal["api_key"]),
-                    body={"query": "observability", "project": group_id, "limit": 5},
-                    expected={200},
+                await asyncio.gather(
+                    *(
+                        _api_json(
+                            "POST",
+                            "/v2/knowledge/search",
+                            api_key=str(principal["api_key"]),
+                            body={"query": "observability", "project": group_id, "limit": 5},
+                            expected={200},
+                        )
+                        for _ in range(retrieval_samples)
+                    )
                 )
             finally:
                 await _configure_dependency_latency("postgres", 0)
@@ -6382,11 +6435,14 @@ async def _exercise_product_signals(
         fired.update(early_fired)
     finally:
         await _configure_dependency_latency("postgres", 0)
-        if queue_job_id is not None:
+        if queue_job_ids:
             async with container.sessionmaker() as session, session.begin():
                 await session.execute(
-                    text("UPDATE ingestion_jobs SET next_visible_at=now() WHERE id=:job_id"),
-                    {"job_id": queue_job_id},
+                    text(
+                        "UPDATE ingestion_jobs SET next_visible_at=now() "
+                        "WHERE id=ANY(CAST(:job_ids AS uuid[]))"
+                    ),
+                    {"job_ids": queue_job_ids},
                 )
         if projection_removed:
             await projection_service.rebuild_group(group_id)
