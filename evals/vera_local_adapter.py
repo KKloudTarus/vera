@@ -35,6 +35,7 @@ from botocore.exceptions import ClientError
 from jsonschema import Draft202012Validator, FormatChecker
 from mcp import Client
 from mcp.client.streamable_http import streamable_http_client
+from mcp.shared.exceptions import MCPError
 from neo4j import AsyncGraphDatabase
 from redis.asyncio import Redis
 from sqlalchemy import text
@@ -98,6 +99,17 @@ _SEARCH_MATRIX = {
     "virtual_users": [1, 20],
 }
 _INGESTION_MATRIX = {"record_counts": [100, 500], "concurrency": [1, 8]}
+_MAX_BOUNDARY_DIAGNOSTICS = 20
+_EVIDENCE_KIND_ALIASES = {
+    "configuration": "file",
+    "metrics": "metric",
+    "model": "api",
+    "object_store": "file",
+    "retrieval": "api",
+    "tracing": "trace",
+    "valkey": "database",
+    "worker": "log",
+}
 
 
 class AdapterBlocked(RuntimeError):
@@ -119,6 +131,69 @@ def _exception_type_summary(exc: BaseException) -> str:
             leaves.add(type(current).__name__)
     suffix = f"[{','.join(sorted(leaves))}]" if leaves else ""
     return f"{type(exc).__name__}{suffix}"
+
+
+def _causal_exception_leaves(exc: BaseException) -> list[BaseException]:
+    pending = [exc]
+    leaves: list[BaseException] = []
+    seen: set[int] = set()
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        if isinstance(current, BaseExceptionGroup):
+            pending.extend(current.exceptions)
+        else:
+            leaves.append(current)
+        cause = current.__cause__
+        context = current.__context__ if not current.__suppress_context__ else None
+        if cause is not None:
+            pending.append(cause)
+        elif context is not None:
+            pending.append(context)
+    return leaves
+
+
+def _mcp_failure_category(exc: BaseException) -> str:
+    leaves = _causal_exception_leaves(exc)
+    if any(isinstance(value, (TimeoutError, httpx2.TimeoutException)) for value in leaves):
+        return "timeout"
+    statuses = [
+        value.response.status_code for value in leaves if isinstance(value, httpx2.HTTPStatusError)
+    ]
+    if any(status in {401, 403} for status in statuses):
+        return "authentication"
+    if statuses:
+        return "http"
+    if any(isinstance(value, httpx2.TransportError) for value in leaves):
+        return "transport"
+    if any(isinstance(value, (MCPError, json.JSONDecodeError)) for value in leaves):
+        return "protocol"
+    return "unknown"
+
+
+def _closed_failure_summary(exc: BaseException) -> str:
+    summary = _exception_type_summary(exc)
+    category = _mcp_failure_category(exc)
+    if category == "unknown":
+        return summary
+    return f"{summary}; boundary_category={category}"
+
+
+def _ingest_failure_diagnostic(
+    exc: AdapterBlocked | AdapterFailed,
+    *,
+    record_index: int,
+    record: dict[str, Any],
+) -> dict[str, Any]:
+    external_id = str(record.get("external_id", ""))
+    return {
+        "record_index": record_index,
+        "external_id_sha256": hashlib.sha256(external_id.encode()).hexdigest(),
+        "status": "BLOCKED" if isinstance(exc, AdapterBlocked) else "FAIL",
+        "exception_type": type(exc).__name__,
+    }
 
 
 class _FixtureSyncFailure(RuntimeError):
@@ -1550,7 +1625,8 @@ async def _call_mcp_tool(
     except AdapterFailed:
         raise
     except Exception as exc:
-        raise AdapterBlocked(f"MCP {name} transport or protocol boundary is unavailable") from exc
+        category = _mcp_failure_category(exc)
+        raise AdapterBlocked(f"MCP {name} {category} boundary is unavailable") from exc
     return _mcp_payload(result), round((time.perf_counter() - started) * 1000, 3)
 
 
@@ -2710,6 +2786,7 @@ async def _seed_load_fixture(
     aliases = [f"scope-{index:02d}" for index in range(scope_count)]
     sources: dict[str, str] = {}
     group_ids: list[str] = []
+    failure_diagnostics: list[dict[str, Any]] = []
     for alias in aliases:
         principal = await _ensure_scope(request, current, alias)
         sources[alias] = await _ensure_source(container, request, current, principal_alias=alias)
@@ -2742,8 +2819,15 @@ async def _seed_load_fixture(
                         allow_projection_lag=True,
                         require_search_visibility=False,
                     )
-                except (AdapterBlocked, AdapterFailed):
+                except (AdapterBlocked, AdapterFailed) as exc:
                     failed += 1
+                    failure_diagnostics.append(
+                        _ingest_failure_diagnostic(
+                            exc,
+                            record_index=scope_index * facts_per_scope + fact_index,
+                            record=record,
+                        )
+                    )
                 else:
                     accepted += 1
         return accepted, failed
@@ -2791,6 +2875,10 @@ async def _seed_load_fixture(
             "ingestion": {
                 "accepted_document_count": accepted,
                 "failed_document_count": failed,
+                "failure_diagnostic_count": failed,
+                "failure_diagnostics": sorted(
+                    failure_diagnostics, key=lambda value: int(value["record_index"])
+                )[:_MAX_BOUNDARY_DIAGNOSTICS],
             },
             "queue": {alias: queue_states[index] for index, alias in enumerate(aliases)},
         },
@@ -2806,6 +2894,8 @@ async def _seed(container: Container, request: dict[str, Any], current: dict[str
     fixture = fixture_file.get("data") if isinstance(fixture_file, dict) else fixture_input
     accepted = 0
     failed = 0
+    attempted = 0
+    failure_diagnostics: list[dict[str, Any]] = []
     pending_claims: list[str] = []
     expected_claims: list[dict[str, Any]] = []
     graph_failure: dict[str, Any] = {}
@@ -2825,7 +2915,9 @@ async def _seed(container: Container, request: dict[str, Any], current: dict[str
         require_search_visibility: bool = True,
         allow_projection_lag: bool = False,
     ) -> None:
-        nonlocal accepted, failed
+        nonlocal accepted, attempted, failed
+        record_index = attempted
+        attempted += 1
         prepared = copy.deepcopy(item)
         if trust_tier is not None:
             prepared["trust_tier"] = trust_tier
@@ -2840,8 +2932,16 @@ async def _seed(container: Container, request: dict[str, Any], current: dict[str
                 require_search_visibility=require_search_visibility,
                 allow_projection_lag=allow_projection_lag,
             )
-        except (AdapterBlocked, AdapterFailed):
+        except (AdapterBlocked, AdapterFailed) as exc:
             failed += 1
+            if len(failure_diagnostics) < _MAX_BOUNDARY_DIAGNOSTICS:
+                failure_diagnostics.append(
+                    _ingest_failure_diagnostic(
+                        exc,
+                        record_index=record_index,
+                        record=record,
+                    )
+                )
             return
         accepted += 1
         pending_claims.extend(result.claim_ids)
@@ -3024,6 +3124,8 @@ async def _seed(container: Container, request: dict[str, Any], current: dict[str
         "ingestion": {
             "accepted_document_count": accepted,
             "failed_document_count": failed,
+            "failure_diagnostic_count": failed,
+            "failure_diagnostics": failure_diagnostics,
         },
         "resources": [str(current["group_id"])],
         "dataset": {
@@ -4007,7 +4109,7 @@ async def _load_ingestion(
         expected_fixture.extend(profile_expected)
         tokens_before = await _groups_token_count(container, [group_id], request_kind="ingest")
         artifact_version_ids: list[str | None] = [None] * record_count
-        ingest_failures: list[str | None] = [None] * record_count
+        ingest_failures: list[dict[str, Any] | None] = [None] * record_count
         semaphore = asyncio.Semaphore(concurrency)
 
         async def ingest_one(
@@ -4016,7 +4118,7 @@ async def _load_ingestion(
             profile_alias: str,
             profile_source_id: str,
             limiter: asyncio.Semaphore,
-            failures: list[str | None],
+            failures: list[dict[str, Any] | None],
             artifacts: list[str | None],
         ) -> None:
             task_current = _load_task_current(
@@ -4035,7 +4137,7 @@ async def _load_ingestion(
                         require_search_visibility=False,
                     )
             except (AdapterBlocked, AdapterFailed) as exc:
-                failures[index] = type(exc).__name__
+                failures[index] = _ingest_failure_diagnostic(exc, record_index=index, record=record)
             else:
                 artifacts[index] = str(result.artifact_version_id)
 
@@ -4148,6 +4250,9 @@ async def _load_ingestion(
                 ),
                 "tokens_per_artifact": token_delta / record_count,
                 "ingest_failure_count": failure_count,
+                "ingest_failure_diagnostics": [
+                    value for value in ingest_failures if value is not None
+                ][:_MAX_BOUNDARY_DIAGNOSTICS],
                 "visibility_failure_count": visibility_failure_count,
                 "queue_state": queue_state,
                 "sample_count": record_count,
@@ -4806,7 +4911,7 @@ async def _production_mcp_probes(
                             {
                                 "tool": name,
                                 "allowed": False,
-                                "error_type": type(exc).__name__,
+                                "error_type": _mcp_failure_category(exc),
                                 "latency_ms": round((time.perf_counter() - call_started) * 1000, 3),
                             }
                         )
@@ -4815,7 +4920,7 @@ async def _production_mcp_probes(
                     record: dict[str, Any] = {
                         "tool": name,
                         "allowed": allowed,
-                        "error_type": None if allowed else "MCPErrorResult",
+                        "error_type": None if allowed else "tool_error",
                         "latency_ms": round((time.perf_counter() - call_started) * 1000, 3),
                     }
                     if allowed:
@@ -4830,12 +4935,43 @@ async def _production_mcp_probes(
             {
                 "tool": name,
                 "allowed": False,
-                "error_type": type(exc).__name__,
+                "error_type": _mcp_failure_category(exc),
                 "latency_ms": elapsed,
             }
             for name, _arguments in calls
         ]
     return records
+
+
+async def _insert_expired_context_pack(container: Container, *, group_id: str) -> str:
+    query = "expired MCP authorization probe"
+    pack_request: JsonDict = {
+        "fixture": "security.mcp_authorization",
+        "group_id": group_id,
+        "query": query,
+    }
+    canonical_request = json.dumps(pack_request, sort_keys=True, separators=(",", ":"))
+    async with SqlAlchemyUnitOfWork(container.sessionmaker) as uow:
+        await uow.use_tenant(group_id)
+        pack = await uow.context_packs.save(
+            group_id=group_id,
+            query=query,
+            token_estimate=0,
+            result_count=0,
+            omitted=0,
+            conflicts=0,
+            freshness_warnings=0,
+            results=[],
+            request_hash=hashlib.sha256(canonical_request.encode()).hexdigest(),
+            result_references=[],
+            expires_at=datetime.now(UTC) - timedelta(seconds=1),
+            assembler_version="context-assembler-v3",
+            request=pack_request,
+        )
+        await uow.commit()
+    if pack.id is None:
+        raise AdapterFailed("expired MCP context pack setup did not persist")
+    return pack.id
 
 
 async def _production_mcp_authorization(
@@ -5029,18 +5165,13 @@ async def _production_mcp_authorization(
             calls=[("knowledge_get_entity", {"entity_id": entity_id, "limit": 501})],
         )
     )[0]
-    async with container.sessionmaker() as session, session.begin():
-        await session.execute(
-            text(
-                "UPDATE context_packs SET expires_at=now() - interval '1 second' "
-                "WHERE id=CAST(:pack_id AS uuid)"
-            ),
-            {"pack_id": pack_id},
-        )
+    expired_pack_id = await _insert_expired_context_pack(
+        container, group_id=str(principal["group_id"])
+    )
     expired_pack = (
         await _production_mcp_probes(
             token=valid_token,
-            calls=[("knowledge_get_context_pack", {"pack_id": pack_id})],
+            calls=[("knowledge_get_context_pack", {"pack_id": expired_pack_id})],
         )
     )[0]
     quota_principal = await _ensure_scope(request, current, "mcp-quota")
@@ -8638,12 +8769,15 @@ def _evidence(
         observations, ensure_ascii=True, separators=(",", ":"), sort_keys=True
     ).encode()
     observations_sha256 = hashlib.sha256(serialized).hexdigest()
+    kinds = dict.fromkeys(
+        _EVIDENCE_KIND_ALIASES.get(boundary, boundary) for boundary in outcome.boundaries
+    )
     for label in _step_labels(request):
-        for boundary in outcome.boundaries:
+        for kind in kinds:
             descriptors.append(
                 {
                     "label": label,
-                    "kind": boundary,
+                    "kind": kind,
                     "action": request["action"],
                     "observation_roots": sorted(observations),
                     "observations_sha256": observations_sha256,
@@ -9042,7 +9176,7 @@ def main() -> None:
             "schema_version": "1.0",
             "request_nonce": nonce,
             "status": "BLOCKED",
-            "message": f"local adapter failed closed: {_exception_type_summary(exc)}",
+            "message": f"local adapter failed closed: {_closed_failure_summary(exc)}",
         }
     sys.stdout.write(json.dumps(response, ensure_ascii=True, separators=(",", ":"), default=str))
 

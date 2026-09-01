@@ -320,6 +320,51 @@ def test_production_actions_dispatch_to_truthful_boundaries(
         assert outcome.observations == {"boundary": helper_name}
 
 
+def test_mcp_authorization_inserts_an_immutable_expired_pack(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+    saved: dict[str, Any] = {}
+
+    class ContextPacks:
+        async def save(self, **kwargs: Any) -> SimpleNamespace:
+            calls.append("save")
+            saved.update(kwargs)
+            return SimpleNamespace(id="00000000-0000-0000-0000-000000000123")
+
+    class UnitOfWork:
+        context_packs = ContextPacks()
+
+        async def __aenter__(self) -> UnitOfWork:
+            return self
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+        async def use_tenant(self, group_id: str) -> None:
+            calls.append(f"tenant:{group_id}")
+
+        async def commit(self) -> None:
+            calls.append("commit")
+
+    monkeypatch.setattr(adapter, "SqlAlchemyUnitOfWork", lambda _sessionmaker: UnitOfWork())
+    started_at = datetime.now(UTC)
+
+    pack_id = asyncio.run(
+        adapter._insert_expired_context_pack(
+            SimpleNamespace(sessionmaker=object()),  # type: ignore[arg-type]
+            group_id="p:case",
+        )
+    )
+
+    assert pack_id == "00000000-0000-0000-0000-000000000123"
+    assert calls == ["tenant:p:case", "save", "commit"]
+    assert saved["group_id"] == "p:case"
+    assert saved["expires_at"] < started_at
+    assert saved["assembler_version"] == "context-assembler-v3"
+    assert len(saved["request_hash"]) == 64
+
+
 def test_production_retention_drill_persists_frozen_context_pack(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -462,6 +507,65 @@ def test_exception_summary_preserves_nested_leaf_types_without_messages() -> Non
     )
 
     assert adapter._exception_type_summary(nested) == "ExceptionGroup[TimeoutError,ValueError]"
+
+    blocked = adapter.AdapterBlocked("sensitive boundary message")
+    blocked.__cause__ = adapter.httpx2.ReadTimeout("sensitive timeout detail")
+    grouped = ExceptionGroup("sensitive group message", [blocked])
+    summary = adapter._closed_failure_summary(grouped)
+
+    assert summary == "ExceptionGroup[AdapterBlocked]; boundary_category=timeout"
+    assert "sensitive" not in summary
+
+
+def test_mcp_failure_categories_are_stable_and_redacted() -> None:
+    request = adapter.httpx2.Request("GET", "https://mcp.test/secret")
+    unauthorized = adapter.httpx2.HTTPStatusError(
+        "sensitive auth response",
+        request=request,
+        response=adapter.httpx2.Response(401, request=request),
+    )
+    unavailable = adapter.httpx2.HTTPStatusError(
+        "sensitive service response",
+        request=request,
+        response=adapter.httpx2.Response(503, request=request),
+    )
+
+    assert adapter._mcp_failure_category(adapter.httpx2.ReadTimeout("secret")) == "timeout"
+    assert adapter._mcp_failure_category(adapter.httpx2.ConnectError("secret")) == "transport"
+    assert adapter._mcp_failure_category(unauthorized) == "authentication"
+    assert adapter._mcp_failure_category(unavailable) == "http"
+    assert (
+        adapter._mcp_failure_category(
+            adapter.MCPError(code=-32000, message="secret", data={"token": "secret"})
+        )
+        == "protocol"
+    )
+
+
+def test_mcp_call_reports_category_without_exception_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    @asynccontextmanager
+    async def failing_transport(_url: str, *, http_client: Any) -> Any:
+        del http_client
+        raise adapter.httpx2.ReadTimeout("sensitive transport detail")
+        yield
+
+    monkeypatch.setenv("VERA_EVAL_MCP_URL", "https://mcp.test/mcp")
+    monkeypatch.setenv("VERA_EVAL_MCP_JWT_SECRET", "mcp-secret-for-tests-at-least-32-bytes")
+    monkeypatch.setattr(adapter, "streamable_http_client", failing_transport)
+
+    with pytest.raises(adapter.AdapterBlocked, match="timeout boundary") as raised:
+        asyncio.run(
+            adapter._call_mcp_tool(
+                _settings(),
+                principal_id="00000000-0000-0000-0000-000000000123",
+                name="knowledge_search",
+                arguments={"query": "owner", "limit": 5},
+            )
+        )
+
+    assert "sensitive transport detail" not in str(raised.value)
 
 
 def test_adapter_source_has_no_repository_search_or_deterministic_extractor() -> None:
@@ -1948,6 +2052,84 @@ def test_decision_seed_does_not_require_pending_claims_in_current_search(
     assert outcome.observations["pending_claims"] == ["claim-1", "claim-2"]
 
 
+def test_seed_retains_bounded_redacted_per_record_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def ensure_scope(*_args: Any) -> None:
+        return None
+
+    async def ingest(
+        _container: Any,
+        _request: dict[str, Any],
+        _current: dict[str, Any],
+        record: dict[str, Any],
+        **_kwargs: Any,
+    ) -> tuple[Any, str, dict[str, int]]:
+        if record["external_id"] == "blocked-record":
+            raise adapter.AdapterBlocked("sensitive blocked detail")
+        raise adapter.AdapterFailed("sensitive failed detail")
+
+    async def snapshot(*_args: Any) -> dict[str, Any]:
+        return {
+            "claims_state": [],
+            "facts_state": [],
+            "episodes_state": [],
+            "graph_edges_state": [],
+            "reviews_state": [],
+        }
+
+    monkeypatch.setattr(adapter, "_ensure_scope", ensure_scope)
+    monkeypatch.setattr(adapter, "_ingest", ingest)
+    monkeypatch.setattr(adapter, "_database_snapshot", snapshot)
+    current = {
+        "group_id": "p:case",
+        "ingest_count": 0,
+        "principals": {
+            "default": {
+                "principal_id": "00000000-0000-0000-0000-000000000123",
+                "group_id": "p:case",
+            }
+        },
+    }
+    request = {
+        "case_id": "REAL-002",
+        "inputs": {
+            "fixture": [
+                {"external_id": "blocked-record", "body": "private blocked body"},
+                {"external_id": "failed-record", "body": "private failed body"},
+            ]
+        },
+    }
+
+    outcome = asyncio.run(
+        adapter._seed(SimpleNamespace(), request, current)  # type: ignore[arg-type]
+    )
+
+    ingestion = outcome.observations["ingestion"]
+    diagnostics = ingestion["failure_diagnostics"]
+    serialized = json.dumps(diagnostics, sort_keys=True)
+    assert outcome.status == "FAIL"
+    assert ingestion["accepted_document_count"] == 0
+    assert ingestion["failed_document_count"] == 2
+    assert ingestion["failure_diagnostic_count"] == 2
+    assert diagnostics == [
+        {
+            "record_index": 0,
+            "external_id_sha256": hashlib.sha256(b"blocked-record").hexdigest(),
+            "status": "BLOCKED",
+            "exception_type": "AdapterBlocked",
+        },
+        {
+            "record_index": 1,
+            "external_id_sha256": hashlib.sha256(b"failed-record").hexdigest(),
+            "status": "FAIL",
+            "exception_type": "AdapterFailed",
+        },
+    ]
+    assert "private" not in serialized
+    assert "sensitive" not in serialized
+
+
 def test_ingest_observation_exposes_the_retractable_published_source_id() -> None:
     result = SimpleNamespace(
         artifact_version_id="version-1",
@@ -2580,6 +2762,46 @@ def test_evidence_references_large_observations_by_digest() -> None:
     assert all(descriptor["observation_roots"] == ["profiles"] for descriptor in descriptors)
     assert all(descriptor["observations_sha256"] == expected_digest for descriptor in descriptors)
     assert len(json.dumps(descriptors).encode()) < 10_000
+
+
+def test_evidence_maps_infrastructure_boundaries_to_protocol_kinds() -> None:
+    descriptors = adapter._evidence(
+        {
+            "action": "observability.exercise",
+            "case_id": "OPS-007",
+            "evidence_labels": ["boundary_report"],
+        },
+        adapter._Outcome(
+            boundaries=(
+                "valkey",
+                "model",
+                "object_store",
+                "worker",
+                "metrics",
+                "tracing",
+                "configuration",
+                "retrieval",
+            )
+        ),
+        {"signals": {}},
+    )
+
+    assert [descriptor["kind"] for descriptor in descriptors] == [
+        "database",
+        "api",
+        "file",
+        "log",
+        "metric",
+        "trace",
+    ]
+    ActionResponse.from_dict(
+        {
+            "schema_version": "1.0",
+            "status": "PASS",
+            "observations": {"signals": {}},
+            "evidence": descriptors,
+        }
+    )
 
 
 def test_perf_003_metrics_use_run_latencies_and_measured_tokens() -> None:

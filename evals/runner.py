@@ -375,6 +375,32 @@ class RunConfig:
         return cls.from_dict(value, root=root)
 
 
+def _maximum_runner_timeout(config: RunConfig) -> float:
+    maximum = config.step_timeout_s
+    for case in load_cases():
+        if config.profile not in case["profiles"]:
+            continue
+        for step in case["steps"]:
+            timeout_s = float(step.get("timeout_s", config.step_timeout_s))
+            action_wait = step.get("input", {}).get("timeout_s")
+            if not isinstance(action_wait, bool) and isinstance(action_wait, (int, float)):
+                timeout_s = max(timeout_s, float(action_wait) + 5.0)
+            maximum = max(maximum, timeout_s)
+    return maximum
+
+
+def _subprocess_timeout(config: RunConfig, requested: float | None) -> float:
+    runner_timeout = _maximum_runner_timeout(config)
+    if requested is None:
+        return runner_timeout + 5.0
+    if requested <= runner_timeout:
+        raise ValueError(
+            "adapter timeout must exceed the maximum runner action timeout "
+            f"of {runner_timeout:g} seconds"
+        )
+    return requested
+
+
 @dataclass(frozen=True, slots=True)
 class RunOutcome:
     run_id: str
@@ -3283,7 +3309,11 @@ def _parser() -> argparse.ArgumentParser:
         "--capabilities",
         help="required comma-separated actions supported by the adapter",
     )
-    parser.add_argument("--adapter-timeout", type=float, default=600.0)
+    parser.add_argument(
+        "--adapter-timeout",
+        type=float,
+        help="subprocess deadline; defaults above the maximum runner action deadline",
+    )
     return parser
 
 
@@ -3299,9 +3329,10 @@ async def _main_async(args: argparse.Namespace) -> int:
         unknown_capabilities = sorted(capabilities - known_actions)
         if unknown_capabilities:
             raise ValueError(f"unknown adapter capabilities: {unknown_capabilities}")
+        adapter_timeout = _subprocess_timeout(config, args.adapter_timeout)
         driver: ActionDriver = SubprocessActionDriver(
             command=tuple(args.adapter_command),
-            timeout_s=args.adapter_timeout,
+            timeout_s=adapter_timeout,
             capabilities=capabilities,
         )
     else:

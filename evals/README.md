@@ -60,6 +60,8 @@ python -m evals.runner evals/run.local.json \
 
 `--adapter-command` must be the final option because every following argument is forwarded to the
 adapter subprocess.
+When `--adapter-timeout` is omitted, the runner sets it above the largest action deadline in the
+selected profile. An explicit adapter timeout must also exceed that deadline.
 
 Start the disposable full-stack evaluator with:
 

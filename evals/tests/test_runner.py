@@ -601,6 +601,16 @@ def _config(root: Path, *, profile: str, run_id: str, baseline: Path | None = No
     )
 
 
+def test_subprocess_timeout_exceeds_the_selected_profile_deadline() -> None:
+    config = RunConfig.from_path(EVAL_ROOT / "run.release.local.json")
+
+    assert runner_module._maximum_runner_timeout(config) == 2405
+    assert runner_module._subprocess_timeout(config, None) == 2410
+    with pytest.raises(ValueError, match=r"must exceed.*2405"):
+        runner_module._subprocess_timeout(config, 2405)
+    assert runner_module._subprocess_timeout(config, 2430) == 2430
+
+
 def _compatible_baseline(
     root: Path,
     cases: list[dict[str, Any]],
