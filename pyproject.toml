@@ -59,6 +59,9 @@ memory = [
 # since Graphiti's search returns nothing there. See docs/architecture.md.
 falkordb = [
     "graphiti-core[falkordb]>=0.29,<0.30",
+    # graphiti-core's falkordb extra does not pull the driver in this range, so require it
+    # directly (the module is imported as `falkordb`). See issue #28.
+    "falkordb>=1.1,<2",
 ]
 objectstore = [
     "aioboto3>=13.0",
