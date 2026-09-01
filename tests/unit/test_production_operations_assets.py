@@ -141,4 +141,5 @@ def test_rollout_control_plane_isolated_from_application_children() -> None:
     assert "VERA_EVAL_ROLLOUT_CONTROLLER_TOKEN" in compose
     assert "postgresql+asyncpg://vera_legacy:" in compose
     assert "VERA_MEMORY__FABRIC_ENABLED" in compose
+    assert "VERA_MCP__TOOL_PROFILE: advanced" in compose
     assert "GRANT vera_app TO vera_legacy;" in provision

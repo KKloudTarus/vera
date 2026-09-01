@@ -33,6 +33,7 @@ x-eval-app-env: &eval-app-env
   VERA_OBJECTSTORE__SECRET_KEY: minioadmin
   VERA_MCP__JWT_SECRET: ${VERA_EVAL_MCP_JWT_SECRET:?set a run-specific MCP JWT secret}
   VERA_MCP__REQUIRED_SCOPES: '["memory:read"]'
+  VERA_MCP__TOOL_PROFILE: advanced
   VERA_OBSERVABILITY__OTLP_ENDPOINT: http://jaeger:4317
   OTEL_TRACES_SAMPLER: parentbased_traceidratio
   OTEL_TRACES_SAMPLER_ARG: "0.1"
