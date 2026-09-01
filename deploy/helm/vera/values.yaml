@@ -17,6 +17,29 @@ image:
   # the number to enforce runAsNonRoot; keep it in sync with the Dockerfile.
   runAsUser: 999
 
+secrets:
+  # true: the chart renders the <release>-secrets Secret from the values below (pilot / local).
+  # false: the chart renders no Secret and expects an externally-created <release>-secrets to
+  # already exist (GitOps: keep credentials out of git, create the Secret with kubectl). It
+  # must carry VERA_DB__DSN, VERA_OBJECTSTORE__ACCESS_KEY/SECRET_KEY, POSTGRES_PASSWORD,
+  # MINIO_ROOT_USER, MINIO_ROOT_PASSWORD, and (when set) VERA_MCP__JWT_SECRET,
+  # VERA_MEMORY__OPENAI_API_KEY, VERA_NEO4J__PASSWORD.
+  create: true
+
+ingress:
+  enabled: false
+  className: nginx
+  clusterIssuer: letsencrypt-prod
+  proxyBodySize: "50m"
+  apiHost: ""              # e.g. api-vera.example.net; empty disables the API ingress
+  mcpHost: ""              # e.g. mcp-vera.example.net; empty disables the MCP ingress
+  apiAnnotations: {}
+  mcpAnnotations:
+    # MCP streamable HTTP is long-lived (SSE-like): raise timeouts and turn off buffering.
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+
 # local-dev: MCP uses one unauthenticated local principal and the API auth gate is off.
 # Set environment to prod, api.authRequired true, and mcp.jwtSecret for a real deployment.
 environment: local
@@ -35,8 +58,13 @@ api:
 mcp:
   replicas: 1
   # Empty jwtSecret + environment=local means the MCP serves an unauthenticated local
-  # principal (pilot only). Set a long random secret for the OAuth 2.1 resource-server mode.
+  # principal (pilot only). Set a long random secret for the OAuth 2.1 resource-server mode
+  # (with secrets.create=false, provide VERA_MCP__JWT_SECRET in the external secret instead).
   jwtSecret: ""
+  # The resource-server audience and issuer. Set authAudience to the public MCP URL so a
+  # bearer token's `aud` binds to this server; empty keeps the app defaults.
+  authAudience: ""          # e.g. https://mcp-vera.example.net
+  authIssuer: ""            # e.g. https://mcp-vera.example.net or your IdP
   allowedHosts:
     - "localhost:*"
     - "127.0.0.1:*"

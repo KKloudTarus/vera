@@ -1,0 +1,38 @@
+{{- if .Values.ingress.enabled }}
+{{- $components := list
+    (dict "svc" (include "vera.apiName" .) "port" .Values.api.service.port "host" .Values.ingress.apiHost "ann" .Values.ingress.apiAnnotations)
+    (dict "svc" (include "vera.mcpName" .) "port" .Values.mcp.service.port "host" .Values.ingress.mcpHost "ann" .Values.ingress.mcpAnnotations) }}
+{{- range $c := $components }}
+{{- if $c.host }}
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ $c.svc }}
+  labels: {{- include "vera.labels" $ | nindent 4 }}
+  annotations:
+    cert-manager.io/cluster-issuer: {{ $.Values.ingress.clusterIssuer | quote }}
+    nginx.ingress.kubernetes.io/proxy-body-size: {{ $.Values.ingress.proxyBodySize | quote }}
+    {{- with $c.ann }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  ingressClassName: {{ $.Values.ingress.className }}
+  tls:
+    - hosts:
+        - {{ $c.host | quote }}
+      secretName: {{ $c.host }}-tls
+  rules:
+    - host: {{ $c.host | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $c.svc }}
+                port:
+                  number: {{ $c.port }}
+{{- end }}
+{{- end }}
+{{- end }}
