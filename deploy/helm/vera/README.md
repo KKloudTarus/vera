@@ -80,17 +80,20 @@ longer serves the local principal. Manage secrets with your secret store rather 
 
 ## Choosing the graph backend
 
-`graph.backend` defaults to `falkordb` (light, a Redis-module graph). Neo4j is heavier but a
-drop-in alternative; it needs more memory:
+`graph.backend` defaults to `neo4j`, which works with the released image. FalkorDB is lighter
+(a Redis-module graph) but its Python driver is not in the published image, so selecting it
+needs an image built with the `falkordb` extra:
 
 ```bash
-helm install vera deploy/helm/vera -n vera --create-namespace --set graph.backend=neo4j
+helm install vera deploy/helm/vera -n vera --create-namespace --set graph.backend=falkordb \
+  --set image.repository=<your-falkordb-image> --set image.tag=<tag>
 ```
 
 ## Sizing
 
-The defaults request roughly 1 vCPU / 2.5 GiB across the stack and are comfortable on a node
-with 4 vCPU / 16 GiB. FalkorDB keeps the graph tier light; Neo4j roughly doubles its memory.
+The defaults request roughly 1.3 vCPU / 3 GiB across the stack and are comfortable on a node
+with 4 vCPU / 16 GiB. Neo4j is the largest tier; FalkorDB roughly halves the graph memory once
+its driver is in the image.
 
 ## Uninstall
 

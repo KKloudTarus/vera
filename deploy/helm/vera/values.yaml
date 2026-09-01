@@ -73,7 +73,9 @@ memory:
   openaiApiKey: ""
 
 graph:
-  backend: falkordb           # falkordb (light) | neo4j
+  # neo4j works with the released image out of the box. falkordb is lighter but its Python
+  # driver is not in the published image, so it needs an image built with the falkordb extra.
+  backend: neo4j              # neo4j | falkordb (needs the falkordb driver in the image)
   falkordb:
     image: falkordb/falkordb:latest
     port: 6379

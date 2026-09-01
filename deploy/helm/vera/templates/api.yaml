@@ -15,6 +15,7 @@ spec:
         app.kubernetes.io/instance: {{ .Release.Name }}
         vera.component: api
       annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/config.yaml") . | sha256sum }}
         prometheus.io/scrape: "true"
         prometheus.io/port: "8000"
         prometheus.io/path: "/metrics"
