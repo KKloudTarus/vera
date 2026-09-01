@@ -39,9 +39,15 @@ spec:
           args: ["server", "/data", "--console-address", ":9001"]
           env:
             - name: MINIO_ROOT_USER
-              value: {{ .Values.minio.accessKey | quote }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "vera.fullname" . }}-secrets
+                  key: MINIO_ROOT_USER
             - name: MINIO_ROOT_PASSWORD
-              value: {{ .Values.minio.secretKey | quote }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "vera.fullname" . }}-secrets
+                  key: MINIO_ROOT_PASSWORD
           ports:
             - containerPort: 9000
             - containerPort: 9001
@@ -83,11 +89,21 @@ spec:
       containers:
         - name: mc
           image: {{ .Values.minio.mcImage }}
+          env:
+            - name: MC_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "vera.fullname" . }}-secrets
+                  key: MINIO_ROOT_USER
+            - name: MC_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "vera.fullname" . }}-secrets
+                  key: MINIO_ROOT_PASSWORD
           command:
             - /bin/sh
             - -c
             - >-
               until mc alias set local http://{{ include "vera.minioHost" . }}:9000
-              {{ .Values.minio.accessKey }} {{ .Values.minio.secretKey }}; do
-              echo "waiting for minio"; sleep 3; done;
+              "$MC_USER" "$MC_PASS"; do echo "waiting for minio"; sleep 3; done;
               mc mb --ignore-existing local/{{ .Values.minio.bucket }}

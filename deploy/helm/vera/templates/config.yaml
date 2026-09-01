@@ -26,9 +26,16 @@ data:
   VERA_API__AUTH_REQUIRED: {{ .Values.api.authRequired | quote }}
   VERA_MCP__ALLOWED_HOSTS: {{ toJson .Values.mcp.allowedHosts | quote }}
   VERA_MCP__ALLOWED_ORIGINS: {{ toJson .Values.mcp.allowedOrigins | quote }}
+{{- if .Values.mcp.authAudience }}
+  VERA_MCP__AUTH_AUDIENCE: {{ .Values.mcp.authAudience | quote }}
+{{- end }}
+{{- if .Values.mcp.authIssuer }}
+  VERA_MCP__AUTH_ISSUER: {{ .Values.mcp.authIssuer | quote }}
+{{- end }}
   VERA_OBSERVABILITY__MCP_METRICS_HOST: "0.0.0.0"
   VERA_OBSERVABILITY__MCP_METRICS_PORT: "9101"
   VERA_OBSERVABILITY__WORKER_METRICS_PORT: "9100"
+{{- if .Values.secrets.create }}
 ---
 apiVersion: v1
 kind: Secret
@@ -40,6 +47,9 @@ stringData:
   VERA_DB__DSN: {{ include "vera.dsn" . | quote }}
   VERA_OBJECTSTORE__ACCESS_KEY: {{ .Values.minio.accessKey | quote }}
   VERA_OBJECTSTORE__SECRET_KEY: {{ .Values.minio.secretKey | quote }}
+  POSTGRES_PASSWORD: {{ .Values.postgres.password | quote }}
+  MINIO_ROOT_USER: {{ .Values.minio.accessKey | quote }}
+  MINIO_ROOT_PASSWORD: {{ .Values.minio.secretKey | quote }}
 {{- if eq .Values.graph.backend "neo4j" }}
   VERA_NEO4J__PASSWORD: {{ .Values.graph.neo4j.password | quote }}
 {{- end }}
@@ -48,4 +58,5 @@ stringData:
 {{- end }}
 {{- if .Values.mcp.jwtSecret }}
   VERA_MCP__JWT_SECRET: {{ .Values.mcp.jwtSecret | quote }}
+{{- end }}
 {{- end }}
