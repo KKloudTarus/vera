@@ -1,0 +1,30 @@
+VERA is installed as release "{{ .Release.Name }}" in namespace "{{ .Release.Namespace }}".
+
+Backend: graph = {{ .Values.graph.backend }}, memory provider = {{ .Values.memory.provider }},
+embedder = {{ .Values.memory.embedder }}.
+
+1. Watch it come up (postgres and the graph start first; the migrate hook runs alembic):
+
+   kubectl -n {{ .Release.Namespace }} get pods -w
+
+2. Reach the API and MCP from your machine:
+
+   kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "vera.apiName" . }} 8000:{{ .Values.api.service.port }}
+   kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "vera.mcpName" . }} 8080:{{ .Values.mcp.service.port }}
+
+   API health:   curl -s localhost:8000/health/ready
+   MCP metadata: curl -s localhost:8080/.well-known/oauth-protected-resource   # only when a JWT secret is set
+
+{{- if not .Values.memory.openaiApiKey }}
+
+3. This release runs with no LLM key, so ingestion extraction is a no-op stub. For real
+   semantic ingestion, set memory.openaiApiKey and memory.embedder=openai, then:
+
+   helm upgrade {{ .Release.Name }} <chart> -n {{ .Release.Namespace }} \
+     --set memory.openaiApiKey=sk-... --set memory.embedder=openai
+{{- end }}
+{{- if and (eq .Values.environment "local") (not .Values.mcp.jwtSecret) }}
+
+4. The MCP serves one unauthenticated local principal (environment=local, no JWT secret).
+   For a real deployment set environment=prod, mcp.jwtSecret, and api.authRequired=true.
+{{- end }}

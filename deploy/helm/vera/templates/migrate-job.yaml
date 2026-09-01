@@ -1,0 +1,26 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "vera.fullname" . }}-migrate
+  labels: {{- include "vera.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "1"
+    "helm.sh/hook-delete-policy": before-hook-creation
+spec:
+  backoffLimit: 6
+  template:
+    metadata:
+      labels: {{- include "vera.labels" . | nindent 8 }}
+    spec:
+      restartPolicy: Never
+      initContainers: {{- include "vera.waitForPostgres" . | nindent 8 }}
+      containers:
+        - name: migrate
+          image: {{ include "vera.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["alembic", "upgrade", "head"]
+          envFrom: {{- include "vera.envFrom" . | nindent 12 }}
+          resources:
+            requests: { cpu: "100m", memory: "256Mi" }
+            limits: { cpu: "500m", memory: "512Mi" }

@@ -1,0 +1,60 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "vera.workerName" . }}
+  labels: {{- include "vera.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.worker.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      vera.component: worker
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        vera.component: worker
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9100"
+        prometheus.io/path: "/metrics"
+    spec:
+      securityContext:
+        runAsNonRoot: true
+      initContainers: {{- include "vera.waitForPostgres" . | nindent 8 }}
+      containers:
+        - name: worker
+          image: {{ include "vera.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["python", "-m", "vera.entrypoints.worker.main"]
+          ports:
+            - { containerPort: 9100, name: metrics }
+          envFrom: {{- include "vera.envFrom" . | nindent 12 }}
+          resources: {{- toYaml .Values.worker.resources | nindent 12 }}
+{{- if .Values.calibrate.enabled }}
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "vera.fullname" . }}-calibrate
+  labels: {{- include "vera.labels" . | nindent 4 }}
+spec:
+  schedule: {{ .Values.calibrate.schedule | quote }}
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      template:
+        spec:
+          restartPolicy: Never
+          initContainers: {{- include "vera.waitForPostgres" . | nindent 12 }}
+          containers:
+            - name: calibrate
+              image: {{ include "vera.image" . }}
+              imagePullPolicy: {{ .Values.image.pullPolicy }}
+              command: ["python", "-m", "vera.entrypoints.calibrate", "--apply"]
+              envFrom: {{- include "vera.envFrom" . | nindent 16 }}
+              resources:
+                requests: { cpu: "100m", memory: "256Mi" }
+                limits: { cpu: "1", memory: "512Mi" }
+{{- end }}
