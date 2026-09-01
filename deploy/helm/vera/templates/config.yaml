@@ -34,6 +34,16 @@ data:
   VERA_OBJECTSTORE__ENDPOINT_URL: "http://{{ include "vera.minioHost" . }}:9000"
   VERA_OBJECTSTORE__BUCKET: {{ .Values.minio.bucket | quote }}
   VERA_API__AUTH_REQUIRED: {{ .Values.api.authRequired | quote }}
+  VERA_API__REGISTRATION_OPEN: {{ .Values.api.registrationOpen | quote }}
+{{- if .Values.bootstrap.enabled }}
+  VERA_BOOTSTRAP__ENABLED: "true"
+  VERA_BOOTSTRAP__ADMIN_EMAIL: {{ .Values.bootstrap.adminEmail | quote }}
+  VERA_BOOTSTRAP__ADMIN_DISPLAY_NAME: {{ .Values.bootstrap.adminDisplayName | quote }}
+  VERA_BOOTSTRAP__ORG_SLUG: {{ .Values.bootstrap.orgSlug | quote }}
+  VERA_BOOTSTRAP__ORG_NAME: {{ .Values.bootstrap.orgName | quote }}
+  VERA_BOOTSTRAP__WORKSPACE_SLUG: {{ .Values.bootstrap.workspaceSlug | quote }}
+  VERA_BOOTSTRAP__WORKSPACE_NAME: {{ .Values.bootstrap.workspaceName | quote }}
+{{- end }}
   VERA_MCP__ALLOWED_HOSTS: {{ toJson .Values.mcp.allowedHosts | quote }}
   VERA_MCP__ALLOWED_ORIGINS: {{ toJson .Values.mcp.allowedOrigins | quote }}
 {{- if .Values.mcp.authAudience }}
@@ -68,5 +78,8 @@ stringData:
 {{- end }}
 {{- if .Values.mcp.jwtSecret }}
   VERA_MCP__JWT_SECRET: {{ .Values.mcp.jwtSecret | quote }}
+{{- end }}
+{{- if .Values.bootstrap.adminApiKey }}
+  VERA_BOOTSTRAP__ADMIN_API_KEY: {{ .Values.bootstrap.adminApiKey | quote }}
 {{- end }}
 {{- end }}

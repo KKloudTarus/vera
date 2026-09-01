@@ -1,8 +1,10 @@
 """Identity and tenancy endpoints: the admin surface for access control.
 
-Registration is open (self-service signup returns an API key); everything else needs
-an authenticated principal, and workspace-scoped actions check the caller's role. VERA
-assigns every group_id, so no endpoint accepts one.
+Self-service signup (POST /identity/register) returns an API key when
+``api.registration_open`` is on; a closed deployment turns it off and an admin hands out
+access instead (POST /identity/users). Everything else needs an authenticated principal,
+and workspace-scoped actions check the caller's role. VERA assigns every group_id, so no
+endpoint accepts one.
 """
 
 from __future__ import annotations
@@ -14,7 +16,12 @@ from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, Field
 
 from vera.domain.identity.models import Role
-from vera.entrypoints.api.deps import IdentityServiceDep, PrincipalDep, ScopesDep
+from vera.entrypoints.api.deps import (
+    ContainerDep,
+    IdentityServiceDep,
+    PrincipalDep,
+    ScopesDep,
+)
 from vera.shared.errors import Conflict, DomainError, Err, Forbidden, NotFound, Result
 
 router = APIRouter(prefix="/identity", tags=["identity"])
@@ -127,6 +134,20 @@ class ServiceAccountOut(BaseModel):
     api_key: str  # shown once
 
 
+class ProvisionUserRequest(BaseModel):
+    workspace_id: UUID
+    display_name: str = Field(min_length=1, max_length=256)
+    email: str | None = Field(default=None, max_length=320)
+    role: Role = Role.MEMBER
+
+
+class ProvisionedUserOut(BaseModel):
+    principal_id: str
+    workspace_id: str
+    role: str
+    api_key: str  # shown once
+
+
 class ApiKeyOut(BaseModel):
     credential_id: str
     principal_id: str
@@ -145,7 +166,14 @@ class MeOut(BaseModel):
 
 
 @router.post("/register", response_model=RegisteredOut, status_code=status.HTTP_201_CREATED)
-async def register(req: RegisterRequest, identity: IdentityServiceDep) -> RegisteredOut:
+async def register(
+    req: RegisterRequest, identity: IdentityServiceDep, container: ContainerDep
+) -> RegisteredOut:
+    if not container.settings.api.registration_open:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="self-service registration is closed; ask an admin to provision an account",
+        )
     principal, issued = await identity.register(display_name=req.display_name, email=req.email)
     return RegisteredOut(
         principal_id=str(principal.id),
@@ -251,6 +279,32 @@ async def create_service_account(
         id=str(account.id),
         workspace_id=str(account.workspace_id),
         name=account.name,
+        api_key=issued.api_key,
+    )
+
+
+@router.post(
+    "/users",
+    response_model=ProvisionedUserOut,
+    status_code=status.HTTP_201_CREATED,
+    summary="Provision a user in a workspace and issue its first key (workspace admin)",
+)
+async def provision_user(
+    req: ProvisionUserRequest, principal: PrincipalDep, identity: IdentityServiceDep
+) -> ProvisionedUserOut:
+    created, issued = _unwrap(
+        await identity.provision_user(
+            actor=principal,
+            workspace_id=req.workspace_id,
+            display_name=req.display_name,
+            email=req.email,
+            role=req.role,
+        )
+    )
+    return ProvisionedUserOut(
+        principal_id=str(created.id),
+        workspace_id=str(req.workspace_id),
+        role=req.role.value,
         api_key=issued.api_key,
     )
 

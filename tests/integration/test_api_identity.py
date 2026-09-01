@@ -127,6 +127,24 @@ async def test_registration_and_me_require_a_valid_credential(
         assert body["group_ids"] == [body["personal_group_id"]]  # only personal scope yet
 
 
+async def test_closed_registration_rejects_signup(
+    make_container: Callable[[object], Container],
+    graphiti_engine: GraphitiMemoryEngine,
+) -> None:
+    from dataclasses import replace
+
+    base = make_container(graphiti_engine)
+    closed_api = base.settings.api.model_copy(update={"registration_open": False})
+    container = replace(base, settings=base.settings.model_copy(update={"api": closed_api}))
+
+    app = create_app()
+    app.state.container = container
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        blocked = await client.post("/identity/register", json={"display_name": "Nope"})
+        assert blocked.status_code == 403
+
+
 async def test_two_workspaces_cannot_see_each_others_memory(
     sessionmaker: async_sessionmaker[AsyncSession],
     make_container: Callable[[object], Container],

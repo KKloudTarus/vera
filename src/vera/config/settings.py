@@ -56,12 +56,37 @@ class ApiSettings(BaseModel):
     # Require a valid principal on protected routes. Off by default so local dev and the
     # test suite run without minting credentials; production sets it on.
     auth_required: bool = False
+    # Open self-service signup at POST /identity/register. On by default for local dev and
+    # tests; a shared deployment sets it off so only an admin provisions principals (a
+    # bootstrapped init admin then hands out keys). Closing it does not affect the admin
+    # provisioning endpoints, only the public signup route.
+    registration_open: bool = True
     # OIDC login. Enabled when a signing key is set; without it only API keys authenticate.
     oidc_issuer: str = "https://auth.vera.local"
     oidc_audience: str = "https://api.vera.local"
     oidc_signing_key: SecretStr | None = None
     oidc_jwks_url: str | None = None  # production: fetch the issuer's rotating keys
     oidc_algorithms: list[str] = Field(default_factory=lambda: ["RS256"])
+
+
+class BootstrapSettings(BaseModel):
+    """One-shot seeding of an initial admin, so a closed deployment still has a first
+    principal that can provision the rest.
+
+    Idempotent by design: the principal is keyed by email, the org and workspace by slug,
+    and the credential by the key's clear prefix, so running the seed again is a no-op.
+    ``admin_api_key`` is the full ``vera_<prefix>.<secret>`` minted out of band and kept in
+    the external secret; only its hash is stored, so the value never lands in git.
+    """
+
+    enabled: bool = False
+    admin_email: str = "admin@vera.local"
+    admin_display_name: str = "VERA Admin"
+    org_slug: str = "root"
+    org_name: str = "Root Organization"
+    workspace_slug: str = "root"
+    workspace_name: str = "Root Workspace"
+    admin_api_key: SecretStr | None = None
 
 
 class WorkerSettings(BaseModel):
@@ -304,6 +329,7 @@ class Settings(BaseSettings):
     db: DatabaseSettings
     objectstore: ObjectStoreSettings = Field(default_factory=ObjectStoreSettings)
     api: ApiSettings = Field(default_factory=ApiSettings)
+    bootstrap: BootstrapSettings = Field(default_factory=BootstrapSettings)
     worker: WorkerSettings = Field(default_factory=WorkerSettings)
     mcp: McpSettings = Field(default_factory=McpSettings)
     knowledge: KnowledgeSettings = Field(default_factory=KnowledgeSettings)

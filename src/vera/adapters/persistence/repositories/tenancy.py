@@ -83,3 +83,9 @@ class SqlAlchemyTenancyRepository:
     async def get_workspace(self, workspace_id: UUID) -> Workspace | None:
         row = await self._session.get(WorkspaceRow, workspace_id)
         return _to_workspace(row) if row is not None else None
+
+    async def get_organization(self, org_id: UUID) -> Organization | None:
+        row = await self._session.get(OrganizationRow, org_id)
+        if row is None:
+            return None
+        return Organization(id=row.id, slug=row.slug, name=row.name, group_id=row.group_id)
