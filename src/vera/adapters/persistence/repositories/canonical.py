@@ -60,7 +60,9 @@ class SqlAlchemyCanonicalEntityRepository:
                 continue
             seen.add(norm)
             self._session.add(
-                EntityAliasRow(canonical_entity_id=entity.id, group_id=group_id, alias=alias)
+                EntityAliasRow(
+                    canonical_entity_id=entity.id, group_id=group_id, alias=alias, alias_norm=norm
+                )
             )
         await self._session.flush()
         return _to_entity(entity)
@@ -86,7 +88,9 @@ class SqlAlchemyCanonicalEntityRepository:
         if exists is not None:
             return
         self._session.add(
-            EntityAliasRow(canonical_entity_id=entity_id, group_id=group_id, alias=alias)
+            EntityAliasRow(
+                canonical_entity_id=entity_id, group_id=group_id, alias=alias, alias_norm=norm
+            )
         )
         await self._session.flush()
 

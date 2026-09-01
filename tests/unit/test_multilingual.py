@@ -4,6 +4,22 @@ from __future__ import annotations
 
 from vera.adapters.graph.graphiti_adapter import _FULLTEXT_TOKEN
 from vera.application.curation.chunking import _SENTENCE_SPLIT
+from vera.shared.text import normalize_name
+
+
+def test_normalize_name_preserves_vietnamese_diacritics() -> None:
+    assert normalize_name("Đội nền tảng thanh toán") == "đội nền tảng thanh toán"
+    assert normalize_name("Nguyễn Văn A") == "nguyễn văn a"
+
+
+def test_normalize_name_collapses_separators_and_trims() -> None:
+    assert normalize_name("  Payment_Service!!  Core ") == "payment service core"
+
+
+def test_normalize_name_keeps_accents_significant() -> None:
+    # Accents change meaning in Vietnamese, so accented and unaccented forms differ.
+    assert normalize_name("má") != normalize_name("ma")
+    assert normalize_name("Đội") != normalize_name("Doi")
 
 
 def test_sentence_split_breaks_before_accented_uppercase() -> None:

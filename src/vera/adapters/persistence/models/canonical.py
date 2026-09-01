@@ -12,7 +12,6 @@ from typing import Any
 from uuid import UUID
 
 from sqlalchemy import (
-    Computed,
     DateTime,
     ForeignKey,
     Index,
@@ -29,11 +28,6 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from vera.adapters.persistence.base import Base
 from vera.adapters.persistence.models._mixins import UUIDPK, Timestamps
-
-# Immutable normalization so it can back a generated column: lowercase, replace any
-# run of non-alphanumerics with a single space, trim. Accent folding happens in the
-# app layer before write, since unaccent() is not IMMUTABLE.
-_NORM = "lower(btrim(regexp_replace({col}, '[^a-zA-Z0-9]+', ' ', 'g')))"
 
 
 class CanonicalEntityRow(Base, UUIDPK, Timestamps):
@@ -68,9 +62,9 @@ class EntityAliasRow(Base, UUIDPK):
     )
     group_id: Mapped[str] = mapped_column(String(256), nullable=False)
     alias: Mapped[str] = mapped_column(String(512), nullable=False)
-    alias_norm: Mapped[str] = mapped_column(
-        String(512), Computed(_NORM.format(col="alias"), persisted=True)
-    )
+    # Written by the app from normalize_name(alias) so it is Unicode-aware and preserves
+    # diacritics; not a database-computed expression (see shared/text.py).
+    alias_norm: Mapped[str] = mapped_column(String(512), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
