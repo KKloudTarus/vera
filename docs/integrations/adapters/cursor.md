@@ -3,11 +3,10 @@
 Wire VERA into Cursor as a remote MCP server. Values come from the official Cursor MCP docs.
 The example config in `examples/integrations/cursor/mcp.json` is validated on every test run.
 
-!!! note "Status"
-    Connect, authenticate, verify, and uninstall are complete and B-independent. A full
-    end-to-end `PASS` and the whole [verification matrix](../GUIDE.md#verification-matrix)
-    also need project discovery and proposal undo (#15). Until then this runtime is not marked
-    released at Tier 1.
+!!! success "Status: Tier-1 reference available"
+    The configuration is schema-tested and the server prerequisites are available. An
+    installation reports `PASS` only after Cursor loads it, `knowledge_bootstrap` resolves
+    one project, and one bounded read succeeds under the target deployment's policy.
 
 ## At a glance
 
@@ -78,7 +77,9 @@ approving. Servers are enabled or disabled from the Customize panel in the sideb
 
 Enable VERA in the Customize panel, then confirm it connected. Cursor does not document a
 status dot; open the Output panel and select MCP Logs to check for connection errors. A bounded
-`knowledge_get_context` read confirms the tools work.
+`knowledge_bootstrap` call with the sanitized Git remote and current branch, followed by a
+bounded `knowledge_get_context` call with `persist=false`, confirms the tools and project
+mapping work.
 
 ## Hooks and plugins
 
@@ -94,5 +95,6 @@ context hooks are not part of this adapter.
 ## Known limitations
 
 - Project vs global precedence is not documented; do not rely on one overriding the other.
-- Project discovery, ambiguous / out-of-scope / monorepo / worktree scenarios, and
-  `auto-propose` depend on #15. Use `suggest`.
+- Cloud and managed-policy surfaces are not covered by this local adapter.
+- `suggest` remains the default. Enable `auto-propose` only with explicit user selection and
+  the `personal-proposal` capability; report and undo through the proposal lifecycle tools.

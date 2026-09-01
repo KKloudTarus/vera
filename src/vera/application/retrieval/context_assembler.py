@@ -178,13 +178,21 @@ def _from_passage(hit: PassageHit, kind: str) -> _Candidate:
 
 
 def _dedup(candidates: list[_Candidate]) -> list[_Candidate]:
-    seen: set[tuple[str, str]] = set()
+    seen: dict[tuple[str, str], int] = {}
     out: list[_Candidate] = []
     for c in candidates:
-        key = (c.kind, c.ref)
-        if key in seen:
+        key = ("fact" if c.kind == "fact" else "chunk", c.ref)
+        index = seen.get(key)
+        if index is not None:
+            previous = out[index]
+            if c.relevance_raw > previous.relevance_raw or (
+                c.relevance_raw == previous.relevance_raw
+                and c.kind == "code"
+                and previous.kind == "passage"
+            ):
+                out[index] = c
             continue
-        seen.add(key)
+        seen[key] = len(out)
         out.append(c)
     return out
 

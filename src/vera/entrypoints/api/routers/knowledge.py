@@ -15,15 +15,24 @@ from uuid import UUID
 from fastapi import APIRouter, HTTPException, Query, status
 from pydantic import AwareDatetime, BaseModel, Field
 
-from vera.application.snapshot import SnapshotNotFoundError, SnapshotNotReproducibleError
+from vera.application.snapshot import (
+    ContextPackExpiredError,
+    ContextPackQuotaExceededError,
+    SnapshotNotFoundError,
+    SnapshotNotReproducibleError,
+)
 from vera.entrypoints.api.deps import KnowledgeServiceDep, PrincipalDep
-from vera.entrypoints.knowledge import ScopeError
+from vera.entrypoints.knowledge import InputError, ScopeError
 
 router = APIRouter(prefix="/v2/knowledge", tags=["knowledge"])
 
 
 def _forbidden(exc: ScopeError) -> HTTPException:
     return HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc))
+
+
+def _bad_request(exc: InputError) -> HTTPException:
+    return HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
 
 
 class ContextRequest(BaseModel):
@@ -34,6 +43,7 @@ class ContextRequest(BaseModel):
     token_budget: int = Field(default=2000, ge=100, le=32000)
     as_of: AwareDatetime | None = None
     hints: dict[str, Any] = Field(default_factory=dict)
+    persist: bool = False
 
 
 class SearchRequest(BaseModel):
@@ -45,11 +55,15 @@ class SearchRequest(BaseModel):
 
 
 class ProposeRequest(BaseModel):
-    subject: str = Field(min_length=1)
-    predicate: str = Field(min_length=1)
-    object: str = Field(min_length=1)
+    subject: str = Field(min_length=1, max_length=512)
+    predicate: str = Field(min_length=1, max_length=2048)
+    object: str = Field(min_length=1, max_length=2048)
     qualifiers: dict[str, Any] = Field(default_factory=dict)
-    evidence_text: str | None = None
+    evidence_text: str | None = Field(default=None, max_length=8000)
+    runtime: str | None = Field(default=None, max_length=256)
+    session_ref: str | None = Field(default=None, max_length=256)
+    task_ref: str | None = Field(default=None, max_length=256)
+    repository_ref: str | None = Field(default=None, max_length=256)
 
 
 class SnapshotRequest(BaseModel):
@@ -71,6 +85,7 @@ async def get_context(
             token_budget=req.token_budget,
             as_of=req.as_of,
             hints=req.hints,
+            persist=req.persist,
         )
     except ScopeError as exc:
         raise _forbidden(exc) from exc
@@ -78,6 +93,8 @@ async def get_context(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     except SnapshotNotReproducibleError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except ContextPackQuotaExceededError as exc:
+        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=str(exc)) from exc
 
 
 @router.post("/search", summary="Combined, cited search (no persisted pack)")
@@ -95,6 +112,8 @@ async def search(
         )
     except ScopeError as exc:
         raise _forbidden(exc) from exc
+    except InputError as exc:
+        raise _bad_request(exc) from exc
 
 
 @router.get("/communities", summary="Derived community summaries")
@@ -168,10 +187,9 @@ async def get_evidence(
 
 
 class FeedbackRequest(BaseModel):
+    context_pack_id: str = Field(min_length=1)
     result_ref: str = Field(min_length=1)  # a fact_key or a context-pack id
     signal: str = Field(pattern="^(up|down)$")
-    query: str = ""
-    signals: dict[str, float] = Field(default_factory=dict)
 
 
 @router.post("/feedback", summary="Record up/down feedback on a knowledge result")
@@ -181,13 +199,18 @@ async def record_feedback(
     try:
         return await service.record_feedback(
             principal.id,
+            context_pack_id=body.context_pack_id,
             result_ref=body.result_ref,
             signal=body.signal,
-            query=body.query,
-            signals=body.signals or None,
         )
     except ScopeError as exc:
         raise _forbidden(exc) from exc
+    except InputError as exc:
+        raise _bad_request(exc) from exc
+    except ContextPackExpiredError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_410_GONE, detail="context pack expired"
+        ) from exc
 
 
 @router.get("/changes", summary="The semantic change feed")
@@ -240,9 +263,55 @@ async def propose(
             object=req.object,
             qualifiers=req.qualifiers,
             evidence_text=req.evidence_text,
+            runtime=req.runtime,
+            session_ref=req.session_ref,
+            task_ref=req.task_ref,
+            repository_ref=req.repository_ref,
         )
     except ScopeError as exc:
         raise _forbidden(exc) from exc
+    except InputError as exc:
+        raise _bad_request(exc) from exc
+
+
+@router.post(
+    "/proposals/{fact_key}/retract",
+    summary="Retract the caller's own pending personal proposal",
+)
+async def retract_proposal(
+    fact_key: str, principal: PrincipalDep, service: KnowledgeServiceDep
+) -> dict[str, Any]:
+    try:
+        return await service.retract_proposal(principal.id, fact_key=fact_key)
+    except ScopeError as exc:
+        raise _forbidden(exc) from exc
+
+
+@router.get("/proposals/report", summary="Report proposals created for one task context")
+async def proposal_report(
+    principal: PrincipalDep,
+    service: KnowledgeServiceDep,
+    runtime: str | None = None,
+    session_ref: str | None = None,
+    task_ref: str | None = None,
+    repository_ref: str | None = None,
+    cursor: str | None = None,
+    limit: int = Query(default=50, ge=1, le=100),
+) -> dict[str, Any]:
+    try:
+        return await service.proposal_report(
+            principal.id,
+            runtime=runtime,
+            session_ref=session_ref,
+            task_ref=task_ref,
+            repository_ref=repository_ref,
+            cursor=cursor,
+            limit=limit,
+        )
+    except ScopeError as exc:
+        raise _forbidden(exc) from exc
+    except InputError as exc:
+        raise _bad_request(exc) from exc
 
 
 # --- Governance and administration (backend for a future Knowledge Workbench, section 14) ---

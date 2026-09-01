@@ -1,9 +1,8 @@
 """Snapshot and context-pack application services (Phase 5).
 
-SnapshotService freezes and reads immutable snapshots. ContextPackService assembles a bounded,
-cited pack for a task, optionally against a snapshot (so the pack is reproducible after newer
-knowledge arrives), serializes the assembled result, and persists it. The pack carries the
-conflict and freshness counts the assembler reports.
+SnapshotService freezes and reads immutable snapshots. ContextPackService assembles bounded,
+cited context for a task, optionally against a snapshot, and persists it only when requested.
+The response carries the conflict and freshness counts the assembler reports.
 """
 
 from __future__ import annotations
@@ -25,11 +24,15 @@ from vera.shared.types import JsonDict
 
 _POLICY_VERSION = f"ontology-v{ONTOLOGY_VERSION}"
 # Bump for any scoring algorithm, default RetrievalWeights, or packing behavior change.
-_ASSEMBLER_VERSION = "context-assembler-v2"
+_ASSEMBLER_VERSION = "context-assembler-v3"
 _PACK_TTL = timedelta(days=30)
 
 
 class ContextPackExpiredError(Exception):
+    pass
+
+
+class ContextPackQuotaExceededError(Exception):
     pass
 
 
@@ -135,9 +138,11 @@ class ContextPackService:
         *,
         assembler: ContextAssembler,
         uow_factory: Callable[[], SnapshotUnitOfWork],
+        max_persisted_per_group: int = 1000,
     ) -> None:
         self._assembler = assembler
         self._uow_factory = uow_factory
+        self._max_persisted_per_group = max_persisted_per_group
 
     async def create(
         self,
@@ -154,6 +159,7 @@ class ContextPackService:
         active_embedding_version: JsonDict | None = None,
         active_retrieval_index_version: str | None = None,
         actor: str | None = None,
+        persist: bool = True,
     ) -> ContextPack:
         passage_cutoff: datetime | None = None
         if snapshot_id is not None:
@@ -224,8 +230,44 @@ class ContextPackService:
         canonical_request = json.dumps(request, sort_keys=True, separators=(",", ":"))
         normalized_request = cast("JsonDict", json.loads(canonical_request))
         request_hash = hashlib.sha256(canonical_request.encode()).hexdigest()
+        expires_at = utc_now() + _PACK_TTL
+        result_references = [str(result["ref"]) for result in results]
+        if not persist:
+            return ContextPack(
+                id=None,
+                group_id=group_id,
+                created_at=utc_now(),
+                query=query,
+                token_estimate=assembled.token_estimate,
+                result_count=len(assembled.results),
+                omitted=assembled.omitted,
+                conflicts=assembled.conflicts,
+                freshness_warnings=assembled.freshness_warnings,
+                results=results,
+                request_hash=request_hash,
+                result_references=result_references,
+                expires_at=expires_at,
+                assembler_version=_ASSEMBLER_VERSION,
+                request=normalized_request,
+                snapshot_id=snapshot_id,
+            )
         async with self._uow_factory() as uow:
             await uow.use_tenant(group_id)
+            pack_count = await uow.context_packs.prepare_save(group_id=group_id)
+            existing = await uow.context_packs.equivalent(
+                group_id=group_id,
+                request_hash=request_hash,
+                result_references=result_references,
+                results=results,
+                assembler_version=_ASSEMBLER_VERSION,
+            )
+            if existing is not None:
+                await uow.commit()
+                return existing
+            if pack_count >= self._max_persisted_per_group:
+                raise ContextPackQuotaExceededError(
+                    f"context pack quota reached for scope {group_id}"
+                )
             pack = await uow.context_packs.save(
                 group_id=group_id,
                 query=query,
@@ -238,8 +280,8 @@ class ContextPackService:
                 freshness_warnings=assembled.freshness_warnings,
                 results=results,
                 request_hash=request_hash,
-                result_references=[str(result["ref"]) for result in results],
-                expires_at=utc_now() + _PACK_TTL,
+                result_references=result_references,
+                expires_at=expires_at,
                 assembler_version=_ASSEMBLER_VERSION,
                 request=normalized_request,
                 actor=actor,

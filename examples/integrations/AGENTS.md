@@ -4,6 +4,9 @@ This project uses VERA verified organizational memory, reached over MCP.
 
 ## Memory
 
+- At session start, call `knowledge_bootstrap` with only the sanitized Git
+  remote and current branch. Use its selected project and granted capabilities;
+  stop for user selection when the mapping is ambiguous.
 - Before assuming a team decision, convention, constraint, or prior outcome,
   retrieve it from VERA. Call `knowledge_get_context` with the current
   repository, branch, and code path, and cite the source and verification state
@@ -19,5 +22,9 @@ This project uses VERA verified organizational memory, reached over MCP.
   and call `knowledge_propose` only after they approve. A proposal is personal
   and pending until a human verifies it; never publish shared truth.
 - Do not save transcripts, whole answers, secrets, or raw source code.
+- At task end, call `knowledge_proposal_report` with the same task/session
+  reference and summarize every created, skipped, deduplicated, conflicted, or
+  rejected proposal. Use `knowledge_retract_proposal` when the user asks to undo
+  a pending personal proposal.
 
 The full behavior is in the VERA skill (`vera-memory`).

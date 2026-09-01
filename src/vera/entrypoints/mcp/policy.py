@@ -39,17 +39,24 @@ def scope_for(tool_class: ToolClass, mcp: McpSettings) -> str:
 
 
 def annotations_for(
-    tool_class: ToolClass, *, read_only: bool | None = None, idempotent: bool | None = None
+    tool_class: ToolClass,
+    *,
+    read_only: bool | None = None,
+    idempotent: bool | None = None,
+    destructive: bool = False,
 ) -> ToolAnnotations:
     """Behavioral hints for a tool. Reads default to read-only and idempotent; writes to
-    neither. ``knowledge_get_context`` overrides ``read_only`` because it persists a pack.
-    Every tool queries an open knowledge base and none deletes, so open-world is always
-    true and destructive always false.
+    neither. ``knowledge_get_context`` overrides ``read_only`` because it can persist a pack.
+    Every tool queries an open knowledge base, so open-world is always true. Self-retraction
+    overrides the destructive hint because it permanently retracts a proposal.
     """
     ro = tool_class is ToolClass.READ if read_only is None else read_only
     idem = tool_class is ToolClass.READ if idempotent is None else idempotent
     return ToolAnnotations(
-        read_only_hint=ro, destructive_hint=False, idempotent_hint=idem, open_world_hint=True
+        read_only_hint=ro,
+        destructive_hint=destructive,
+        idempotent_hint=idem,
+        open_world_hint=True,
     )
 
 
@@ -77,12 +84,13 @@ _BOUNDS: dict[str, _Int | _Float | _Str] = {
     "query": _Str(1, 8192),
     "entity": _Str(1, 1024),
     "entity_id": _Str(1, 512),
-    "subject": _Str(1, 2048),
+    "subject": _Str(1, 512),
     "predicate": _Str(1, 2048),
     "object": _Str(1, 2048),
-    "evidence_text": _Str(0, 8192),
+    "evidence_text": _Str(0, 8000),
     "project": _Str(1, 512),
     "repository": _Str(1, 1024),
+    "repository_ref": _Str(1, 256),
     "branch": _Str(1, 512),
     "code_path": _Str(1, 1024),
     "document_type": _Str(1, 256),
@@ -91,11 +99,15 @@ _BOUNDS: dict[str, _Int | _Float | _Str] = {
     "source_id": _Str(1, 512),
     "snapshot_id": _Str(1, 512),
     "pack_id": _Str(1, 512),
+    "context_pack_id": _Str(1, 512),
     "community_id": _Str(1, 512),
     "derivation_run_id": _Str(1, 512),
     "cursor": _Str(1, 1024),
     "result_ref": _Str(1, 512),
     "usage_ref": _Str(1, 512),
+    "runtime": _Str(1, 256),
+    "session_ref": _Str(1, 256),
+    "task_ref": _Str(1, 256),
     "as_of": _Str(1, 64),
     "known_as_of": _Str(1, 64),
     "limit": _Int(1, 50),
@@ -111,6 +123,7 @@ _LIMIT_MAX: dict[str, int] = {
     "memory_recent_changes": 200,
     "knowledge_explore": 200,
     "knowledge_get_entity": 500,
+    "knowledge_proposal_report": 100,
     "knowledge_search_communities": 100,
     "knowledge_get_community_lineage": 200,
     "knowledge_get_changes": 200,
@@ -186,8 +199,8 @@ class QuotaRule:
 
 
 def quota_for(tool: str, tool_class: ToolClass, mcp: McpSettings) -> QuotaRule | None:
-    """The abuse bucket a tool draws from, or ``None`` when quotas are disabled. Persisted
-    context (``knowledge_get_context``) and snapshots are budgeted apart from plain reads.
+    """The abuse bucket a tool draws from, or ``None`` when quotas are disabled. Context
+    assembly (which can persist) and snapshots are budgeted apart from plain reads.
     """
     if not mcp.quota_enabled:
         return None

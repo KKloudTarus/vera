@@ -1308,7 +1308,7 @@ async def test_erasure_removes_source_only_snapshot_and_denies_trusted_role(
             request_hash="0" * 64,
             result_references=[],
             expires_at=utc_now() + timedelta(days=1),
-            assembler_version="context-assembler-v2",
+            assembler_version="context-assembler-v3",
             request={"query": "eks", "snapshot_id": snapshot.id},
         )
         await uow.commit()

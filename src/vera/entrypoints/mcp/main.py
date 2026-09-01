@@ -3,8 +3,8 @@
 Stateless (MCP spec 2026-07-28), so it scales behind an ordinary load balancer. When
 a JWT secret is configured it runs as an OAuth 2.1 Resource Server (RFC 9728) and the
 SDK returns 401 with protected-resource metadata for unauthenticated calls. Most tools
-are reads; four write to the caller's own scope (propose, feedback, create_snapshot,
-and get_context, which persists a context pack). No tool performs raw graph mutation
+are reads; proposal, feedback, self-retract, snapshot, and explicitly persisted context
+operations can change state. No tool performs raw graph mutation
 and none publishes shared truth. Every tool resolves the caller's scopes server-side
 from its principal, and ``Guard`` enforces the tool's authorization class, input
 bounds, and abuse quota before the body runs.
@@ -16,6 +16,7 @@ bounds, and abuse quota before the body runs.
 from __future__ import annotations
 
 import contextlib
+import functools
 from collections.abc import AsyncGenerator
 from datetime import datetime
 from typing import Any, Literal
@@ -31,6 +32,7 @@ from vera.adapters.mcp.auth import JwtTokenVerifier
 from vera.adapters.persistence.repositories.scope import SqlAlchemyScopeResolver
 from vera.adapters.persistence.unit_of_work import SqlAlchemyUnitOfWork
 from vera.adapters.resilience.quota import build_quota_limiter
+from vera.application.snapshot import ContextPackExpiredError
 from vera.bootstrap import (
     Container,
     build_container,
@@ -39,7 +41,7 @@ from vera.bootstrap import (
 )
 from vera.config.settings import Settings, get_settings
 from vera.domain.identity.models import PrincipalKind
-from vera.entrypoints.knowledge import KnowledgeService
+from vera.entrypoints.knowledge import InputError, KnowledgeService
 from vera.entrypoints.mcp.guard import Guard
 from vera.entrypoints.mcp.policy import ToolClass
 from vera.entrypoints.mcp.service import VeraMcpService
@@ -48,12 +50,15 @@ from vera.observability import configure_logging, get_logger
 log = get_logger(__name__)
 
 
-def _parse_instant(value: str | None) -> datetime | None:
+def _parse_instant(value: str | None, *, field: str = "as_of") -> datetime | None:
     if value is None:
         return None
-    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise InputError(field, "must be an ISO-8601 timestamp") from exc
     if parsed.utcoffset() is None:
-        raise ValueError("timestamp must include a UTC offset")
+        raise InputError(field, "must include a UTC offset")
     return parsed
 
 
@@ -67,6 +72,22 @@ def auth_profile(settings: Settings) -> Literal["local-dev", "remote-authenticat
     per-class scopes. Documented so the bootstrap/status surface can report it.
     """
     return "local-dev" if _uses_local_principal(settings) else "remote-authenticated"
+
+
+def _capability_classes(settings: Settings) -> tuple[str, ...]:
+    classes = (
+        (settings.mcp.scope_read, "read"),
+        (settings.mcp.scope_propose, "personal-proposal"),
+        (settings.mcp.scope_feedback, "feedback"),
+        (settings.mcp.scope_snapshot, "snapshot"),
+    )
+    if _uses_local_principal(settings):
+        return tuple(name for _, name in classes)
+    token = get_access_token()
+    if token is None:
+        return ()
+    granted = set(token.scopes)
+    return tuple(name for scope, name in classes if scope in granted)
 
 
 def _principal_id(settings: Settings) -> UUID:
@@ -90,6 +111,11 @@ async def _ensure_local_principal(container: Container, principal_id: UUID) -> N
                 personal_group_id=f"u:{principal_id}",
             )
             await uow.commit()
+
+
+async def _principal_exists(container: Container, principal_id: UUID) -> bool:
+    async with SqlAlchemyUnitOfWork(container.sessionmaker) as uow:
+        return await uow.identity.get_principal(principal_id) is not None
 
 
 def build_server(container: Container, settings: Settings) -> MCPServer:
@@ -140,6 +166,7 @@ def build_server(container: Container, settings: Settings) -> MCPServer:
             issuer=settings.mcp.auth_issuer,
             audience=settings.mcp.auth_audience,
             required_scopes=settings.mcp.required_scopes,
+            principal_exists=functools.partial(_principal_exists, container),
         )
         auth = AuthSettings(
             issuer_url=AnyHttpUrl(settings.mcp.auth_issuer),
@@ -208,11 +235,26 @@ def build_server(container: Container, settings: Settings) -> MCPServer:
         """List recently published facts across the caller's scopes."""
         return await get_service().recent_changes(_principal_id(settings), limit=limit)
 
-    @guard.tool(ToolClass.PROPOSE)
-    async def memory_propose(subject: str, predicate: str, object: str) -> dict[str, Any]:
+    @guard.tool(ToolClass.PROPOSE, idempotent=False)
+    async def memory_propose(
+        subject: str,
+        predicate: str,
+        object: str,
+        runtime: str | None = None,
+        session_ref: str | None = None,
+        task_ref: str | None = None,
+        repository_ref: str | None = None,
+    ) -> dict[str, Any]:
         """Propose a fact. It enters the caller's personal scope as an unverified proposal."""
         return await get_service().propose(
-            _principal_id(settings), subject=subject, predicate=predicate, obj=object
+            _principal_id(settings),
+            subject=subject,
+            predicate=predicate,
+            obj=object,
+            runtime=runtime,
+            session_ref=session_ref,
+            task_ref=task_ref,
+            repository_ref=repository_ref,
         )
 
     @guard.tool(ToolClass.FEEDBACK)
@@ -221,9 +263,11 @@ def build_server(container: Container, settings: Settings) -> MCPServer:
         signal: str,
         query: str = "",
         signals: dict[str, float] | None = None,
+        context_pack_id: str | None = None,
     ) -> dict[str, Any]:
-        """Give feedback on a result. `signal` is 'up' or 'down'. Pass back the `query`
-        and the result's `signals` from search so the vote can calibrate ranking.
+        """Give legacy feedback on a result; `signal` is 'up' or 'down'. When a persisted
+        `context_pack_id` is supplied, the server recovers exact attribution. Client-supplied
+        signal vectors remain accepted for compatibility but are not used for calibration.
         """
         return await get_service().feedback(
             _principal_id(settings),
@@ -231,10 +275,27 @@ def build_server(container: Container, settings: Settings) -> MCPServer:
             signal=signal,
             query=query,
             signals=signals,
+            context_pack_id=context_pack_id,
         )
 
     # -- Generic knowledge_* contracts over the authoritative fact model (Phase 6). The server
     #    resolves the caller's scopes; these accept context hints, never authorization scopes.
+
+    @guard.tool(ToolClass.READ)
+    async def knowledge_bootstrap(
+        repository: str | None = None,
+        branch: str | None = None,
+    ) -> dict[str, Any]:
+        """Return principal, capability, auth-profile, and safe project-discovery metadata.
+        Repository credentials, query strings, and local paths are never returned.
+        """
+        return await get_knowledge().bootstrap(
+            _principal_id(settings),
+            auth_profile=auth_profile(settings),
+            repository=repository,
+            branch=branch,
+            capability_classes=_capability_classes(settings),
+        )
 
     @guard.tool(ToolClass.READ, read_only=False, idempotent=False)
     async def knowledge_get_context(
@@ -256,12 +317,16 @@ def build_server(container: Container, settings: Settings) -> MCPServer:
         limit: int = 10,
         token_budget: int = 2000,
         usage_ref: str | None = None,
+        persist: bool = False,
     ) -> dict[str, Any]:
         """Primary tool: assemble a bounded, cited context pack for a task from the caller's
         scopes. `project` accepts a resolved group id or project slug. Snapshot and valid-time
         boundaries, code/source filters, predicate and trust policy, citation detail, and
-        conflict handling are persisted in the immutable pack request.
+        conflict handling shape the response. Set `persist=true` only when a stable pack id is
+        required across compaction or handoff.
         """
+        if persist:
+            guard.require(ToolClass.SNAPSHOT)
         return await get_knowledge().get_context(
             _principal_id(settings),
             query=query,
@@ -282,6 +347,7 @@ def build_server(container: Container, settings: Settings) -> MCPServer:
             limit=limit,
             token_budget=token_budget,
             usage_ref=usage_ref,
+            persist=persist,
         )
 
     @guard.tool(ToolClass.READ)
@@ -299,7 +365,7 @@ def build_server(container: Container, settings: Settings) -> MCPServer:
             project=project,
             limit=limit,
             as_of=_parse_instant(as_of),
-            known_as_of=_parse_instant(known_as_of),
+            known_as_of=_parse_instant(known_as_of, field="known_as_of"),
         )
 
     @guard.tool(ToolClass.READ)
@@ -330,11 +396,14 @@ def build_server(container: Container, settings: Settings) -> MCPServer:
         )
 
     @guard.tool(ToolClass.READ)
-    async def knowledge_get_context_pack(pack_id: str) -> dict[str, Any] | None:
+    async def knowledge_get_context_pack(pack_id: str) -> dict[str, Any]:
         """Retrieve a previously persisted immutable context pack. This tool never creates or
         recomputes a pack.
         """
-        return await get_knowledge().get_context_pack(_principal_id(settings), pack_id=pack_id)
+        pack = await get_knowledge().get_context_pack(_principal_id(settings), pack_id=pack_id)
+        if pack is None:
+            raise ContextPackExpiredError("context pack is unavailable to the caller")
+        return pack
 
     @guard.tool(ToolClass.READ)
     async def knowledge_get_fact(fact_key: str) -> dict[str, Any] | None:
@@ -372,13 +441,20 @@ def build_server(container: Container, settings: Settings) -> MCPServer:
         """The evidence supporting a fact, flattened across its assertions, for citation."""
         return await get_knowledge().get_evidence(_principal_id(settings), fact_key=fact_key)
 
-    @guard.tool(ToolClass.FEEDBACK)
-    async def knowledge_feedback(result_ref: str, signal: str, query: str = "") -> dict[str, Any]:
-        """Record up/down feedback on a knowledge result (a fact_key or context-pack id). The
-        feedback is written to the caller's personal scope and never mutates shared truth.
+    @guard.tool(ToolClass.FEEDBACK, idempotent=True)
+    async def knowledge_feedback(
+        context_pack_id: str,
+        result_ref: str,
+        signal: str,
+    ) -> dict[str, Any]:
+        """Record feedback on a result from a persisted context pack. Query, rank, and rerank
+        signals are recovered server-side and cannot be supplied by the caller.
         """
         return await get_knowledge().record_feedback(
-            _principal_id(settings), result_ref=result_ref, signal=signal, query=query
+            _principal_id(settings),
+            context_pack_id=context_pack_id,
+            result_ref=result_ref,
+            signal=signal,
         )
 
     @guard.tool(ToolClass.READ)
@@ -401,9 +477,16 @@ def build_server(container: Container, settings: Settings) -> MCPServer:
         """Get a snapshot's metadata (ontology/policy version, fact count, source boundaries)."""
         return await get_knowledge().get_snapshot(_principal_id(settings), snapshot_id=snapshot_id)
 
-    @guard.tool(ToolClass.PROPOSE)
+    @guard.tool(ToolClass.PROPOSE, idempotent=False)
     async def knowledge_propose(
-        subject: str, predicate: str, object: str, evidence_text: str | None = None
+        subject: str,
+        predicate: str,
+        object: str,
+        evidence_text: str | None = None,
+        runtime: str | None = None,
+        session_ref: str | None = None,
+        task_ref: str | None = None,
+        repository_ref: str | None = None,
     ) -> dict[str, Any]:
         """Propose knowledge. It enters the caller's personal scope as a PROPOSED fact with a
         pending assertion; it is never published as shared truth.
@@ -414,6 +497,35 @@ def build_server(container: Container, settings: Settings) -> MCPServer:
             predicate=predicate,
             object=object,
             evidence_text=evidence_text,
+            runtime=runtime,
+            session_ref=session_ref,
+            task_ref=task_ref,
+            repository_ref=repository_ref,
+        )
+
+    @guard.tool(ToolClass.PROPOSE, idempotent=True, destructive=True)
+    async def knowledge_retract_proposal(fact_key: str) -> dict[str, Any]:
+        """Retract the caller's own pending personal proposal. Repeated calls are safe."""
+        return await get_knowledge().retract_proposal(_principal_id(settings), fact_key=fact_key)
+
+    @guard.tool(ToolClass.READ)
+    async def knowledge_proposal_report(
+        runtime: str | None = None,
+        session_ref: str | None = None,
+        task_ref: str | None = None,
+        repository_ref: str | None = None,
+        cursor: str | None = None,
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        """Summarize one bounded page of proposals associated with a task/session context."""
+        return await get_knowledge().proposal_report(
+            _principal_id(settings),
+            runtime=runtime,
+            session_ref=session_ref,
+            task_ref=task_ref,
+            repository_ref=repository_ref,
+            cursor=cursor,
+            limit=limit,
         )
 
     return server

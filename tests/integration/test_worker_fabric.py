@@ -1075,7 +1075,7 @@ async def test_erasure_removes_live_and_frozen_retrieval_inputs(
             request_hash="0" * 64,
             result_references=["fact"],
             expires_at=utc_now() + timedelta(days=1),
-            assembler_version="context-assembler-v2",
+            assembler_version="context-assembler-v3",
             request={"query": "PostgreSQL", "snapshot_id": snapshot.id},
         )
         await uow.commit()

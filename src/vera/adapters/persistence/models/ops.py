@@ -158,6 +158,8 @@ class RetrievalFeedbackRow(Base):
     principal_id: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True), nullable=True)
     query: Mapped[str] = mapped_column(Text, nullable=False)
     result_ref: Mapped[str] = mapped_column(String(512), nullable=False)
+    context_pack_id: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True), nullable=True)
+    rank: Mapped[int | None] = mapped_column(Integer, nullable=True)
     signal: Mapped[str] = mapped_column(String(8), nullable=False)
     weight: Mapped[float] = mapped_column(Float, nullable=False, server_default="1.0")
     # Rerank signal vector shown for this result, logged at feedback time for calibration.
@@ -166,8 +168,45 @@ class RetrievalFeedbackRow(Base):
     __table_args__ = (
         PrimaryKeyConstraint("id", "created_at", name="pk_retrieval_feedback"),
         CheckConstraint("signal IN ('up','down')", name="ck_feedback_signal"),
+        CheckConstraint("rank IS NULL OR rank > 0", name="ck_feedback_rank_positive"),
         Index("ix_feedback_group_time", "group_id", "created_at"),
         {"postgresql_partition_by": "RANGE (created_at)"},
+    )
+
+
+class ProposalAttemptRow(Base, UUIDPK):
+    """One client proposal attempt, including retries and skipped conflicts."""
+
+    __tablename__ = "proposal_attempts"
+
+    group_id: Mapped[str] = mapped_column(String(256), nullable=False)
+    principal_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    run_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    fact_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    proposal_ref: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True), nullable=True)
+    outcome: Mapped[str] = mapped_column(String(16), nullable=False)
+    operation: Mapped[str] = mapped_column(String(16), nullable=False)
+    context: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+    detail: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "outcome IN ('created','deduplicated','conflicted','skipped','rejected')",
+            name="ck_proposal_attempt_outcome",
+        ),
+        CheckConstraint(
+            "operation IN ('created','deduplicated','skipped','rejected')",
+            name="ck_proposal_attempt_operation",
+        ),
+        Index("ix_proposal_attempts_report", "group_id", "run_key", "created_at"),
+        Index("ix_proposal_attempts_context", "context", postgresql_using="gin"),
     )
 
 

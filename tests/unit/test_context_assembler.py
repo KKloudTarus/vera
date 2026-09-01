@@ -180,6 +180,18 @@ async def test_assemble_combines_sources_annotates_conflict_and_cites() -> None:
 
 
 @pytest.mark.asyncio
+async def test_assemble_uses_one_result_identity_per_chunk() -> None:
+    passages = _FakePassages([_passage("shared", "ver-1", 0.6)])
+    code = _FakePassages([_passage("shared", "ver-1", 0.8)])
+
+    result = await ContextAssembler(facts=_FakeFacts([]), passages=passages, code=code).assemble(
+        query="deploy", group_id="p:x"
+    )
+
+    assert [(candidate.kind, candidate.ref) for candidate in result.results] == [("code", "shared")]
+
+
+@pytest.mark.asyncio
 async def test_valid_time_does_not_imply_a_transaction_boundary() -> None:
     boundary = utc_now()
     facts = _FakeFacts([])

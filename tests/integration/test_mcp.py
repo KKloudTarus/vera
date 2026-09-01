@@ -29,7 +29,8 @@ from vera.application.connectors import SyncRunner
 from vera.application.curation import CurationService, IngestArtifact
 from vera.bootstrap import Container
 from vera.domain.ports.connectors import ConnectorBatch, ConnectorRecord
-from vera.entrypoints.knowledge.service import KnowledgeService
+from vera.domain.repository_identity import canonical_repository_ref
+from vera.entrypoints.knowledge.service import InputError, KnowledgeService
 from vera.entrypoints.mcp.service import VeraMcpService
 from vera.entrypoints.worker.lane_pool import LanePool
 from vera.entrypoints.worker.main import run_until_empty
@@ -38,6 +39,49 @@ from vera.shared.time import utc_now
 from vera.shared.types import JsonDict
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (
+            "https://user:secret@GitHub.com/Org/Repo.git?token=secret#readme",
+            "github.com/Org/Repo",
+        ),
+        ("git@github.com:Org/Repo.git?token=secret", "github.com/Org/Repo"),
+        ("user:secret@github.com/Org/Repo.git", None),
+        ("ssh://git@github.com:2222/Org/./Repo.git", "github.com:2222/Org/Repo"),
+        ("github.com:2222/Org/Repo", "github.com:2222/Org/Repo"),
+        ("ssh://git@github.com:02222/Org/Repo.git", "github.com:2222/Org/Repo"),
+        ("github.com:02222/Org/Repo", "github.com:2222/Org/Repo"),
+        ("GitHub.COM/Org/Repo.git", "github.com/Org/Repo"),
+        ("org/././repo.git", "org/repo"),
+        ("repo?token=a:b#fragment", "repo"),
+        ("\tGitHub.COM/Org/././Repo.git?token=secret\n", "github.com/Org/Repo"),
+        ("https://github.com:65536/Org/Repo.git", None),
+        ("github.com:65536/Org/Repo", None),
+        ("ssh://git@[2001:db8::1]:2222/Org/Repo.git", "[2001:db8::1]:2222/Org/Repo"),
+        ("[2001:db8::1]:2222/Org/Repo", "[2001:db8::1]:2222/Org/Repo"),
+        ("\\\\server\\share\\repo", None),
+        ("org\\repo", None),
+        ("/home/alice/repo", None),
+        ("~alice/private/repo", None),
+        ("C:private\\repo", None),
+        ("file:relative/repo", None),
+        ("https://[invalid/repo", None),
+        ("https:///Org/Repo.git", None),
+        ("https://github.com:not-a-port/Org/Repo.git", None),
+    ],
+)
+async def test_sql_repository_identity_matches_public_contract(
+    sessionmaker: async_sessionmaker[AsyncSession], raw: str, expected: str | None
+) -> None:
+    async with sessionmaker() as session:
+        actual = await session.scalar(
+            text("SELECT canonical_repository_ref(:repository)"), {"repository": raw}
+        )
+    assert canonical_repository_ref(raw) == expected
+    assert actual == expected
 
 
 class _SingleBatchConnector:
@@ -253,6 +297,7 @@ async def test_propose_lands_in_personal_scope_unverified(
     sessionmaker: async_sessionmaker[AsyncSession],
     make_container: Callable[[object], Container],
     graphiti_engine: GraphitiMemoryEngine,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     group = f"p:{uuid7().hex[:12]}"
     ws_id = await _provision_and_publish(
@@ -261,28 +306,54 @@ async def test_propose_lands_in_personal_scope_unverified(
     principal_id, personal_group = await _create_member(sessionmaker, workspace_id=ws_id)
 
     container = make_container(graphiti_engine)
+    monkeypatch.setattr(container.settings.knowledge, "proposals_per_task", 1)
     service = VeraMcpService(container, SqlAlchemyScopeResolver(sessionmaker))
 
+    with pytest.raises(InputError, match=r"1\.\.512"):
+        await service.propose(
+            principal_id, subject="s" * 513, predicate="RUNS_ON", obj="stagingeks"
+        )
+    with pytest.raises(InputError, match=r"1\.\.2048"):
+        await service.propose(
+            principal_id, subject="service", predicate="P" * 2049, obj="stagingeks"
+        )
+    with pytest.raises(InputError, match=r"1\.\.2048"):
+        await service.propose(principal_id, subject="service", predicate="RUNS_ON", obj="o" * 2049)
     result = await service.propose(
-        principal_id, subject="cacheapi", predicate="RUNSON", obj="stagingeks"
+        principal_id, subject="cacheapi", predicate="RUNS_ON", obj="stagingeks"
     )
     assert result["status"] == "proposed"
     assert result["claim_ids"]
+    retry = await service.propose(
+        principal_id, subject="cacheapi", predicate="RUNS_ON", obj="stagingeks"
+    )
+    assert retry["operation"] == "deduplicated"
+    limited = await service.propose(
+        principal_id, subject="workerapi", predicate="RUNS_ON", obj="stagingeks"
+    )
+    assert limited["status"] == "skipped"
+    assert limited["fact_key"] is None
 
     async with sessionmaker() as s:
-        unverified = await s.scalar(
-            text(
-                "SELECT count(*) FROM candidate_claims "
-                "WHERE group_id = :g AND verification_status = 'unverified'"
-            ),
+        proposed = await s.scalar(
+            text("SELECT count(*) FROM facts WHERE group_id = :g AND lifecycle_state = 'proposed'"),
             {"g": personal_group},
         )
         published = await s.scalar(
             text("SELECT count(*) FROM published_episodes WHERE group_id = :g"),
             {"g": personal_group},
         )
-    assert unverified >= 1  # the proposal enters the personal scope unverified
+        entity_count = await s.scalar(
+            text("SELECT count(*) FROM canonical_entities WHERE group_id = :g"),
+            {"g": personal_group},
+        )
+        alias_count = await s.scalar(
+            text("SELECT count(*) FROM entity_aliases WHERE group_id = :g"),
+            {"g": personal_group},
+        )
+    assert proposed == 1  # the proposal enters the authoritative personal fabric
     assert published == 0  # a tier-4 proposal is never auto-published
+    assert entity_count == alias_count == 1  # a quota skip creates no orphan identity rows
 
 
 async def test_feedback_is_recorded_in_personal_scope(
@@ -297,17 +368,91 @@ async def test_feedback_is_recorded_in_personal_scope(
     principal_id, personal_group = await _create_member(sessionmaker, workspace_id=ws_id)
 
     container = make_container(graphiti_engine)
-    service = VeraMcpService(container, SqlAlchemyScopeResolver(sessionmaker))
+    resolver = SqlAlchemyScopeResolver(sessionmaker)
+    service = VeraMcpService(container, resolver)
 
-    result = await service.feedback(principal_id, result_ref=str(uuid7()), signal="down")
+    pack = await KnowledgeService(container, resolver).get_context(
+        principal_id,
+        query="prodeksmy",
+        project=group,
+        persist=True,
+    )
+
+    result = await service.feedback(
+        principal_id,
+        context_pack_id=str(pack["pack_id"]),
+        result_ref=str(pack["pack_id"]),
+        signal="down",
+    )
     assert result["status"] == "recorded"
+    legacy = await service.feedback(
+        principal_id,
+        result_ref="legacy-result",
+        signal="up",
+        query="legacy query",
+        signals={"relevance": 1.0},
+    )
+    assert legacy["status"] == "recorded"
 
     async with sessionmaker() as s:
         recorded = await s.scalar(
             text("SELECT count(*) FROM retrieval_feedback WHERE group_id = :g"),
             {"g": personal_group},
         )
-    assert recorded == 1
+        legacy_signals = await s.scalar(
+            text(
+                "SELECT signals FROM retrieval_feedback "
+                "WHERE group_id = :g AND result_ref = 'legacy-result'"
+            ),
+            {"g": personal_group},
+        )
+    assert recorded == 2
+    assert legacy_signals is None
+
+
+async def test_bootstrap_maps_workspace_wide_repository_source(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    make_container: Callable[[object], Container],
+    graphiti_engine: GraphitiMemoryEngine,
+) -> None:
+    group = f"p:{uuid7().hex[:12]}w"
+    async with SqlAlchemyUnitOfWork(sessionmaker) as uow:
+        await uow.use_tenant(group)
+        org = await uow.tenancy.create_organization(
+            slug=f"o-{group}", name="Org", group_id=f"o:{group}"
+        )
+        workspace = await uow.tenancy.create_workspace(
+            org_id=org.id, slug=f"w-{group}", name="WS", group_id=f"w:{group}"
+        )
+        await uow.tenancy.create_project(
+            workspace_id=workspace.id, slug=f"pr-{group}", name="Proj", group_id=group
+        )
+        source_id = await uow.sources.create(
+            workspace_id=workspace.id,
+            project_id=None,
+            kind="cmdb",
+            name="Workspace repository",
+            trust_tier=1,
+        )
+        await uow.commit()
+    async with sessionmaker() as session, session.begin():
+        await session.execute(
+            text("UPDATE knowledge_sources SET config = CAST(:config AS jsonb) WHERE id = :id"),
+            {"id": source_id, "config": '{"repository":"git@github.com:Acme/Workspace.git"}'},
+        )
+    principal_id, _ = await _create_member(sessionmaker, workspace_id=workspace.id)
+
+    service = KnowledgeService(
+        make_container(graphiti_engine), SqlAlchemyScopeResolver(sessionmaker)
+    )
+    bootstrap = await service.bootstrap(
+        principal_id,
+        auth_profile="remote-authenticated",
+        repository="https://github.com/Acme/Workspace.git",
+    )
+
+    assert bootstrap["project_resolution"]["status"] == "selected"
+    assert bootstrap["project_resolution"]["selected"]["scope_id"] == group
 
 
 @pytest.mark.issue6_acceptance
@@ -365,7 +510,10 @@ async def test_knowledge_agent_contracts_resolve_scope_and_retrieve_frozen_pack(
             ),
             {
                 "id": source_id,
-                "config": ('{"repository":"vera","branch":"main","document_type":"adr"}'),
+                "config": (
+                    '{"repository":"ssh://git@github.com:2222/Acme/VERA.git",'
+                    '"branch":"main","document_type":"adr"}'
+                ),
             },
         )
         await session.commit()
@@ -373,6 +521,17 @@ async def test_knowledge_agent_contracts_resolve_scope_and_retrieve_frozen_pack(
     contract_container = make_container(graphiti_engine)
     scope_resolver = SqlAlchemyScopeResolver(sessionmaker)
     service = KnowledgeService(contract_container, scope_resolver)
+    bootstrap = await service.bootstrap(
+        principal_id,
+        auth_profile="remote-authenticated",
+        repository="ssh://user:must-not-leak@github.com:2222/Acme/VERA.git?token=secret",
+        branch="main",
+    )
+    assert bootstrap["principal"]["id"] == str(principal_id)
+    assert bootstrap["project_resolution"]["status"] == "selected"
+    assert bootstrap["project_resolution"]["repository"] == "github.com:2222/Acme/VERA"
+    assert bootstrap["project_resolution"]["selected"]["scope_id"] == group
+    assert "must-not-leak" not in str(bootstrap)
     fact = await service.get_fact(principal_id, fact_key=fact_key)
     assert fact is not None and fact["object"] == "prodeksmy"
     entity = await service.get_entity(principal_id, entity_id=entity_id)
@@ -394,17 +553,30 @@ async def test_knowledge_agent_contracts_resolve_scope_and_retrieve_frozen_pack(
         principal_id,
         query="prodeksmy",
         project=f"pr-{group}",
-        repository="vera",
+        repository="ssh://user:must-not-persist@github.com:2222/Acme/VERA.git?token=secret",
         branch="main",
         code_path="src/payment.py",
         document_type="adr",
         source_type="cmdb",
         include_predicates=(str(fact["predicate"]),),
         max_trust_tier=2,
+        persist=True,
     )
+    assert created["persisted"] is True
+    assert created["request"]["filters"]["repository"] == "github.com:2222/Acme/VERA"
+    assert "must-not-persist" not in str(created)
     assert created["results"]
     assert all("excerpt" in result["citation"] for result in created["results"])
     fact_result = next(result for result in created["results"] if result["kind"] == "fact")
+    feedback = await service.record_feedback(
+        principal_id,
+        context_pack_id=str(created["pack_id"]),
+        result_ref=str(fact_result["ref"]),
+        signal="up",
+    )
+    assert feedback["query"] == "prodeksmy"
+    assert feedback["rank"] == created["results"].index(fact_result) + 1
+    assert feedback["signals"] == fact_result["signals"]
     assert fact_result["citation"]["excerpt"] == "paymentapi runs on prodeksmy"
     assert fact_result["citation"]["evidence_id"] is not None
     assert fact_result["citation"]["assertion_id"] is not None
@@ -421,8 +593,23 @@ async def test_knowledge_agent_contracts_resolve_scope_and_retrieve_frozen_pack(
     assert (
         await service.get_context_pack(other_principal_id, pack_id=str(created["pack_id"])) is None
     )
+    ephemeral = await service.get_context(
+        principal_id,
+        query="prodeksmy",
+        project=f"pr-{group}",
+    )
+    assert ephemeral["persisted"] is False
+    assert ephemeral["pack_id"] is None
     snapshot = await service.create_snapshot(principal_id, project=f"pr-{group}")
     assert snapshot["ontology_version_id"] is not None
+    snapshot_context = await service.get_context(
+        principal_id,
+        query="prodeksmy",
+        project=f"pr-{group}",
+        snapshot_id=str(snapshot["snapshot_id"]),
+        repository="ssh://git@github.com:2222/Acme/VERA.git",
+    )
+    assert snapshot_context["results"]
     assert await service.get_snapshot(principal_id, snapshot_id=str(snapshot["snapshot_id"]))
     assert await service.get_snapshot(principal_id, snapshot_id="invalid") is None
     assert await service.get_entity(other_principal_id, entity_id=entity_id) is None

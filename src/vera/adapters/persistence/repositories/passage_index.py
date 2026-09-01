@@ -83,14 +83,16 @@ LIMIT :lim
 """
 
 _LIVE_SOURCE_FILTERS = """
-  AND (CAST(:repository AS text) IS NULL OR s.config->>'repository' = :repository)
+  AND (CAST(:repository AS text) IS NULL
+       OR canonical_repository_ref(s.config->>'repository') = :repository)
   AND (CAST(:branch AS text) IS NULL OR s.config->>'branch' = :branch)
   AND (CAST(:document_type AS text) IS NULL OR s.config->>'document_type' = :document_type)
   AND (CAST(:source_type AS text) IS NULL OR s.kind = :source_type)
   AND (CAST(:max_trust_tier AS integer) IS NULL OR s.trust_tier <= :max_trust_tier)
 """
 _SNAPSHOT_SOURCE_FILTERS = """
-  AND (CAST(:repository AS text) IS NULL OR ss.repository = :repository)
+  AND (CAST(:repository AS text) IS NULL
+       OR ss.repository = :repository OR canonical_repository_ref(ss.repository) = :repository)
   AND (CAST(:branch AS text) IS NULL OR ss.branch = :branch)
   AND (CAST(:document_type AS text) IS NULL OR ss.document_type = :document_type)
   AND (CAST(:source_type AS text) IS NULL OR ss.source_type = :source_type)
@@ -166,7 +168,8 @@ WITH candidates AS MATERIALIZED (
                  OR (fs.project_id IS NULL AND (fw.group_id = f.group_id OR EXISTS (
                      SELECT 1 FROM projects fwp
                      WHERE fwp.workspace_id = fs.workspace_id AND fwp.group_id = f.group_id))))
-            AND (CAST(:repository AS text) IS NULL OR fs.config->>'repository' = :repository)
+            AND (CAST(:repository AS text) IS NULL
+                 OR canonical_repository_ref(fs.config->>'repository') = :repository)
             AND (CAST(:branch AS text) IS NULL OR fs.config->>'branch' = :branch)
             AND (CAST(:document_type AS text) IS NULL
                  OR fs.config->>'document_type' = :document_type)
@@ -255,7 +258,8 @@ LEFT JOIN LATERAL (
            OR (es.project_id IS NULL AND (ew.group_id = f.group_id OR EXISTS (
                SELECT 1 FROM projects ewp
                WHERE ewp.workspace_id = es.workspace_id AND ewp.group_id = f.group_id))))
-      AND (CAST(:repository AS text) IS NULL OR es.config->>'repository' = :repository)
+      AND (CAST(:repository AS text) IS NULL
+           OR canonical_repository_ref(es.config->>'repository') = :repository)
       AND (CAST(:branch AS text) IS NULL OR es.config->>'branch' = :branch)
       AND (CAST(:code_path AS text) IS NULL
            OR coalesce(c.heading_path, '') LIKE '%' || :code_path || '%')
@@ -410,7 +414,8 @@ LEFT JOIN LATERAL (
     WHERE CAST(:include_provenance AS boolean)
       AND c.snapshot_id = sf.snapshot_id AND c.fact_id = sf.fact_id
       AND c.group_id = sf.group_id
-      AND (CAST(:repository AS text) IS NULL OR s.repository = :repository)
+       AND (CAST(:repository AS text) IS NULL
+            OR s.repository = :repository OR canonical_repository_ref(s.repository) = :repository)
       AND (CAST(:branch AS text) IS NULL OR s.branch = :branch)
       AND (CAST(:code_path AS text) IS NULL
            OR coalesce(c.heading_path, '') LIKE '%' || :code_path || '%')
@@ -438,7 +443,11 @@ WHERE sf.snapshot_id = CAST(:snapshot_id AS uuid) AND sf.group_id = :g
       SELECT 1 FROM snapshot_fact_sources fs
       WHERE fs.snapshot_id = sf.snapshot_id AND fs.fact_id = sf.fact_id
         AND fs.group_id = sf.group_id
-        AND (CAST(:repository AS text) IS NULL OR fs.repository = :repository)
+        AND (
+            CAST(:repository AS text) IS NULL
+            OR fs.repository = :repository
+            OR canonical_repository_ref(fs.repository) = :repository
+        )
         AND (CAST(:branch AS text) IS NULL OR fs.branch = :branch)
         AND (CAST(:document_type AS text) IS NULL OR fs.document_type = :document_type)
         AND (CAST(:source_type AS text) IS NULL OR fs.source_type = :source_type)

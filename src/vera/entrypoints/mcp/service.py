@@ -12,12 +12,10 @@ from typing import Any
 from uuid import UUID
 
 from vera.adapters.persistence.unit_of_work import SqlAlchemyUnitOfWork
-from vera.application.curation import CurationService, IngestArtifact
 from vera.application.queries.search_memory import SearchMemory, SearchMemoryHandler
 from vera.bootstrap import Container
 from vera.domain.ports.identity import ResolvedScope, ScopeResolver
-from vera.shared.errors import is_ok
-from vera.shared.ids import uuid7
+from vera.entrypoints.knowledge import KnowledgeService
 from vera.shared.types import GroupId
 
 
@@ -36,6 +34,7 @@ class VeraMcpService:
     def __init__(self, container: Container, scope_resolver: ScopeResolver) -> None:
         self._container = container
         self._scopes = scope_resolver
+        self._knowledge = KnowledgeService(container, scope_resolver)
         self._search = SearchMemoryHandler(
             container.memory,
             container.retrieval_read,
@@ -151,33 +150,24 @@ class VeraMcpService:
         subject: str,
         predicate: str,
         obj: str,
+        runtime: str | None = None,
+        session_ref: str | None = None,
+        task_ref: str | None = None,
+        repository_ref: str | None = None,
     ) -> dict[str, Any]:
-        scope = await self._resolve(principal_id)
-        if scope.primary_workspace_id is None:
-            return {"status": "rejected", "reason": "no workspace to attach the proposal to"}
-        async with SqlAlchemyUnitOfWork(self._container.sessionmaker) as uow:
-            await uow.use_tenant(scope.personal_group_id)
-            source_id = await uow.sources.get_or_create_agent(
-                workspace_id=scope.primary_workspace_id
-            )
-            service = CurationService(
-                uow, self._container.extractor, self._container.object_store, self._container.judge
-            )
-            result = await service.ingest_artifact(
-                IngestArtifact(
-                    source_id=source_id,
-                    group_id=scope.personal_group_id,
-                    external_id=f"agent:{uuid7().hex}",
-                    body="",
-                    knowledge_type="fact_triple",
-                    metadata={
-                        "triples": [{"subject": subject, "predicate": predicate, "object": obj}]
-                    },
-                )
-            )
-            await uow.commit()
-        claim_ids = result.value.claim_ids if is_ok(result) else ()
-        return {"status": "proposed", "claim_ids": list(claim_ids)}
+        result = await self._knowledge.propose(
+            principal_id,
+            subject=subject,
+            predicate=predicate,
+            object=obj,
+            runtime=runtime,
+            session_ref=session_ref,
+            task_ref=task_ref,
+            repository_ref=repository_ref,
+        )
+        # Preserve the legacy field while returning the authoritative proposal contract.
+        proposal_ref = result.get("proposal_ref")
+        return {**result, "claim_ids": [proposal_ref] if proposal_ref is not None else []}
 
     async def feedback(
         self,
@@ -187,9 +177,18 @@ class VeraMcpService:
         signal: str,
         query: str = "",
         signals: dict[str, float] | None = None,
+        context_pack_id: str | None = None,
     ) -> dict[str, Any]:
         if signal not in {"up", "down"}:
             return {"status": "rejected", "reason": "signal must be 'up' or 'down'"}
+        if context_pack_id is not None:
+            return await self._knowledge.record_feedback(
+                principal_id,
+                context_pack_id=context_pack_id,
+                result_ref=result_ref,
+                signal=signal,
+            )
+
         scope = await self._resolve(principal_id)
         async with SqlAlchemyUnitOfWork(self._container.sessionmaker) as uow:
             await uow.use_tenant(scope.personal_group_id)
@@ -199,8 +198,8 @@ class VeraMcpService:
                 query=query,
                 result_ref=result_ref,
                 signal=signal,
-                # The signal vector search returned for this result, for later calibration.
-                signals=signals,
+                # Legacy callers supplied this vector themselves, so it is not calibration data.
+                signals=None,
             )
             await uow.commit()
         return {"status": "recorded"}

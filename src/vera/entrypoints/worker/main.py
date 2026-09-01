@@ -11,6 +11,8 @@ import asyncio
 import contextlib
 import signal
 
+from sqlalchemy import text
+
 from vera.adapters.persistence.repositories import (
     SqlAlchemyFactExpiryRepository,
     SqlAlchemyKnowledgeEventLog,
@@ -124,6 +126,13 @@ async def expire_due_facts(container: Container) -> int:
         return report.expired
 
 
+async def delete_expired_context_packs(container: Container) -> int:
+    """Delete expired context packs through the worker-only erasure function."""
+    async with container.workers() as session, session.begin():
+        removed = await session.scalar(text("SELECT delete_all_expired_context_packs()"))
+        return int(removed or 0)
+
+
 async def run_until_empty(container: Container, pool: LanePool, *, batch_size: int) -> int:
     """Claim and process until the queue is drained. Returns the number processed.
 
@@ -189,6 +198,9 @@ async def run() -> None:
                 expired = await expire_due_facts(container)
                 if expired:
                     log.info("worker.facts_expired", count=expired)
+                deleted_packs = await delete_expired_context_packs(container)
+                if deleted_packs:
+                    log.info("worker.context_packs_deleted", count=deleted_packs)
             if scheduler is not None and cycles % _SYNC_EVERY_CYCLES == 0:
                 outcomes = await scheduler.run_due()
                 if outcomes:

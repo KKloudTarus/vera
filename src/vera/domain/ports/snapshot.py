@@ -35,13 +35,13 @@ class Snapshot:
     source_boundaries: JsonDict = field(default_factory=empty_json)
     embedding_version: JsonDict = field(default_factory=empty_json)
     retrieval_index_version: str = "fts-v1"
-    assembler_version: str = "context-assembler-v2"
+    assembler_version: str = "context-assembler-v3"
     graph_projection_checkpoint: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class ContextPack:
-    id: str
+    id: str | None
     group_id: str
     created_at: datetime
     query: str
@@ -69,7 +69,7 @@ class SnapshotRepository(Protocol):
         ontology_version_id: str | None = None,
         embedding_version: JsonDict | None = None,
         retrieval_index_version: str = "fts-v1",
-        assembler_version: str = "context-assembler-v2",
+        assembler_version: str = "context-assembler-v3",
         actor: str | None = None,
     ) -> Snapshot:
         """Freeze the active fact set and record the snapshot; append SNAPSHOT_CREATED."""
@@ -81,6 +81,22 @@ class SnapshotRepository(Protocol):
 
 
 class ContextPackRepository(Protocol):
+    async def prepare_save(self, *, group_id: str) -> int:
+        """Serialize writers, prune expired packs, and return the remaining pack count."""
+        ...
+
+    async def equivalent(
+        self,
+        *,
+        group_id: str,
+        request_hash: str,
+        result_references: list[str],
+        results: list[JsonDict],
+        assembler_version: str,
+    ) -> ContextPack | None:
+        """Return the same unexpired response produced by the same assembler contract."""
+        ...
+
     async def save(
         self,
         *,

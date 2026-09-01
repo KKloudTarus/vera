@@ -12,7 +12,7 @@ from collections.abc import Sequence
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from vera.adapters.persistence.models.canonical import GraphEdgeMapRow
@@ -180,6 +180,27 @@ class SqlAlchemyRetrievalFeedbackRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
+    async def lock_attribution(
+        self, *, principal_id: UUID, context_pack_id: UUID, result_ref: str
+    ) -> None:
+        await self._session.execute(
+            text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+            {"key": f"feedback:{principal_id}:{context_pack_id}:{result_ref}"},
+        )
+
+    async def attributed_signal(
+        self, *, principal_id: UUID, context_pack_id: UUID, result_ref: str
+    ) -> str | None:
+        return await self._session.scalar(
+            select(RetrievalFeedbackRow.signal)
+            .where(
+                RetrievalFeedbackRow.principal_id == principal_id,
+                RetrievalFeedbackRow.context_pack_id == context_pack_id,
+                RetrievalFeedbackRow.result_ref == result_ref,
+            )
+            .limit(1)
+        )
+
     async def record(
         self,
         *,
@@ -187,9 +208,11 @@ class SqlAlchemyRetrievalFeedbackRepository:
         principal_id: UUID | None,
         query: str,
         result_ref: str,
+        context_pack_id: UUID | None = None,
         signal: str,
         weight: float = 1.0,
         signals: JsonDict | None = None,
+        rank: int | None = None,
     ) -> None:
         self._session.add(
             RetrievalFeedbackRow(
@@ -197,6 +220,8 @@ class SqlAlchemyRetrievalFeedbackRepository:
                 principal_id=principal_id,
                 query=query,
                 result_ref=result_ref,
+                context_pack_id=context_pack_id,
+                rank=rank,
                 signal=signal,
                 weight=weight,
                 signals=signals,

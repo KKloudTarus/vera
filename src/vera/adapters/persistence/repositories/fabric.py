@@ -10,7 +10,7 @@ from __future__ import annotations
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import func, select, update
+from sqlalchemy import func, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -265,6 +265,12 @@ class SqlAlchemyFactRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
+    async def lock_fact_key(self, *, group_id: str, fact_key: str) -> None:
+        await self._session.execute(
+            text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+            {"key": f"{group_id}:{fact_key}"},
+        )
+
     async def upsert(self, fact: Fact) -> Fact:
         existing = await self.active_by_fact_key(group_id=fact.group_id, fact_key=fact.fact_key)
         if existing is not None:
@@ -312,6 +318,32 @@ class SqlAlchemyFactRepository:
             .limit(1)
         )
         return _to_fact(row) if row is not None else None
+
+    async def by_fact_key_for_update(self, *, group_id: str, fact_key: str) -> Fact | None:
+        row = await self._session.scalar(
+            select(FactRow)
+            .where(FactRow.group_id == group_id, FactRow.fact_key == fact_key)
+            .order_by(FactRow.system_from.desc())
+            .limit(1)
+            .with_for_update()
+        )
+        return _to_fact(row) if row is not None else None
+
+    async def live_by_slot_key(self, *, group_id: str, slot_key: str) -> list[Fact]:
+        rows = await self._session.scalars(
+            select(FactRow).where(
+                FactRow.group_id == group_id,
+                FactRow.slot_key == slot_key,
+                FactRow.lifecycle_state.in_(
+                    (
+                        FactLifecycle.PROPOSED.value,
+                        FactLifecycle.ACTIVE.value,
+                        FactLifecycle.DISPUTED.value,
+                    )
+                ),
+            )
+        )
+        return [_to_fact(row) for row in rows]
 
     async def active_by_slot_key(self, *, group_id: str, slot_key: str) -> list[Fact]:
         rows = await self._session.scalars(
@@ -445,6 +477,73 @@ class SqlAlchemyAssertionRepository:
         assert row is not None  # noqa: S101  present after insert-or-update
         return _to_assertion(row)
 
+    async def create_proposal_if_absent(self, assertion: Assertion) -> tuple[Assertion, bool]:
+        if assertion.artifact_version_id is not None or assertion.run_key is None:
+            raise ValueError("a proposal assertion requires a run key and no artifact version")
+        stmt = (
+            pg_insert(AssertionRow)
+            .values(
+                id=assertion.id,
+                group_id=assertion.group_id,
+                fact_id=assertion.fact_id,
+                polarity=assertion.polarity.value,
+                extractor_confidence=assertion.extractor_confidence,
+                source_authority=assertion.source_authority,
+                verification_state=assertion.verification_state,
+                observed_at=assertion.observed_at,
+                recorded_at=assertion.recorded_at or utc_now(),
+                run_key=assertion.run_key,
+                state=assertion.state.value,
+            )
+            .on_conflict_do_nothing(
+                index_elements=[AssertionRow.fact_id, AssertionRow.run_key, AssertionRow.polarity],
+                index_where=AssertionRow.run_key.is_not(None),
+            )
+            .returning(AssertionRow.id)
+        )
+        created_id = await self._session.scalar(stmt)
+        stored_id = created_id
+        if stored_id is None:
+            stored_id = await self._session.scalar(
+                select(AssertionRow.id).where(
+                    AssertionRow.fact_id == assertion.fact_id,
+                    AssertionRow.run_key == assertion.run_key,
+                    AssertionRow.polarity == assertion.polarity.value,
+                )
+            )
+        assert stored_id is not None  # noqa: S101  inserted or selected after conflict
+        row = await self._session.get(AssertionRow, stored_id)
+        assert row is not None  # noqa: S101  selected from the same transaction
+        return _to_assertion(row), created_id is not None
+
+    async def lock_run_key(self, *, group_id: str, run_key: str) -> None:
+        await self._session.execute(
+            text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+            {"key": f"{group_id}:{run_key}"},
+        )
+
+    async def for_fact_and_run_key(
+        self, *, group_id: str, fact_id: str, run_key: str
+    ) -> Assertion | None:
+        row = await self._session.scalar(
+            select(AssertionRow).where(
+                AssertionRow.group_id == group_id,
+                AssertionRow.fact_id == UUID(fact_id),
+                AssertionRow.run_key == run_key,
+                AssertionRow.polarity == Polarity.SUPPORTS.value,
+            )
+        )
+        return _to_assertion(row) if row is not None else None
+
+    async def count_for_run_key(self, *, group_id: str, run_key: str) -> int:
+        count = await self._session.scalar(
+            select(func.count(AssertionRow.id)).where(
+                AssertionRow.group_id == group_id,
+                AssertionRow.run_key == run_key,
+            )
+        )
+        return int(count or 0)
+
     async def active_for_fact(self, *, group_id: str, fact_id: str) -> list[Assertion]:
         rows = await self._session.scalars(
             select(AssertionRow).where(
@@ -471,6 +570,26 @@ class SqlAlchemyAssertionRepository:
             .where(AssertionRow.group_id == group_id, AssertionRow.id == UUID(assertion_id))
             .values(state=AssertionState.WITHDRAWN.value, withdrawn_at=utc_now())
         )
+
+    async def withdraw_for_fact(self, *, group_id: str, fact_id: str) -> list[Assertion]:
+        rows = list(
+            await self._session.scalars(
+                select(AssertionRow)
+                .where(
+                    AssertionRow.group_id == group_id,
+                    AssertionRow.fact_id == UUID(fact_id),
+                    AssertionRow.state == AssertionState.ACTIVE.value,
+                )
+                .with_for_update()
+            )
+        )
+        if rows:
+            await self._session.execute(
+                update(AssertionRow)
+                .where(AssertionRow.id.in_([row.id for row in rows]))
+                .values(state=AssertionState.WITHDRAWN.value, withdrawn_at=utc_now())
+            )
+        return [_to_assertion(row) for row in rows]
 
 
 class SqlAlchemyEvidenceRepository:

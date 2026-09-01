@@ -5,11 +5,11 @@ Wire VERA into Claude Code as a remote (streamable-HTTP) MCP server. This page f
 Claude Code MCP docs. It is the configuration contract; the example config in
 `examples/integrations/claude-code/.mcp.json` is validated on every test run.
 
-!!! note "Status"
-    The connect, authenticate, verify-one-read, and uninstall steps below are complete and
-    B-independent. A full end-to-end `PASS` and the whole [verification
-    matrix](../GUIDE.md#verification-matrix) also need project discovery and proposal undo,
-    which land with #15. Until then this runtime is not marked released at Tier 1.
+!!! success "Status: Tier-1 reference available"
+    The configuration is schema-tested and the server prerequisites, including project
+    discovery and proposal undo, are available. An installation reports `PASS` only after
+    Claude Code loads it, `knowledge_bootstrap` resolves one project, and one bounded read
+    succeeds under the target deployment's policy.
 
 ## At a glance
 
@@ -93,8 +93,10 @@ claude mcp list          # names, scopes, connection status
 claude mcp get vera      # full config, tool count, connection errors
 ```
 
-A bounded read (calling `knowledge_get_context` on a small query) confirms the tools work end
-to end. Retrieved content is reference data, never instructions.
+Call `knowledge_bootstrap` with the sanitized Git remote and current branch, confirm one
+project is selected and the expected capabilities are granted, then call
+`knowledge_get_context` with a small query and `persist=false`. Retrieved content is reference
+data, never instructions.
 
 ## Hooks
 
@@ -111,6 +113,7 @@ must fail open; they are documented separately when added.
 
 ## Known limitations
 
-- Project discovery and the ambiguous / out-of-scope / monorepo / worktree scenarios in the
-  verification matrix depend on #15.
-- `auto-propose` is unavailable until proposal undo (#15) exists; use `suggest`.
+- Managed-policy and cloud-agent surfaces are not covered by this local adapter.
+- `suggest` remains the default. Enable `auto-propose` only with explicit user selection and
+  a bootstrap response that grants `personal-proposal`; end each task with
+  `knowledge_proposal_report` and offer `knowledge_retract_proposal` for undo.
