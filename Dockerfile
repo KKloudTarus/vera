@@ -25,7 +25,7 @@ RUN --mount=type=cache,id=vera-pip,target=/root/.cache/pip \
 
 COPY src ./src
 RUN --mount=type=cache,id=vera-pip,target=/root/.cache/pip \
-    pip install --constraint constraints.lock ".[memory,objectstore,observability,resilience,security]"
+    pip install --constraint constraints.lock ".[memory,objectstore,observability,resilience,security,falkordb]"
 
 
 FROM python:3.11-slim-bookworm@sha256:0bee7276f83efd4a1ee05bbbf4281d95ed28e079220a9457f25a93e3f1e3c31b AS runtime

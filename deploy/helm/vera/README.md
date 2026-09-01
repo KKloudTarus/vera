@@ -17,21 +17,19 @@ unauthenticated local MCP principal. Add an LLM key and turn on auth for real us
   and import it into the node's container runtime (see below); otherwise push it to a
   registry and set `image.repository`/`image.tag`.
 
-## 1. Make the image available
+## 1. The image
 
-Build the image from the repo root and, for a single-node k3s cluster, import it into k3s's
-containerd so no registry is needed:
+The image is published to GHCR by the release workflow as a public package, so the cluster
+pulls `ghcr.io/kkloudtarus/vera:0.1.0` with no registry secret. Nothing to do here for a normal
+cluster.
+
+For an air-gapped single-node k3s cluster, build it locally and import it into containerd,
+then point the chart at the local tag:
 
 ```bash
 docker build -t vera:0.1.0 .
 docker save vera:0.1.0 | sudo k3s ctr images import -
-```
-
-For a multi-node or managed cluster, push instead and set the values:
-
-```bash
-docker tag vera:0.1.0 <registry>/vera:0.1.0 && docker push <registry>/vera:0.1.0
-# then: --set image.repository=<registry>/vera --set image.tag=0.1.0
+# then add: --set image.repository=vera
 ```
 
 ## 2. Install
@@ -80,13 +78,11 @@ longer serves the local principal. Manage secrets with your secret store rather 
 
 ## Choosing the graph backend
 
-`graph.backend` defaults to `neo4j`, which works with the released image. FalkorDB is lighter
-(a Redis-module graph) but its Python driver is not in the published image, so selecting it
-needs an image built with the `falkordb` extra:
+`graph.backend` defaults to `neo4j`. FalkorDB is lighter (a Redis-module graph) and its driver
+ships in the published image, so it is a one-flag switch:
 
 ```bash
-helm install vera deploy/helm/vera -n vera --create-namespace --set graph.backend=falkordb \
-  --set image.repository=<your-falkordb-image> --set image.tag=<tag>
+helm install vera deploy/helm/vera -n vera --create-namespace --set graph.backend=falkordb
 ```
 
 ## Sizing

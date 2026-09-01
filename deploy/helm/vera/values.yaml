@@ -7,9 +7,10 @@ nameOverride: ""
 fullnameOverride: ""
 
 image:
-  # The app image. For a single-node k3s pilot, build it and import it into the node's
-  # containerd, then keep pullPolicy IfNotPresent so the cluster uses the local image.
-  repository: vera
+  # Published to GHCR by the release workflow; the package is public so the cluster pulls it
+  # with no secret. For an air-gapped single-node cluster, build locally and import into the
+  # node's containerd, then set repository=vera.
+  repository: ghcr.io/kkloudtarus/vera
   tag: "0.1.0"
   pullPolicy: IfNotPresent
   # Numeric UID of the non-root 'vera' user baked into the image (USER vera). kubelet needs
