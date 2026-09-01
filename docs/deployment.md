@@ -107,5 +107,11 @@ post-rebuild verification and the embedding-model change process.
 ## Health and observability
 
 - Liveness `GET /health/live`, readiness `GET /health/ready` (checks db, graph, object
-  store). The worker exposes Prometheus metrics on `:9100`; the API exposes `/metrics`.
-- Set `VERA_OBSERVABILITY__OTLP_ENDPOINT` to export OpenTelemetry traces.
+  store). The API exposes `/metrics`; the worker uses `:9100/metrics`; and MCP uses a
+  scrape-only `:9101/metrics` listener that is not part of its public Service. All are enabled
+  by `VERA_OBSERVABILITY__METRICS_ENABLED=true`, and the Kubernetes manifests advertise each
+  endpoint with Prometheus scrape annotations.
+- Run one MCP ASGI worker per process when metrics are enabled. Scale MCP with pod/container
+  replicas; multiple workers in one process group cannot share the process-local `:9101` listener.
+- Set `VERA_OBSERVABILITY__OTLP_ENDPOINT` to export OpenTelemetry traces from API, worker,
+  and MCP processes.

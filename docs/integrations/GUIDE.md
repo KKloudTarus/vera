@@ -10,7 +10,7 @@ The reference for the tools themselves (parameters, side effects, cost, retentio
 reference.
 
 - Contract version: `vera_integration_contract: 1`
-- Document status: `v1.1.0`
+- Document status: `v1.2.0`
 - Server version this contract was verified against: `0.1.0`
 
 !!! success "Implementation status"
@@ -51,6 +51,7 @@ defaults:
   context_mode: hybrid        # bootstrap metadata plus agent-initiated retrieval
   save_mode: suggest          # candidate facts need user approval before a proposal
   system_prompt: unchanged    # the runtime's base system prompt is never replaced
+  tool_profile: coding        # small canonical coding-agent surface
   legacy_tools: disabled      # the memory_* aliases are off unless a runtime opts in
 
 approval:
@@ -74,6 +75,20 @@ writes:
 A runtime MAY override a default only through an explicit, reviewed configuration item, and
 MUST record the override in its ownership metadata (see
 [Configuration mutation and ownership](#configuration-mutation-and-ownership)).
+
+### Tool visibility profiles
+
+VERA enforces the discovery default through `VERA_MCP__TOOL_PROFILE=coding`:
+
+- `coding` exposes the ten canonical tools required for bootstrap, bounded retrieval,
+  citation/evidence, exact feedback, and the personal proposal lifecycle.
+- `advanced` exposes all canonical `knowledge_*` tools, including graph, community,
+  change-feed, conflict, entity/source, and snapshot workflows.
+- `compatibility` adds all eight legacy `memory_*` aliases to the canonical surface.
+
+A runtime MUST NOT treat visibility as permission. Tool-class authorization remains enforced
+for every visible call. `knowledge_bootstrap` reports the active profile; `tools/list` is the
+authoritative list of visible names.
 
 ## Authentication and authorization
 
@@ -135,9 +150,9 @@ leaked or misused retrieval credential cannot write.
     The seven operational codes below and redacted `internal_error` are enforced. The
     version-negotiation code remains reserved for a future versioned request field.
 
-Every anticipated tool failure MUST be returned as a structured MCP error. The SDK raises it
-as a top-level JSON-RPC protocol error (an unexpected exception instead becomes a generic
-`isError` result), so an agent can branch on it reliably. The error object is:
+Every guarded tool failure MUST be returned as a top-level structured MCP protocol error.
+Unexpected tool-body exceptions are redacted to the same stable `internal_error` shape, so an
+agent can branch on failures without receiving exception text. The error object is:
 
 ```json
 {
@@ -147,7 +162,7 @@ as a top-level JSON-RPC protocol error (an unexpected exception instead becomes 
 }
 ```
 
-The stable string an agent MUST branch on is `data.code`, one of the eight below. The
+The stable string an agent MUST branch on is `data.code`, one of the nine below. The
 integer `code` is for transport tooling. Extra context travels in `data` (for example
 `data.required_scope`, `data.field`, `data.bucket`). Messages MUST NOT embed a query, a
 principal id, or an internal exception string.
@@ -162,14 +177,12 @@ principal id, or an internal exception string.
 | `project_out_of_scope` | -32005 | The requested project is outside the caller's scopes. | Stop. Do not guess another project. |
 | `expired_context_pack` | -32006 | A context pack was read after its TTL, or does not exist. | Recompute with `knowledge_get_context`. |
 | `unsupported_version` | -32007 | Reserved: the client asked for a contract version the server does not serve. | Fall back to a supported version or stop. |
-
-An unexpected internal failure is redacted to a generic `internal_error` (integer -32603)
-that carries no internal text.
+| `internal_error` | -32603 | A guarded tool failed unexpectedly; no internal text is returned. | Retry only if the operation is safe, then report the failure. |
 
 ## Tool annotations
 
 !!! success "Status: available"
-    All 28 tools advertise the annotations below.
+    Every tool in the configured visibility profile advertises the annotations below.
 
 VERA advertises MCP tool annotations so a client can reason about a tool before calling it.
 The vocabulary is the standard MCP `ToolAnnotations`: `readOnlyHint`, `destructiveHint`,
@@ -299,8 +312,9 @@ NOT skip a step. Each step is a MUST unless marked otherwise.
 
 !!! success "Status: available"
     `knowledge_bootstrap` reports the server version, principal, active auth profile, exact
-    capability classes granted by the caller's token, readable projects, repository mapping,
-    write policy, and contract versions without returning knowledge content.
+    capability classes granted by the caller's token, active tool profile, readable projects,
+    repository mapping, executable save-mode policy, and contract versions without returning
+    knowledge content.
 
 ### Setup outcomes
 
@@ -445,6 +459,20 @@ Additional requirements:
     predicate allowlists, evidence and per-task limits, and single-valued conflicts.
     `knowledge_proposal_report` supplies the end-of-task report, and
     `knowledge_retract_proposal` safely withdraws the caller's own pending proposal.
+
+## Operational records and audit policy
+
+VERA MUST keep one authoritative record per integration action rather than duplicating every
+read into `audit_events`. Persisted packs, snapshots, and proposal state transitions use the
+append-only knowledge ledger; proposal outcomes use `proposal_attempts`; exact feedback uses
+`retrieval_feedback`; administrative source retraction uses `audit_events`. Authentication
+failures and ordinary reads use redacted, bounded telemetry and MUST NOT persist tokens,
+prompts, transcripts, source content, or unsanitized paths.
+
+Setup, configuration mutation, uninstall, and hooks execute in the coding runtime, so their
+outcome and ownership record are runtime-owned. VERA MUST NOT claim to have audited a client
+action it did not observe. The complete decision and extension rule are in
+[ADR-0007](../adr/0007-agent-integration-operational-records.md).
 
 ## System prompt and instruction policy
 
@@ -596,6 +624,7 @@ validation alone is not a runtime success claim.
 
 | Version | Change |
 |---|---|
+| `v1.2.0` | Added enforced coding/advanced/compatibility tool-visibility profiles, executable save-mode discovery, authenticated stateless HTTP contract coverage, hostile-content coverage, and the operational-record policy. |
 | `v1.1.0` | Integrated #15: bootstrap and token-derived capability discovery, canonical repository mapping, ephemeral context by default with explicit TTL/quota/deduplicated persistence, exact-attribution feedback, deduplicated bounded proposals, end-of-task reports, and personal self-retract. Updated the 28-tool annotation and authorization tables and removed the Stream B release gate. |
 | `v1.0.0` | Contract surface confirmed live against #14: filled the exact input bounds and quota limits, corrected the structured-error shape to the implemented JSON-RPC form (stable slug in `data.code`), and flipped authentication, authorization, errors, annotations, bounds, quotas, and server instructions to `Status: available`. Bootstrap/discovery and proposal-undo remain `Status: in progress (#15)`. |
 | `v0.1.0-draft` | Initial contract: defaults, auth and authorization model, error and annotation and input-bound targets, setup protocol and outcomes, ownership and mutation rules, context and save and system-prompt and hook contracts, runtime tiers and capability matrix, verification matrix. Dependent items on #14 and #15 marked as normative targets. |

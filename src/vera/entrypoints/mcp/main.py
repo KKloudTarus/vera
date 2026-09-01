@@ -22,9 +22,12 @@ from datetime import datetime
 from typing import Any, Literal
 from uuid import UUID
 
+from mcp.server._otel import OpenTelemetryMiddleware
 from mcp.server.auth.middleware.auth_context import get_access_token
 from mcp.server.auth.settings import AuthSettings
+from mcp.server.context import CallNext, HandlerResult, ServerRequestContext
 from mcp.server.mcpserver import MCPServer
+from mcp.server.transport_security import TransportSecuritySettings
 from pydantic import AnyHttpUrl
 
 from vera import __version__
@@ -42,10 +45,12 @@ from vera.bootstrap import (
 from vera.config.settings import Settings, get_settings
 from vera.domain.identity.models import PrincipalKind
 from vera.entrypoints.knowledge import InputError, KnowledgeService
+from vera.entrypoints.mcp import errors
 from vera.entrypoints.mcp.guard import Guard
 from vera.entrypoints.mcp.policy import ToolClass
 from vera.entrypoints.mcp.service import VeraMcpService
-from vera.observability import configure_logging, get_logger
+from vera.observability import configure_logging, configure_tracing, get_logger
+from vera.observability.metrics import start_metrics_server
 
 log = get_logger(__name__)
 
@@ -64,6 +69,45 @@ def _parse_instant(value: str | None, *, field: str = "as_of") -> datetime | Non
 
 def _uses_local_principal(settings: Settings) -> bool:
     return settings.environment == "local" and settings.mcp.jwt_secret is None
+
+
+def _transport_security(settings: Settings) -> TransportSecuritySettings:
+    return TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=settings.mcp.allowed_hosts,
+        allowed_origins=settings.mcp.allowed_origins,
+    )
+
+
+class _KnownToolMiddleware:
+    def __init__(self, server: MCPServer) -> None:
+        self._server = server
+        self._tool_names: frozenset[str] | None = None
+
+    async def __call__(
+        self,
+        ctx: ServerRequestContext[Any, Any],
+        call_next: CallNext,
+    ) -> HandlerResult:
+        if ctx.method == "tools/call":
+            if self._tool_names is None:
+                self._tool_names = frozenset(tool.name for tool in await self._server.list_tools())
+            name = ctx.params.get("name") if ctx.params is not None else None
+            if not isinstance(name, str) or name not in self._tool_names:
+                raise errors.invalid_input("name", "is not a registered tool")
+        return await call_next(ctx)
+
+
+def _harden_sdk_middleware(server: MCPServer) -> None:
+    # The SDK span uses raw request ids and requested tool names. Guard emits the bounded
+    # replacement after a requested name has matched a registered tool.
+    server.middleware[:] = [
+        middleware
+        for middleware in server.middleware
+        if not isinstance(middleware, OpenTelemetryMiddleware)
+    ]
+    # Reject unknown names before the SDK dispatcher logs the caller-provided value.
+    server.middleware.append(_KnownToolMiddleware(server))
 
 
 def auth_profile(settings: Settings) -> Literal["local-dev", "remote-authenticated"]:
@@ -121,31 +165,48 @@ async def _principal_exists(container: Container, principal_id: UUID) -> bool:
 def build_server(container: Container, settings: Settings) -> MCPServer:
     service: VeraMcpService | None = None
     knowledge: KnowledgeService | None = None
+    metrics_server: Any = None
 
     @contextlib.asynccontextmanager
     async def lifespan(_server: MCPServer) -> AsyncGenerator[None]:
-        nonlocal service, knowledge
-        if _uses_local_principal(settings):
-            await _ensure_local_principal(container, settings.mcp.local_principal_id)
-        # Adopt feedback-calibrated rerank weights before the service snapshots them.
-        with contextlib.suppress(Exception):
-            await refresh_rerank_weights(container)
-        service = VeraMcpService(container, SqlAlchemyScopeResolver(container.sessionmaker))
-        knowledge = KnowledgeService(container, SqlAlchemyScopeResolver(container.sessionmaker))
-        log.info(
-            "mcp.startup",
-            auth="jwt" if settings.mcp.jwt_secret is not None else "disabled",
-            principal_id=(
-                str(settings.mcp.local_principal_id) if _uses_local_principal(settings) else None
-            ),
-        )
+        nonlocal service, knowledge, metrics_server
+        metrics_server = None
         try:
+            if _uses_local_principal(settings):
+                await _ensure_local_principal(container, settings.mcp.local_principal_id)
+            # Adopt feedback-calibrated rerank weights before the service snapshots them.
+            with contextlib.suppress(Exception):
+                await refresh_rerank_weights(container)
+            service = VeraMcpService(container, SqlAlchemyScopeResolver(container.sessionmaker))
+            knowledge = KnowledgeService(container, SqlAlchemyScopeResolver(container.sessionmaker))
+            if settings.observability.metrics_enabled:
+                metrics_server = start_metrics_server(
+                    settings.observability.mcp_metrics_port,
+                    addr=settings.observability.mcp_metrics_host,
+                )
+            log.info(
+                "mcp.startup",
+                auth="jwt" if settings.mcp.jwt_secret is not None else "disabled",
+                principal_id=(
+                    str(settings.mcp.local_principal_id)
+                    if _uses_local_principal(settings)
+                    else None
+                ),
+            )
             yield
         finally:
             service = None
             knowledge = None
-            await dispose_container(container)
-            log.info("mcp.shutdown")
+            try:
+                if metrics_server is not None:
+                    try:
+                        metrics_server.shutdown()
+                    finally:
+                        metrics_server.server_close()
+            finally:
+                metrics_server = None
+                await dispose_container(container)
+                log.info("mcp.shutdown")
 
     def get_service() -> VeraMcpService:
         if service is None:
@@ -192,6 +253,7 @@ def build_server(container: Container, settings: Settings) -> MCPServer:
         auth=auth,
         lifespan=lifespan,
     )
+    _harden_sdk_middleware(server)
 
     guard = Guard(server, settings, build_quota_limiter(settings.resilience))
 
@@ -295,6 +357,7 @@ def build_server(container: Container, settings: Settings) -> MCPServer:
             repository=repository,
             branch=branch,
             capability_classes=_capability_classes(settings),
+            tool_profile=settings.mcp.tool_profile,
         )
 
     @guard.tool(ToolClass.READ, read_only=False, idempotent=False)
@@ -534,8 +597,14 @@ def build_server(container: Container, settings: Settings) -> MCPServer:
 def create_app() -> Any:
     settings = get_settings()
     configure_logging(json=settings.log_json, level=settings.log_level)
+    configure_tracing(settings)
     container = build_container(settings)
-    return build_server(container, settings).streamable_http_app()
+    return build_server(container, settings).streamable_http_app(
+        json_response=True,
+        stateless_http=True,
+        transport_security=_transport_security(settings),
+        host=settings.mcp.host,
+    )
 
 
 def main() -> None:

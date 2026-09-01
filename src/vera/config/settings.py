@@ -21,6 +21,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from vera.shared.ids import deterministic_id
 
 Environment = Literal["local", "dev", "staging", "prod"]
+McpToolProfile = Literal["coding", "advanced", "compatibility"]
 
 
 class DatabaseSettings(BaseModel):
@@ -75,6 +76,11 @@ class WorkerSettings(BaseModel):
 class McpSettings(BaseModel):
     host: str = "0.0.0.0"  # noqa: S104
     port: int = 8080
+    # Streamable HTTP validates Host and Origin independently of the bind address.
+    allowed_hosts: list[str] = Field(
+        default_factory=lambda: ["localhost:*", "127.0.0.1:*", "[::1]:*"]
+    )
+    allowed_origins: list[str] = Field(default_factory=list)
     # Auth-disabled local development uses one stable principal with only its personal
     # scope. Override this id to attach the local client to explicit memberships.
     local_principal_id: UUID = deterministic_id("mcp", "local-principal")
@@ -93,6 +99,9 @@ class McpSettings(BaseModel):
     scope_propose: str = "memory:propose"
     scope_feedback: str = "memory:feedback"
     scope_snapshot: str = "memory:snapshot"
+    # Tool visibility is separate from authorization. The coding profile keeps the
+    # ordinary agent surface small; advanced and legacy tools require explicit opt-in.
+    tool_profile: McpToolProfile = "coding"
     # Per-principal abuse controls (fixed windows). 0 disables a bucket. Persisted
     # context packs and snapshots are budgeted apart from ordinary reads because each
     # one writes durable state.
@@ -124,6 +133,8 @@ class ObservabilitySettings(BaseModel):
     otlp_endpoint: str | None = None  # e.g. "http://localhost:4317"; None disables export
     metrics_enabled: bool = True
     worker_metrics_port: int = 9100
+    mcp_metrics_host: str = "127.0.0.1"
+    mcp_metrics_port: int = 9101
     cost_tracking_enabled: bool = True
 
 

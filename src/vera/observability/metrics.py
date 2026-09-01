@@ -4,10 +4,12 @@ RED for the request path and USE for the queue, plus LLM call and token counters
 with bounded label sets so cardinality stays flat: results are closed enums, models
 come from the fixed configured set, and no group_id, source_id, or free text is ever a
 label. Metric objects are module-level singletons in the default registry; each process
-exposes them (the API through its /metrics route, the worker through its own server).
+exposes them (the API through its /metrics route, workers and MCP through dedicated servers).
 """
 
 from __future__ import annotations
+
+from socketserver import BaseServer
 
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, Histogram, generate_latest
 
@@ -62,6 +64,17 @@ entity_resolution = Counter(
     "Canonical entity resolutions by outcome (new entity vs linked to an existing one).",
     labelnames=("outcome",),
 )
+mcp_tool_calls = Counter(
+    "vera_mcp_tool_calls_total",
+    "MCP tool calls by registered tool name and outcome.",
+    labelnames=("tool", "result"),
+)
+mcp_tool_duration = Histogram(
+    "vera_mcp_tool_duration_seconds",
+    "MCP tool wall-clock duration by registered tool name.",
+    labelnames=("tool",),
+    buckets=_LATENCY_BUCKETS,
+)
 
 
 def record_ingestion(*, result: str, duration_s: float) -> None:
@@ -97,6 +110,12 @@ def record_search(*, duration_s: float, hits: int) -> None:
     search_hits.observe(hits)
 
 
+def record_mcp_tool(*, tool: str, result: str, duration_s: float) -> None:
+    """Record one tool outcome. Tool names are bounded by the registered server surface."""
+    mcp_tool_calls.labels(tool=tool, result=result).inc()
+    mcp_tool_duration.labels(tool=tool).observe(duration_s)
+
+
 def record_llm_usage(
     *,
     model: str,
@@ -127,8 +146,9 @@ def render_latest() -> tuple[bytes, str]:
     return generate_latest(), CONTENT_TYPE_LATEST
 
 
-def start_metrics_server(port: int) -> None:
-    """Expose /metrics on its own HTTP server (used by the worker process)."""
+def start_metrics_server(port: int, *, addr: str = "0.0.0.0") -> BaseServer:  # noqa: S104
+    """Expose /metrics on a dedicated HTTP server and return its shutdown handle."""
     from prometheus_client import start_http_server
 
-    start_http_server(port)
+    server, _thread = start_http_server(port, addr=addr)
+    return server

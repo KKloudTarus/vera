@@ -11,6 +11,10 @@ spec:
   template:
     metadata:
       labels: { app: vera-mcp }
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9101"
+        prometheus.io/path: "/metrics"
     spec:
       securityContext:
         runAsNonRoot: true
@@ -18,7 +22,9 @@ spec:
         - name: mcp
           image: ghcr.io/kkloudtarus/vera:latest
           command: ["python", "-m", "vera.entrypoints.mcp.main"]
-          ports: [{ containerPort: 8080 }]
+          ports:
+            - { containerPort: 8080, name: http }
+            - { containerPort: 9101, name: metrics }
           envFrom:
             - configMapRef: { name: vera-config }
             - secretRef: { name: vera-secrets }
