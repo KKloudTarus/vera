@@ -44,10 +44,15 @@ postgresql+asyncpg://{{ .Values.postgres.user }}:{{ .Values.postgres.password }}
     name: {{ include "vera.fullname" . }}-secrets
 {{- end -}}
 
-{{/* Hold app pods until the database accepts connections. */}}
+{{/* Hold app pods until the database accepts connections. Runs non-root so it satisfies
+     the app pods' runAsNonRoot policy (pg_isready needs no privileges). */}}
 {{- define "vera.waitForPostgres" -}}
 - name: wait-for-postgres
   image: {{ .Values.postgres.image }}
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65534
+    allowPrivilegeEscalation: false
   command:
     - sh
     - -c
