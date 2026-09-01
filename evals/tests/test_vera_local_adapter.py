@@ -882,6 +882,8 @@ def test_feedback_search_persists_distinct_attribution_packs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[tuple[bool, int]] = []
+    sleeps: list[float] = []
+    clock = 0.0
 
     async def search(_settings: Any, **kwargs: Any) -> dict[str, Any]:
         persist = bool(kwargs["persist"])
@@ -904,7 +906,14 @@ def test_feedback_search_persists_distinct_attribution_packs(
             "latency_ms": 1.0,
         }
 
+    async def sleep(delay: float) -> None:
+        nonlocal clock
+        sleeps.append(delay)
+        clock += delay
+
     monkeypatch.setattr(adapter, "_search_mcp", search)
+    monkeypatch.setattr(adapter.asyncio, "sleep", sleep)
+    monkeypatch.setattr(adapter.time, "monotonic", lambda: clock)
     current: dict[str, Any] = {
         "principals": {
             "default": {
@@ -928,7 +937,11 @@ def test_feedback_search_persists_distinct_attribution_packs(
 
     outcome = asyncio.run(
         adapter._handle_search(
-            SimpleNamespace(settings=None),  # type: ignore[arg-type]
+            SimpleNamespace(
+                settings=SimpleNamespace(
+                    mcp=SimpleNamespace(quota_enabled=True, quota_context_per_minute=2)
+                )
+            ),  # type: ignore[arg-type]
             {
                 "case_id": "LEARN-001",
                 "action": "search.mcp",
@@ -945,6 +958,7 @@ def test_feedback_search_persists_distinct_attribution_packs(
     assert [event["context_pack_id"] for event in outcome.observations["retrieval"]["events"]] == [
         f"pack-{2000 + index}" for index in range(5)
     ]
+    assert sleeps == pytest.approx([60.25, 60.25])
 
 
 def test_visibility_poll_waits_for_the_ingested_artifact(

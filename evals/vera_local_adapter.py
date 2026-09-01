@@ -3123,6 +3123,11 @@ async def _handle_search(
     attribution_repetitions = int(
         _CASES[str(request["case_id"])]["fixture"].get("train_feedback_repetitions", 1)
     )
+    mcp_settings = getattr(container.settings, "mcp", None)
+    context_quota = int(getattr(mcp_settings, "quota_context_per_minute", 0))
+    if not bool(getattr(mcp_settings, "quota_enabled", False)):
+        context_quota = 0
+    context_call_times: list[float] = []
     if isinstance(attempted, str):
         attempted_principal = _principal(current, attempted)
         project = str(attempted_principal["group_id"])
@@ -3137,6 +3142,18 @@ async def _handle_search(
                 as_of=_parse_time(inputs.get("as_of")),
                 known_as_of=_parse_time(inputs.get("known_as_of")),
             )
+        if attribution_repetitions > 1 and context_quota > 0:
+            now = time.monotonic()
+            context_call_times[:] = [
+                started for started in context_call_times if now - started < 60
+            ]
+            if len(context_call_times) >= context_quota:
+                await asyncio.sleep(max(0.0, context_call_times[0] + 60.25 - now))
+                now = time.monotonic()
+                context_call_times[:] = [
+                    started for started in context_call_times if now - started < 60
+                ]
+            context_call_times.append(now)
         result = await _search_mcp(
             container.settings,
             principal_id=str(principal["principal_id"]),
@@ -4663,7 +4680,10 @@ async def _production_database_roles(
         )
         changed = list(
             await session.scalars(
-                text("UPDATE facts SET object=object WHERE group_id=:other RETURNING id"),
+                text(
+                    "UPDATE facts SET normalized_object=normalized_object "
+                    "WHERE group_id=:other RETURNING id"
+                ),
                 {"other": group_b},
             )
         )
@@ -4676,7 +4696,10 @@ async def _production_database_roles(
             async with runtime_sessions() as session, session.begin():
                 await session.execute(text("SET LOCAL ROLE vera_trusted"))
                 await session.execute(
-                    text("UPDATE facts SET object=object WHERE group_id=:group_id"),
+                    text(
+                        "UPDATE facts SET normalized_object=normalized_object "
+                        "WHERE group_id=:group_id"
+                    ),
                     {"group_id": group_a},
                 )
         except SQLAlchemyError:
@@ -4869,10 +4892,33 @@ async def _production_mcp_authorization(
             )
         ],
     )
-    context_payload = context_probe[0].get("payload")
-    pack_id = context_payload.get("pack_id") if isinstance(context_payload, dict) else None
-    if context_probe[0]["allowed"] is not True or not isinstance(pack_id, str):
+    if context_probe[0]["allowed"] is not True:
         raise AdapterFailed("valid MCP context call failed before authorization probing")
+    pack_token = _production_mcp_token(
+        container.settings,
+        principal_id=str(principal["principal_id"]),
+        expires_at=now + timedelta(minutes=5),
+        scopes=list(dict.fromkeys((*container.settings.mcp.required_scopes, "memory:snapshot"))),
+    )
+    pack_probe = await _production_mcp_probes(
+        token=pack_token,
+        calls=[
+            (
+                "knowledge_get_context",
+                {
+                    "query": "Production Service mcp-valid 1",
+                    "project": principal["group_id"],
+                    "limit": 5,
+                    "token_budget": 1000,
+                    "persist": True,
+                },
+            )
+        ],
+    )
+    pack_payload = pack_probe[0].get("payload")
+    pack_id = pack_payload.get("pack_id") if isinstance(pack_payload, dict) else None
+    if pack_probe[0]["allowed"] is not True or not isinstance(pack_id, str):
+        raise AdapterFailed("MCP persisted context setup failed before authorization probing")
     source_ids = [
         value.get("id")
         for value in snapshot.get("sources_state", [])
