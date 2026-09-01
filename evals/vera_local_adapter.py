@@ -1471,7 +1471,7 @@ async def _search_http(
     return response.status_code, observation
 
 
-def _mcp_token(settings: Settings, principal_id: str) -> str:
+def _mcp_token(settings: Settings, principal_id: str, *, extra_scopes: tuple[str, ...] = ()) -> str:
     configured = os.environ.get("VERA_EVAL_MCP_JWT_SECRET")
     runtime = settings.mcp.jwt_secret
     if runtime is None:
@@ -1480,12 +1480,13 @@ def _mcp_token(settings: Settings, principal_id: str) -> str:
     if configured is not None and configured != secret:
         raise AdapterBlocked("evaluation MCP JWT secret does not match the active runtime")
     now = datetime.now(UTC)
+    scopes = dict.fromkeys((*settings.mcp.required_scopes, *extra_scopes))
     return jwt.encode(
         {
             "sub": principal_id,
             "iss": settings.mcp.auth_issuer,
             "aud": settings.mcp.auth_audience,
-            "scope": " ".join(settings.mcp.required_scopes),
+            "scope": " ".join(scopes),
             "iat": now,
             "exp": now + timedelta(minutes=5),
         },
@@ -1494,8 +1495,12 @@ def _mcp_token(settings: Settings, principal_id: str) -> str:
     )
 
 
-def _mcp_headers(settings: Settings, principal_id: str) -> dict[str, str]:
-    headers = {"Authorization": f"Bearer {_mcp_token(settings, principal_id)}"}
+def _mcp_headers(
+    settings: Settings, principal_id: str, *, extra_scopes: tuple[str, ...] = ()
+) -> dict[str, str]:
+    headers = {
+        "Authorization": f"Bearer {_mcp_token(settings, principal_id, extra_scopes=extra_scopes)}"
+    }
     host = os.environ.get("VERA_EVAL_MCP_HOST_HEADER")
     if host:
         headers["Host"] = host
@@ -1527,12 +1532,13 @@ async def _call_mcp_tool(
     principal_id: str,
     name: str,
     arguments: dict[str, Any],
+    extra_scopes: tuple[str, ...] = (),
 ) -> tuple[dict[str, Any], float]:
     timeout_s = _timeout("VERA_EVAL_MCP_TIMEOUT_S", 15.0)
     started = time.perf_counter()
     try:
         async with httpx2.AsyncClient(
-            headers=_mcp_headers(settings, principal_id),
+            headers=_mcp_headers(settings, principal_id, extra_scopes=extra_scopes),
             timeout=httpx2.Timeout(timeout_s),
             follow_redirects=True,
         ) as http_client:
@@ -1578,6 +1584,7 @@ async def _search_mcp(
         principal_id=principal_id,
         name=tool_name,
         arguments=arguments,
+        extra_scopes=("memory:snapshot",) if persist else (),
     )
     facts, flattened = _normalize_product_search(payload)
     timeout_s = _timeout("VERA_EVAL_MCP_TIMEOUT_S", 15.0)
@@ -4605,7 +4612,7 @@ async def _production_database_roles(
                 raise AdapterFailed(f"database role switch failed for {label}")
             own_rows = int(
                 await session.scalar(
-                    text("SELECT count(*) FROM projects WHERE group_id=:group_id"),
+                    text("SELECT count(*) FROM facts WHERE group_id=:group_id"),
                     {"group_id": group_a},
                 )
                 or 0
@@ -4615,7 +4622,7 @@ async def _production_database_roles(
             if label == "api":
                 cross_rows = int(
                     await session.scalar(
-                        text("SELECT count(*) FROM projects WHERE group_id=:group_id"),
+                        text("SELECT count(*) FROM facts WHERE group_id=:group_id"),
                         {"group_id": group_b},
                     )
                     or 0
@@ -4632,7 +4639,7 @@ async def _production_database_roles(
                 explicitly_scoped = list(
                     await session.scalars(
                         text(
-                            "SELECT group_id FROM projects WHERE group_id=:allowed_group "
+                            "SELECT group_id FROM facts WHERE group_id=:allowed_group "
                             "ORDER BY group_id"
                         ),
                         {"allowed_group": group_a},
@@ -4656,7 +4663,7 @@ async def _production_database_roles(
         )
         changed = list(
             await session.scalars(
-                text("UPDATE projects SET name=name WHERE group_id=:other RETURNING id"),
+                text("UPDATE facts SET object=object WHERE group_id=:other RETURNING id"),
                 {"other": group_b},
             )
         )
@@ -4669,7 +4676,7 @@ async def _production_database_roles(
             async with runtime_sessions() as session, session.begin():
                 await session.execute(text("SET LOCAL ROLE vera_trusted"))
                 await session.execute(
-                    text("UPDATE projects SET name=name WHERE group_id=:group_id"),
+                    text("UPDATE facts SET object=object WHERE group_id=:group_id"),
                     {"group_id": group_a},
                 )
         except SQLAlchemyError:

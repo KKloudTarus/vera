@@ -997,6 +997,7 @@ def test_mcp_search_uses_streamable_http_sdk_and_actual_tool_result(
         seen["url"] = url
         seen["http_client_type"] = type(http_client).__name__
         seen["host"] = http_client.headers.get("host")
+        seen["authorization"] = http_client.headers.get("authorization")
         yield object()
 
     class FakeClient:
@@ -1056,6 +1057,14 @@ def test_mcp_search_uses_streamable_http_sdk_and_actual_tool_result(
     assert seen["arguments"] == {"query": "owner", "limit": 5, "project": "p:case"}
     assert result["facts"][0]["id"] == "fact-key-1"
     assert "trace_id" not in result
+    read_claims = adapter.jwt.decode(
+        str(seen["authorization"]).removeprefix("Bearer "),
+        "mcp-secret-for-tests-at-least-32-bytes",
+        algorithms=["HS256"],
+        audience="https://mcp.vera.local",
+        issuer="https://auth.vera.local",
+    )
+    assert read_claims["scope"] == "memory:read"
 
     persisted = asyncio.run(
         adapter._search_mcp(
@@ -1078,6 +1087,14 @@ def test_mcp_search_uses_streamable_http_sdk_and_actual_tool_result(
         "token_budget": 2004,
     }
     assert persisted["context_pack_id"] == "00000000-0000-0000-0000-000000000456"
+    persisted_claims = adapter.jwt.decode(
+        str(seen["authorization"]).removeprefix("Bearer "),
+        "mcp-secret-for-tests-at-least-32-bytes",
+        algorithms=["HS256"],
+        audience="https://mcp.vera.local",
+        issuer="https://auth.vera.local",
+    )
+    assert persisted_claims["scope"].split() == ["memory:read", "memory:snapshot"]
 
 
 def test_mcp_token_uses_the_frozen_runtime_secret_without_a_duplicate_env(
