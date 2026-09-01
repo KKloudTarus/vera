@@ -41,6 +41,8 @@ class TenancyRepository(Protocol):
 
     async def get_workspace(self, workspace_id: UUID) -> Workspace | None: ...
 
+    async def get_organization(self, org_id: UUID) -> Organization | None: ...
+
 
 class OutboxRepository(Protocol):
     async def add(

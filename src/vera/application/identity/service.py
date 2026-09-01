@@ -31,8 +31,8 @@ from vera.domain.identity.models import (
 )
 from vera.domain.ports.unit_of_work import UnitOfWork
 from vera.shared.errors import Conflict, DomainError, Err, Forbidden, NotFound, Ok, Result
-from vera.shared.ids import uuid7
-from vera.shared.security import generate_api_key
+from vera.shared.ids import deterministic_id, uuid7
+from vera.shared.security import generate_api_key, hash_secret, split_api_key
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,6 +40,18 @@ class IssuedApiKey:
     credential_id: UUID
     principal_id: UUID
     api_key: str  # plaintext, returned once and never stored
+
+
+@dataclass(frozen=True, slots=True)
+class BootstrapAdmin:
+    """The outcome of ensuring the init admin exists. ``created`` is True only on the run
+    that first minted it, so an operator can tell a fresh seed from a repeat.
+    """
+
+    principal_id: UUID
+    workspace_id: UUID
+    org_id: UUID
+    created: bool
 
 
 class IdentityService:
@@ -176,6 +188,109 @@ class IdentityService:
         )
         issued = await self._issue_api_key(account_id)
         return Ok((account, issued))
+
+    async def provision_user(
+        self,
+        *,
+        actor: AuthenticatedPrincipal,
+        workspace_id: UUID,
+        display_name: str,
+        email: str | None = None,
+        role: Role = Role.MEMBER,
+    ) -> Result[tuple[Principal, IssuedApiKey], DomainError]:
+        """Create a user principal, add it to the actor's workspace, and issue its first
+        key, all in one admin-gated step. This is the closed-signup replacement for
+        register: an admin hands out access instead of anyone minting their own.
+        """
+        guard = await self._require_role(actor, workspace_id, Role.ADMIN)
+        if isinstance(guard, Err):
+            return guard
+        principal = await self.create_principal(display_name=display_name, email=email)
+        await self._uow.identity.add_membership(
+            principal_id=principal.id,
+            workspace_id=workspace_id,
+            project_id=None,
+            role=role,
+        )
+        issued = await self._issue_api_key(principal.id)
+        return Ok((principal, issued))
+
+    async def ensure_admin(
+        self,
+        *,
+        admin_api_key: str,
+        admin_email: str,
+        admin_display_name: str,
+        org_slug: str,
+        org_name: str,
+        workspace_slug: str,
+        workspace_name: str,
+    ) -> Result[BootstrapAdmin, DomainError]:
+        """Idempotently seed an initial admin that owns a root workspace and holds the
+        given API key. Keyed by email (principal), slug (org and workspace), and the key's
+        clear prefix (credential), so a repeat run changes nothing. Not authorization
+        gated: it runs as an operator seed, out of band from the request path.
+        """
+        parts = split_api_key(admin_api_key)
+        if parts is None:
+            return Err(Conflict("bootstrap admin_api_key is malformed (want <prefix>.<secret>)"))
+        key_prefix, secret = parts
+
+        principal = await self._uow.identity.get_principal_by_email(admin_email)
+        created = principal is None
+        if principal is None:
+            principal = await self.create_principal(
+                display_name=admin_display_name, email=admin_email
+            )
+
+        org_id = deterministic_id("bootstrap-org", org_slug)
+        if await self._uow.tenancy.get_organization(org_id) is None:
+            await self._uow.tenancy.create_organization(
+                org_id=org_id, slug=org_slug, name=org_name, group_id=f"o:{org_id}"
+            )
+
+        workspace_id = deterministic_id("bootstrap-workspace", workspace_slug)
+        if await self._uow.tenancy.get_workspace(workspace_id) is None:
+            await self._uow.tenancy.create_workspace(
+                workspace_id=workspace_id,
+                org_id=org_id,
+                slug=workspace_slug,
+                name=workspace_name,
+                group_id=f"w:{workspace_id}",
+            )
+
+        membership = await self._uow.identity.find_membership(
+            principal_id=principal.id, workspace_id=workspace_id
+        )
+        if membership is None:
+            await self._uow.identity.add_membership(
+                principal_id=principal.id,
+                workspace_id=workspace_id,
+                project_id=None,
+                role=Role.OWNER,
+            )
+
+        existing = await self._uow.identity.get_credential_by_prefix(key_prefix)
+        if existing is None:
+            await self._uow.identity.create_credential(
+                principal_id=principal.id,
+                service_account_id=None,
+                kind=CredentialKind.API_KEY,
+                key_prefix=key_prefix,
+                hashed_secret=hash_secret(secret),
+                expires_at=None,
+            )
+        elif existing.principal_id != principal.id:
+            return Err(Conflict(f"api key prefix {key_prefix} belongs to a different principal"))
+
+        return Ok(
+            BootstrapAdmin(
+                principal_id=principal.id,
+                workspace_id=workspace_id,
+                org_id=org_id,
+                created=created,
+            )
+        )
 
     async def issue_api_key(
         self,

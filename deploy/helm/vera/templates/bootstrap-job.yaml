@@ -1,0 +1,31 @@
+{{- if .Values.bootstrap.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "vera.fullname" . }}-bootstrap
+  labels: {{- include "vera.labels" . | nindent 4 }}
+  annotations:
+    # Runs after the migrate hook (weight 1) so the schema exists. The seed is idempotent,
+    # so re-running on every upgrade is safe.
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "2"
+    "helm.sh/hook-delete-policy": before-hook-creation
+spec:
+  backoffLimit: 3
+  template:
+    metadata:
+      labels: {{- include "vera.labels" . | nindent 8 }}
+    spec:
+      restartPolicy: Never
+      securityContext: {{- include "vera.podSecurityContext" . | nindent 8 }}
+      initContainers: {{- include "vera.waitForPostgres" . | nindent 8 }}
+      containers:
+        - name: bootstrap
+          image: {{ include "vera.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["python", "-m", "vera.entrypoints.bootstrap_admin"]
+          envFrom: {{- include "vera.envFrom" . | nindent 12 }}
+          resources:
+            requests: { cpu: "100m", memory: "256Mi" }
+            limits: { cpu: "500m", memory: "512Mi" }
+{{- end }}

@@ -275,6 +275,94 @@ async def test_rotate_replaces_the_key(
     assert isinstance(again, Err)
 
 
+async def test_ensure_admin_is_idempotent_and_owns_workspace(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    from vera.shared.security import generate_api_key
+
+    key = generate_api_key().full_key
+    email = f"admin-{org_suffix()}@vera.local"
+    slug = f"root-{org_suffix()}"
+    kwargs = {
+        "admin_api_key": key,
+        "admin_email": email,
+        "admin_display_name": "Init Admin",
+        "org_slug": slug,
+        "org_name": "Root",
+        "workspace_slug": slug,
+        "workspace_name": "Root",
+    }
+
+    async with _identity(sessionmaker) as svc:
+        first = _ok(await svc.ensure_admin(**kwargs))
+    assert first.created is True
+
+    # Re-running seeds nothing new: same principal, and created flips to False.
+    async with _identity(sessionmaker) as svc:
+        again = _ok(await svc.ensure_admin(**kwargs))
+    assert again.created is False
+    assert again.principal_id == first.principal_id
+    assert again.workspace_id == first.workspace_id
+
+    # The seeded key authenticates as the admin, who owns the root workspace.
+    admin = await _authed(sessionmaker, key)
+    assert admin.id == first.principal_id
+    async with SqlAlchemyUnitOfWork(sessionmaker) as uow:
+        membership = await uow.identity.find_membership(
+            principal_id=admin.id, workspace_id=first.workspace_id
+        )
+    assert membership is not None
+    assert membership.role is Role.OWNER
+
+
+async def test_provision_user_by_admin_issues_working_key(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    key = generate_api_key_full()
+    async with _identity(sessionmaker) as svc:
+        seeded = _ok(
+            await svc.ensure_admin(
+                admin_api_key=key,
+                admin_email=f"admin-{org_suffix()}@vera.local",
+                admin_display_name="Init Admin",
+                org_slug=f"root-{org_suffix()}",
+                org_name="Root",
+                workspace_slug=f"root-{org_suffix()}",
+                workspace_name="Root",
+            )
+        )
+    admin = await _authed(sessionmaker, key)
+
+    async with _identity(sessionmaker) as svc:
+        principal, issued = _ok(
+            await svc.provision_user(
+                actor=admin,
+                workspace_id=seeded.workspace_id,
+                display_name="Provisioned Bob",
+                email="bob@vera.local",
+            )
+        )
+
+    # The handed-out key works and resolves to the new member.
+    resolved = await _authed(sessionmaker, issued.api_key)
+    assert resolved.id == principal.id
+
+    # A plain member cannot provision anyone: provisioning is admin-gated.
+    async with _identity(sessionmaker) as svc:
+        denied = await svc.provision_user(
+            actor=resolved,
+            workspace_id=seeded.workspace_id,
+            display_name="Mallory",
+        )
+    assert isinstance(denied, Err)
+
+
+def generate_api_key_full() -> str:
+    from vera.shared.security import generate_api_key
+
+    return generate_api_key().full_key
+
+
 def _ok(result: object) -> object:
     assert isinstance(result, Ok)
     return result.value

@@ -23,7 +23,8 @@ secrets:
   # already exist (GitOps: keep credentials out of git, create the Secret with kubectl). It
   # must carry VERA_DB__DSN, VERA_OBJECTSTORE__ACCESS_KEY/SECRET_KEY, POSTGRES_PASSWORD,
   # MINIO_ROOT_USER, MINIO_ROOT_PASSWORD, and (when set) VERA_MCP__JWT_SECRET,
-  # VERA_MEMORY__OPENAI_API_KEY, VERA_NEO4J__PASSWORD.
+  # VERA_MEMORY__OPENAI_API_KEY, VERA_NEO4J__PASSWORD, VERA_VOYAGE__API_KEY,
+  # VERA_BOOTSTRAP__ADMIN_API_KEY.
   create: true
 
 ingress:
@@ -48,6 +49,9 @@ logJson: true
 api:
   replicas: 1
   authRequired: false
+  # Open self-service signup at POST /identity/register. Leave true for a pilot; set false
+  # for a shared deployment so only an admin provisions accounts (see the bootstrap block).
+  registrationOpen: true
   service:
     type: ClusterIP
     port: 8000
@@ -90,6 +94,20 @@ worker:
 calibrate:
   enabled: true
   schedule: "0 3 * * *"
+
+# Seed an initial admin so a closed deployment (api.registrationOpen=false) still has a
+# first principal that provisions the rest. When enabled a post-install/post-upgrade Job
+# runs the idempotent seed. The admin API key is a secret: with secrets.create=false put
+# VERA_BOOTSTRAP__ADMIN_API_KEY in the external secret; otherwise set bootstrap.adminApiKey.
+bootstrap:
+  enabled: false
+  adminApiKey: ""             # full vera_<prefix>.<secret>, minted out of band
+  adminEmail: "admin@vera.local"
+  adminDisplayName: "VERA Admin"
+  orgSlug: "root"
+  orgName: "Root Organization"
+  workspaceSlug: "root"
+  workspaceName: "Root Workspace"
 
 memory:
   provider: graphiti          # graphiti | null
