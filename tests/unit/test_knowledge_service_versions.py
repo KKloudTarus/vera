@@ -2,10 +2,15 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 from typing import cast
+from uuid import uuid4
+
+import pytest
 
 from vera.bootstrap import Container
 from vera.config.settings import get_settings
+from vera.entrypoints.knowledge import service as knowledge_service
 from vera.entrypoints.knowledge.service import (
+    KnowledgeService,
     active_embedding_version,
     active_retrieval_index_version,
 )
@@ -59,3 +64,30 @@ def test_snapshot_retrieval_version_pins_the_reranker_threshold() -> None:
     assert active_retrieval_index_version(_container(top_n=20)) != active_retrieval_index_version(
         _container(top_n=50)
     )
+
+
+@pytest.mark.asyncio
+async def test_failed_production_search_records_latency(monkeypatch: pytest.MonkeyPatch) -> None:
+    observed: list[dict[str, float | int]] = []
+
+    class _Scopes:
+        async def resolve(self, _principal_id: object) -> object:
+            return SimpleNamespace(group_ids=["p:demo"], personal_group_id=None)
+
+    class _Assembler:
+        async def assemble(self, **_values: object) -> object:
+            raise TimeoutError
+
+    service = KnowledgeService.__new__(KnowledgeService)
+    service._scopes = _Scopes()  # type: ignore[assignment]
+    service._assembler = _Assembler()  # type: ignore[assignment]
+    monkeypatch.setattr(
+        knowledge_service, "record_search", lambda **values: observed.append(values)
+    )
+
+    with pytest.raises(TimeoutError):
+        await service.search(uuid4(), query="x", project="p:demo")
+
+    assert len(observed) == 1
+    assert observed[0]["duration_s"] >= 0
+    assert observed[0]["hits"] == 0

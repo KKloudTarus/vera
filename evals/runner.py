@@ -34,6 +34,7 @@ try:
         ROOT,
         dataset_sha256,
         fixture_data,
+        load_case_dependencies,
         load_cases,
         load_json,
         sha256_file,
@@ -56,6 +57,7 @@ except ModuleNotFoundError:  # Direct execution: python evals/runner.py
         ROOT,
         dataset_sha256,
         fixture_data,
+        load_case_dependencies,
         load_cases,
         load_json,
         sha256_file,
@@ -164,6 +166,32 @@ _FRAMEWORK_CHECKS = frozenset(
 
 class RunnerError(RuntimeError):
     """The evaluation runner cannot safely complete the requested run."""
+
+
+def _order_cases(
+    cases: list[dict[str, Any]], dependencies: dict[str, list[str]]
+) -> list[dict[str, Any]]:
+    remaining = {case["case_id"]: case for case in cases}
+    selected_ids = set(remaining)
+    completed: set[str] = set()
+    ordered: list[dict[str, Any]] = []
+    while remaining:
+        ready = [
+            case
+            for case_id, case in remaining.items()
+            if set(dependencies.get(case_id, [])) & selected_ids <= completed
+        ]
+        if not ready:
+            unresolved = ", ".join(sorted(remaining))
+            raise RunnerError(f"case dependency cycle among selected cases: {unresolved}")
+        case = min(
+            ready,
+            key=lambda item: (_PRIORITY_ORDER[item["priority"]], item["case_id"]),
+        )
+        ordered.append(case)
+        completed.add(case["case_id"])
+        del remaining[case["case_id"]]
+    return ordered
 
 
 class InputResolutionError(RunnerError):
@@ -1508,9 +1536,9 @@ class EvaluationRunner:
         )
         if not _SAFE_RUN_ID.fullmatch(run_id):
             raise RunnerError("generated run_id is unsafe")
-        selected_cases = sorted(
+        selected_cases = _order_cases(
             [case for case in self._cases if self._config.profile in case["profiles"]],
-            key=lambda item: (_PRIORITY_ORDER[item["priority"]], item["case_id"]),
+            load_case_dependencies(self._root),
         )
         selected_checks = [
             check for check in self._checks if self._config.profile in check["profiles"]

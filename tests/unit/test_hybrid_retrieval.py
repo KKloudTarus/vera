@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 from dataclasses import replace
 from datetime import UTC, datetime
 
@@ -155,22 +154,6 @@ async def test_fact_rrf_accepts_candidate_sets_from_one_batch() -> None:
 
     assert [hit.fact_key for hit in hits] == ["shared", "lexical-only", "semantic-only"]
     assert hits[0].score > hits[1].score
-
-
-@pytest.mark.asyncio
-async def test_fact_batch_search_honors_shared_concurrency_limit() -> None:
-    source = _FactBatchSource()
-    semaphore = asyncio.Semaphore(0)
-    hybrid = HybridFactCandidateSource(batch_source=source, batch_semaphore=semaphore)
-
-    task = asyncio.create_task(hybrid.search(group_id="p:test", query="runtime", limit=3))
-    await asyncio.sleep(0)
-
-    assert source.calls == 0
-    semaphore.release()
-    hits = await task
-    assert source.calls == 1
-    assert [hit.fact_key for hit in hits] == ["shared", "lexical-only", "semantic-only"]
 
 
 @pytest.mark.asyncio

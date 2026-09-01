@@ -30,6 +30,7 @@ from vera.observability.metrics import (
     record_ingestion,
     record_llm_usage,
     record_search,
+    record_time_to_searchable,
     render_latest,
 )
 
@@ -91,6 +92,7 @@ def test_usage_event_without_context_is_unknown() -> None:
 def test_metrics_are_recorded_in_the_registry() -> None:
     record_ingestion(result="done", duration_s=0.5)
     record_search(duration_s=0.2, hits=3)
+    record_time_to_searchable(1200)
     record_llm_usage(
         model="text-embedding-3-small",
         operation="embedding",
@@ -103,6 +105,7 @@ def test_metrics_are_recorded_in_the_registry() -> None:
     assert "text/plain" in content_type
     assert "vera_ingestion_jobs_total" in text
     assert "vera_search_duration_seconds" in text
+    assert "vera_time_to_searchable_seconds" in text
     assert "vera_llm_tokens_total" in text
 
 

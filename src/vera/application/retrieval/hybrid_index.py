@@ -69,7 +69,6 @@ class HybridFactCandidateSource:
         rank_constant: int = 60,
         hydrator: FactCandidateHydrator | None = None,
         batch_source: FactCandidateBatchSource | None = None,
-        batch_semaphore: asyncio.Semaphore | None = None,
     ) -> None:
         if not sources and batch_source is None:
             raise ValueError("at least one fact candidate source is required")
@@ -79,7 +78,6 @@ class HybridFactCandidateSource:
         self._rank_constant = rank_constant
         self._hydrator = hydrator
         self._batch_source = batch_source
-        self._batch_semaphore = batch_semaphore
 
     async def search(
         self,
@@ -93,6 +91,7 @@ class HybridFactCandidateSource:
         snapshot_id: str | None = None,
         filters: RetrievalFilters | None = None,
     ) -> list[FactHit]:
+        batch: FactCandidateSets | None = None
         if self._batch_source is None:
             async with asyncio.TaskGroup() as group:
                 tasks = [
@@ -113,24 +112,16 @@ class HybridFactCandidateSource:
             result_sets = [task.result() for task in tasks]
         else:
             batch_source = self._batch_source
-
-            async def search_batch() -> FactCandidateSets:
-                return await batch_source.search(
-                    group_id=group_id,
-                    query=query,
-                    limit=limit,
-                    as_of=as_of,
-                    known_as_of=known_as_of,
-                    restrict_fact_ids=restrict_fact_ids,
-                    snapshot_id=snapshot_id,
-                    filters=filters,
-                )
-
-            if self._batch_semaphore is None:
-                batch = await search_batch()
-            else:
-                async with self._batch_semaphore:
-                    batch = await search_batch()
+            batch = await batch_source.search(
+                group_id=group_id,
+                query=query,
+                limit=limit,
+                as_of=as_of,
+                known_as_of=known_as_of,
+                restrict_fact_ids=restrict_fact_ids,
+                snapshot_id=snapshot_id,
+                filters=filters,
+            )
             result_sets = [batch.lexical, batch.semantic]
         hits: dict[str, FactHit] = {}
         scores: dict[str, float] = {}
@@ -141,7 +132,7 @@ class HybridFactCandidateSource:
                     self._rank_constant + rank
                 )
         ranked = sorted(scores, key=lambda fact_key: (-scores[fact_key], fact_key))[:limit]
-        if self._hydrator is None:
+        if self._hydrator is None or (batch is not None and batch.hydrated):
             return [replace(hits[fact_key], score=scores[fact_key]) for fact_key in ranked]
         hydrated = await self._hydrator.hydrate(
             group_id=group_id,

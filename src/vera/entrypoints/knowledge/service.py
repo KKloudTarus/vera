@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 from datetime import datetime
 from typing import Any, Literal
 from uuid import UUID
@@ -81,6 +82,7 @@ from vera.domain.ports.retrieval_index import (
 from vera.domain.ports.snapshot import ContextPack
 from vera.domain.repository_identity import canonical_repository_ref
 from vera.observability.cost import UsageContext, reset_usage_context, set_usage_context
+from vera.observability.metrics import record_search
 from vera.shared.ids import uuid7
 from vera.shared.time import utc_now
 from vera.shared.types import GroupId, JsonDict
@@ -239,9 +241,10 @@ class KnowledgeService:
                         min_score=container.settings.rerank.cross_encoder_min_score,
                         top_n=container.settings.rerank.cross_encoder_top_n,
                         include_provenance=False,
+                        semantic_semaphore=container.fact_candidate_semaphore,
+                        exact_semaphore=container.exact_fact_candidate_semaphore,
                     ),
                     hydrator=hydrator,
-                    batch_semaphore=container.fact_candidate_semaphore,
                 )
             code = HybridPassageIndex(
                 SqlAlchemyCodeIndex(sm),
@@ -507,6 +510,8 @@ class KnowledgeService:
         scope = await self._resolve(principal_id)
         group = await self._target_group(scope, project)
         usage_token = set_usage_context(UsageContext(request_kind="search", group_id=group))
+        started = time.perf_counter()
+        result_count = 0
         try:
             assembled = await self._assembler.assemble(
                 query=query,
@@ -515,8 +520,10 @@ class KnowledgeService:
                 as_of=as_of,
                 known_as_of=known_as_of,
             )
+            result_count = len(assembled.results)
         finally:
             reset_usage_context(usage_token)
+            record_search(duration_s=time.perf_counter() - started, hits=result_count)
         return {
             "query": query,
             "conflicts": assembled.conflicts,

@@ -227,6 +227,35 @@ async def test_reclaim_stuck_returns_inflight_to_pending(
     assert status == "pending"
 
 
+async def test_release_returns_claim_without_consuming_attempt(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    make_container: Callable[[object], Container],
+) -> None:
+    container = make_container(RecordingMemoryEngine())
+    suffix = uuid7().hex[:12]
+    source = f"release:{suffix}"
+    await _enqueue(container, group=f"p:{suffix}", source=source)
+    jobs = await container.queue.claim(batch_size=10)
+    job = next(value for value in jobs if str(value.source_id) == source)
+
+    await container.queue.release(job.id, reason="worker shutdown")
+
+    async with sessionmaker() as session:
+        row = (
+            await session.execute(
+                text(
+                    "SELECT status, attempts, locked_until, last_error "
+                    "FROM ingestion_jobs WHERE id=:id"
+                ),
+                {"id": job.id},
+            )
+        ).one()
+    assert row.status == "pending"
+    assert row.attempts == 0
+    assert row.locked_until is None
+    assert row.last_error == "worker shutdown"
+
+
 async def test_published_reference_time_is_stable_across_retry(
     sessionmaker: async_sessionmaker[AsyncSession],
     make_container: Callable[[object], Container],

@@ -110,16 +110,24 @@ async def test_non_expiring_token_is_accepted() -> None:
 
 
 @pytest.mark.asyncio
-async def test_non_uuid_subject_is_rejected() -> None:
-    assert await _verifier().verify_token(_token(sub="alice")) is None
-
-
-@pytest.mark.asyncio
 async def test_unknown_principal_is_rejected() -> None:
     async def missing_principal(_principal_id: UUID) -> bool:
         return False
 
     assert await _verifier(missing_principal).verify_token(_token()) is None
+
+
+@pytest.mark.asyncio
+async def test_non_uuid_subject_is_rejected_without_lookup() -> None:
+    called = False
+
+    async def principal_exists(_principal_id: UUID) -> bool:
+        nonlocal called
+        called = True
+        return True
+
+    assert await _verifier(principal_exists).verify_token(_token(sub="unknown")) is None
+    assert called is False
 
 
 @pytest.mark.asyncio

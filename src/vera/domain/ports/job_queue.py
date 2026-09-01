@@ -55,6 +55,10 @@ class JobQueue(Protocol):
         """Reschedule a transient failure, or dead-letter once attempts are exhausted."""
         ...
 
+    async def release(self, job_id: UUID, *, reason: str) -> None:
+        """Return a claimed job to pending without consuming an attempt."""
+        ...
+
     async def reclaim_stuck(self) -> int:
         """Return timed-out in-flight jobs to pending. Returns how many were reclaimed."""
         ...

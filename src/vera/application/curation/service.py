@@ -35,6 +35,7 @@ from vera.domain.ports.curation import ClaimExtractor, ContradictionJudge, Extra
 from vera.domain.ports.embedder import Embedder
 from vera.domain.ports.object_store import ObjectStore
 from vera.domain.ports.unit_of_work import UnitOfWork
+from vera.observability.metrics import record_extraction_failure
 from vera.shared.errors import Conflict, DomainError, Err, NotFound, Ok, PolicyRejected, Result
 from vera.shared.ids import deterministic_id, uuid7
 from vera.shared.time import utc_now
@@ -400,25 +401,29 @@ class CurationService:
             )
         )
 
-        has_structured = bool(metadata.get("triples") or metadata.get("claims"))
-        if has_structured or not chunks:
-            extracted = await self._extractor.extract(
-                body=normalized_body, knowledge_type=cmd.knowledge_type, metadata=metadata
-            )
-            extracted_with_chunks = (
-                [_align_document_quote(claim, chunks, normalized_body) for claim in extracted]
-                if chunks
-                else [(claim, None) for claim in extracted]
-            )
-        else:
-            extracted_with_chunks: list[tuple[ExtractedClaim, Chunk | None]] = []
-            for chunk in chunks:
-                extracted_with_chunks.extend(
-                    (claim, chunk)
-                    for claim in await self._extractor.extract(
-                        body=chunk.text, knowledge_type=cmd.knowledge_type, metadata={}
-                    )
+        try:
+            has_structured = bool(metadata.get("triples") or metadata.get("claims"))
+            if has_structured or not chunks:
+                extracted = await self._extractor.extract(
+                    body=normalized_body, knowledge_type=cmd.knowledge_type, metadata=metadata
                 )
+                extracted_with_chunks = (
+                    [_align_document_quote(claim, chunks, normalized_body) for claim in extracted]
+                    if chunks
+                    else [(claim, None) for claim in extracted]
+                )
+            else:
+                extracted_with_chunks: list[tuple[ExtractedClaim, Chunk | None]] = []
+                for chunk in chunks:
+                    extracted_with_chunks.extend(
+                        (claim, chunk)
+                        for claim in await self._extractor.extract(
+                            body=chunk.text, knowledge_type=cmd.knowledge_type, metadata={}
+                        )
+                    )
+        except Exception:
+            record_extraction_failure()
+            raise
         action = action_for_tier(source.trust_tier)
         claim_ids: list[str] = []
         published = 0

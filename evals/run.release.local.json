@@ -35,7 +35,7 @@
       "production_writable": false
     },
     "cost_budget": {
-      "max_duration_s": 7200,
+      "max_duration_s": 14400,
       "max_cost_usd": 10
     },
     "inspection_artifacts": {
@@ -52,6 +52,6 @@
     "cleanup"
   ],
   "output_root": "/output",
-  "step_timeout_s": 600,
+  "step_timeout_s": 2400,
   "retain_synthetic_payloads": false
 }

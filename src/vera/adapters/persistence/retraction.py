@@ -32,7 +32,7 @@ from vera.domain.ports.memory_engine import MemoryEngine
 from vera.domain.ports.object_store import ObjectStore
 from vera.domain.ports.projection import FactProjection
 from vera.observability import get_logger
-from vera.shared.errors import DomainError, Err, NotFound, Ok, Result
+from vera.shared.errors import Conflict, DomainError, Err, NotFound, Ok, Result
 from vera.shared.ids import uuid7
 from vera.shared.time import utc_now
 
@@ -43,6 +43,9 @@ log = get_logger(__name__)
 _CLEANUP_SAFETY_DELAY_S = 30.0
 
 _FIND = text("SELECT id FROM published_episodes WHERE group_id = :g AND source_id = :s")
+_ACTIVE_HOLD = text(
+    "SELECT id FROM legal_holds WHERE group_id = :g AND source_id = :s AND active IS TRUE"
+)
 _EDGES = text(
     "SELECT edge_uuid FROM graph_edge_map WHERE group_id = :g AND published_episode_id = :eid"
 )
@@ -171,6 +174,9 @@ class RetractionService:
                 text("SELECT set_config('vera.group_id', :group_id, true)"),
                 {"group_id": group_id},
             )
+            hold_id = await session.scalar(_ACTIVE_HOLD, {"g": group_id, "s": source_id})
+            if hold_id is not None:
+                return Err(Conflict(f"source {source_id} is under legal hold in {group_id}"))
             episode_id = await session.scalar(_FIND, {"g": group_id, "s": source_id})
             edge_uuids = (
                 [

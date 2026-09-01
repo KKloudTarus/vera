@@ -1,0 +1,12 @@
+{
+  "schema_version": "1.0",
+  "dependencies": {
+    "OPS-001": [
+      "PERF-001",
+      "PERF-002"
+    ],
+    "OPS-010": [
+      "PERF-001"
+    ]
+  }
+}

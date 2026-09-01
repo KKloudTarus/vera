@@ -69,6 +69,18 @@ _FAIL = text(
     """
 )
 
+_RELEASE = text(
+    """
+    UPDATE ingestion_jobs
+    SET status = 'pending',
+        attempts = greatest(attempts - 1, 0),
+        last_error = :reason,
+        locked_until = NULL,
+        next_visible_at = now()
+    WHERE id = :id AND status = 'inflight'
+    """
+)
+
 _RECLAIM = text(
     """
     UPDATE ingestion_jobs
@@ -149,6 +161,10 @@ class PostgresJobQueue:
             await session.execute(
                 _FAIL, {"id": job_id, "error": error[:2000], "retry_in": retry_in_s}
             )
+
+    async def release(self, job_id: UUID, *, reason: str) -> None:
+        async with self._session_factory() as session, session.begin():
+            await session.execute(_RELEASE, {"id": job_id, "reason": reason[:2000]})
 
     async def reclaim_stuck(self) -> int:
         async with self._session_factory() as session, session.begin():

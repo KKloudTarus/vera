@@ -10,8 +10,9 @@ from __future__ import annotations
 
 import importlib.metadata
 import os
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import asynccontextmanager
+from typing import Any, cast
 from uuid import UUID
 
 import pytest
@@ -56,7 +57,7 @@ async def graphiti_client() -> AsyncIterator[object]:
         cross_encoder=NoCrossEncoder(),
     )
     try:
-        await client.driver.execute_query("RETURN 1")
+        await client.driver.execute_query("RETURN 1")  # pyright: ignore[reportUnknownMemberType]
     except Exception:
         await client.close()
         pytest.skip("Neo4j not reachable")
@@ -96,6 +97,15 @@ async def test_projection_upsert_is_idempotent_by_fact_key(graphiti_client: obje
         await projection.project(_projected(group, "fk-1", "paymentapi", "eks"))  # same key
         keys = await projection.projected_fact_keys(group_id=group)
         assert keys == {"fk-1"}  # one edge, not two
+        result = await cast("Any", graphiti_client).driver.execute_query(
+            "MATCH ()-[e:RELATES_TO {group_id: $gid, fact_key: $fact_key}]->() "
+            "RETURN e.created_at AS created_at, e.episodes AS episodes",
+            gid=group.replace(":", "_"),
+            fact_key="fk-1",
+        )
+        edge = next(iter(result.records))
+        assert edge["created_at"] is not None
+        assert edge["episodes"] == ["ep-1"]
 
         await projection.project(_projected(group, "fk-2", "billing", "ecs"))
         assert await projection.projected_fact_keys(group_id=group) == {"fk-1", "fk-2"}
@@ -120,7 +130,7 @@ async def test_projection_clear_empties_the_group(graphiti_client: object) -> No
 @asynccontextmanager
 async def _tenant(
     sessionmaker: async_sessionmaker[AsyncSession], group: str
-) -> AsyncIterator[AsyncSession]:
+) -> AsyncGenerator[AsyncSession]:
     async with sessionmaker() as session, session.begin():
         await session.execute(text("SET LOCAL ROLE vera_app"))
         await session.execute(text("SELECT set_config('vera.group_id', :g, true)"), {"g": group})

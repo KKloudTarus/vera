@@ -1,0 +1,253 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "editable": true,
+  "graphTooltip": 1,
+  "links": [
+    {
+      "title": "Production runbooks",
+      "type": "link",
+      "url": "https://github.com/KKloudTarus/vera/blob/main/docs/runbooks.md"
+    }
+  ],
+  "panels": [
+    {
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 0
+      },
+      "id": 1,
+      "links": [
+        {
+          "title": "Runbook",
+          "url": "https://github.com/KKloudTarus/vera/blob/main/docs/runbooks.md#write_failure"
+        }
+      ],
+      "signal_id": "write_failure",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "increase(vera_write_failures_total[5m]) > 0",
+          "legendFormat": "write_failure",
+          "refId": "A"
+        }
+      ],
+      "title": "Write failures",
+      "type": "timeseries"
+    },
+    {
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 0
+      },
+      "id": 2,
+      "links": [
+        {
+          "title": "Runbook",
+          "url": "https://github.com/KKloudTarus/vera/blob/main/docs/runbooks.md#projection_drift"
+        }
+      ],
+      "signal_id": "projection_drift",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "max(vera_projection_drift_items) > 0",
+          "legendFormat": "projection_drift",
+          "refId": "A"
+        }
+      ],
+      "title": "Projection drift",
+      "type": "timeseries"
+    },
+    {
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 0
+      },
+      "id": 3,
+      "links": [
+        {
+          "title": "Runbook",
+          "url": "https://github.com/KKloudTarus/vera/blob/main/docs/runbooks.md#queue_lag"
+        }
+      ],
+      "signal_id": "queue_lag",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "max(vera_queue_lag_seconds) > 300",
+          "legendFormat": "queue_lag",
+          "refId": "A"
+        }
+      ],
+      "title": "Queue lag",
+      "type": "timeseries"
+    },
+    {
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 8
+      },
+      "id": 4,
+      "links": [
+        {
+          "title": "Runbook",
+          "url": "https://github.com/KKloudTarus/vera/blob/main/docs/runbooks.md#freshness"
+        }
+      ],
+      "signal_id": "freshness",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(vera_time_to_searchable_seconds_bucket[5m]))) > 900",
+          "legendFormat": "freshness",
+          "refId": "A"
+        }
+      ],
+      "title": "Knowledge freshness",
+      "type": "timeseries"
+    },
+    {
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 8
+      },
+      "id": 5,
+      "links": [
+        {
+          "title": "Runbook",
+          "url": "https://github.com/KKloudTarus/vera/blob/main/docs/runbooks.md#extraction_failure"
+        }
+      ],
+      "signal_id": "extraction_failure",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "increase(vera_extraction_failures_total[5m]) > 0",
+          "legendFormat": "extraction_failure",
+          "refId": "A"
+        }
+      ],
+      "title": "Extraction failures",
+      "type": "timeseries"
+    },
+    {
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 8
+      },
+      "id": 6,
+      "links": [
+        {
+          "title": "Runbook",
+          "url": "https://github.com/KKloudTarus/vera/blob/main/docs/runbooks.md#retrieval_latency"
+        }
+      ],
+      "signal_id": "retrieval_latency",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(vera_search_duration_seconds_bucket[5m]))) > 2",
+          "legendFormat": "retrieval_latency",
+          "refId": "A"
+        }
+      ],
+      "title": "Retrieval p95 latency",
+      "type": "timeseries"
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": [
+    "vera",
+    "production",
+    "OPS-007",
+    "v1"
+  ],
+  "templating": {
+    "list": [
+      {
+        "current": {},
+        "label": "Prometheus datasource",
+        "name": "DS_PROMETHEUS",
+        "query": "prometheus",
+        "type": "datasource"
+      }
+    ]
+  },
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "timezone": "browser",
+  "title": "VERA production signals",
+  "uid": "vera-production-signals-v1",
+  "version": 1
+}

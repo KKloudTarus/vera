@@ -6,25 +6,32 @@
     "required_state": "passed",
     "fabric_write_mode": "fabric"
   },
+  "approval": {
+    "version": "2026-08-31",
+    "owner": "vera-maintainers",
+    "environment": "docker-linux-containerized",
+    "source_report_sha256": "fc20ce83cbd45d3bf8520f6fcbfc4249ca86cfaeccb8f053d152bb12071ebb90",
+    "basis": "Weekly run 20260831T143547Z-f673906c-weekly plus existing deployment SLOs"
+  },
   "targets": {
-    "search_p95_ms": null,
-    "search_p99_ms": null,
-    "search_error_rate": null,
-    "ingestion_records_per_second": null,
-    "time_to_searchable_p95_ms": null,
-    "queue_lag_p95_ms": null,
-    "availability_percent": null,
-    "rpo_seconds": null,
-    "rto_seconds": null,
-    "retention_days": null,
-    "legal_hold_release_sla_seconds": null
+    "search_p95_ms": 800,
+    "search_p99_ms": 3000,
+    "search_error_rate": 0.01,
+    "ingestion_records_per_second": 1.8,
+    "time_to_searchable_p95_ms": 960000,
+    "queue_lag_p95_ms": 600000,
+    "availability_percent": 99.0,
+    "rpo_seconds": 0,
+    "rto_seconds": 120,
+    "retention_days": 30,
+    "legal_hold_release_sla_seconds": 60
   },
   "load_soak": {
-    "data_volumes": [null],
+    "data_volumes": [1200, 4000],
     "scope_counts": [1, 5, 20],
     "concurrency": [1, 8, 32],
     "cache_states": ["cold", "warm"],
-    "duration_seconds": null,
+    "duration_seconds": 120,
     "operations": ["ingest", "knowledge_get_context", "knowledge_search", "knowledge_explore"]
   },
   "database_role_matrix": {
@@ -55,7 +62,7 @@
   "retention_matrix": {
     "stores": ["postgres", "object_store", "graph", "valkey", "snapshot", "context_pack", "audit"],
     "states": ["active", "expired", "deleted", "legal_hold"],
-    "clock_advance_seconds": null
+    "clock_advance_seconds": 2678400
   },
   "backup_restore_matrix": {
     "stores": ["postgres", "object_store", "graph", "valkey"],
@@ -64,7 +71,8 @@
   },
   "observability_matrix": {
     "signals": ["write_failure", "projection_drift", "queue_lag", "freshness", "extraction_failure", "retrieval_latency"],
-    "required_outputs": ["metric", "trace", "dashboard", "alert", "runbook_link"]
+    "required_outputs": ["metric", "trace", "dashboard", "alert", "runbook_link"],
+    "alert_deadline_seconds": 30
   },
   "incident_matrix": {
     "incidents": ["postgres_unavailable", "object_store_unavailable", "graph_corruption", "queue_stall", "credential_compromise"],
@@ -81,8 +89,8 @@
     "directions": ["rollout", "rollback"]
   },
   "production_benchmark": {
-    "corpus_size": null,
-    "query_count": null,
+    "corpus_size": 4000,
+    "query_count": 200,
     "scope_distribution": [1, 5, 20],
     "required_metrics": ["hit_at_5", "mrr", "ndcg_at_10", "citation_rate", "p95_ms", "p99_ms", "error_rate"]
   }

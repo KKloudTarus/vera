@@ -162,6 +162,14 @@ async def test_retraction_requires_an_admin_role(
     allowed = await app_client.delete(f"/memory/sources/{source_id}", headers=_auth(admin_key))
     assert allowed.status_code == 404
 
+    async with _tenant(sessionmaker, group) as session:
+        await session.execute(
+            text("INSERT INTO legal_holds (group_id, source_id) VALUES (:group, :source)"),
+            {"group": group, "source": source_id},
+        )
+    held = await app_client.delete(f"/memory/sources/{source_id}", headers=_auth(admin_key))
+    assert held.status_code == 409
+
 
 async def test_promote_and_reject_require_admin_and_review_queue_lists_proposals(
     sessionmaker: async_sessionmaker[AsyncSession],

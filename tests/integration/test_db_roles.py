@@ -54,6 +54,22 @@ async def test_proposal_attempt_privileges_are_least_authority(engine: AsyncEngi
             assert granted is expected, (role, privilege)
 
 
+async def test_legal_hold_privileges_exclude_delete(engine: AsyncEngine) -> None:
+    expected_by_role = {
+        "vera_app": {"SELECT", "INSERT", "UPDATE"},
+        "vera_trusted": {"SELECT"},
+        "vera_worker": {"SELECT", "INSERT", "UPDATE"},
+    }
+    async with engine.connect() as connection:
+        for role, expected in expected_by_role.items():
+            for privilege in ("SELECT", "INSERT", "UPDATE", "DELETE"):
+                granted = await connection.scalar(
+                    text("SELECT has_table_privilege(:role, 'legal_holds', :privilege)"),
+                    {"role": role, "privilege": privilege},
+                )
+                assert granted is (privilege in expected), (role, privilege)
+
+
 async def test_global_context_pack_cleanup_is_worker_only(engine: AsyncEngine) -> None:
     async with engine.connect() as connection:
         assert (

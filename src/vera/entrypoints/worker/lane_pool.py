@@ -53,7 +53,7 @@ from vera.domain.ports.job_queue import QueuedJob
 from vera.domain.ports.memory_engine import EpisodeSpec, IngestReceipt
 from vera.observability import bind_log_context, clear_log_context, get_logger, span
 from vera.observability.cost import UsageContext, reset_usage_context, set_usage_context
-from vera.observability.metrics import record_ingestion
+from vera.observability.metrics import record_ingestion, record_time_to_searchable
 from vera.shared.ids import deterministic_id, uuid7
 from vera.shared.time import utc_now
 from vera.shared.types import GroupId, JsonDict, SourceId
@@ -219,6 +219,11 @@ class LanePool:
             task.cancel()
         await asyncio.gather(*self._workers, return_exceptions=True)
         self._workers = []
+        for queue in self._queues:
+            while not queue.empty():
+                job = queue.get_nowait()
+                await self._container.queue.release(job.id, reason="worker shutdown")
+                queue.task_done()
 
     def _backoff(self, attempts: int) -> float:
         ceiling = min(self._backoff_cap_s, self._backoff_base_s * (2**attempts))
@@ -230,6 +235,11 @@ class LanePool:
             job = await queue.get()
             try:
                 await self._process(job)
+            except asyncio.CancelledError:
+                await asyncio.shield(
+                    self._container.queue.release(job.id, reason="worker shutdown")
+                )
+                raise
             except Exception as exc:
                 clear_log_context()
                 record_ingestion(result="failed", duration_s=0.0)
@@ -249,6 +259,10 @@ class LanePool:
             return
         if job.payload.get("job_kind") == "project_facts":
             await self._process_project_facts(job)
+            return
+        if job.payload.get("job_kind") == "build_communities":
+            async with asyncio.timeout(self._container.settings.resilience.per_episode_timeout_s):
+                await self._process_community_build(job)
             return
         if job.payload.get("job_kind") == "embed_facts":
             async with asyncio.timeout(self._container.settings.resilience.per_episode_timeout_s):
@@ -305,6 +319,7 @@ class LanePool:
                         async with self._container.workers() as session, session.begin():
                             await session.execute(_MARK_DONE, {"id": job.id})
             record_ingestion(result="done", duration_s=time.perf_counter() - started)
+            record_time_to_searchable((utc_now() - job.created_at).total_seconds())
             log.info("ingest.done", episode_uuid=episode_uuid)
         finally:
             reset_usage_context(usage_token)
@@ -342,6 +357,7 @@ class LanePool:
                     async with self._container.workers() as session, session.begin():
                         await session.execute(_MARK_DONE, {"id": job.id})
             record_ingestion(result="done", duration_s=time.perf_counter() - started)
+            record_time_to_searchable((utc_now() - job.created_at).total_seconds())
             log.info("ingest_graph.done", episode_uuid=episode_uuid)
         finally:
             reset_usage_context(usage_token)
@@ -362,16 +378,14 @@ class LanePool:
             await SqlAlchemyEmbeddingStateRepository(session).ensure_compatible(
                 group_id=group, model=model_name, dim=dim
             )
-        episode = EpisodeSpec(
-            source_id=SourceId(str(job.source_id)),
-            group_id=GroupId(group),
-            body=str(job.payload.get("body", "")),
-            reference_time=published_reference_time or job.created_at,
-            metadata=job.payload,
-        )
-        receipt = await self._container.memory.ingest_episode(episode)
-        async with self._container.workers() as session, session.begin():
-            await session.execute(_GROUP_LOCK, {"g": group})
+            episode = EpisodeSpec(
+                source_id=SourceId(str(job.source_id)),
+                group_id=GroupId(group),
+                body=str(job.payload.get("body", "")),
+                reference_time=published_reference_time or job.created_at,
+                metadata=job.payload,
+            )
+            receipt = await self._container.memory.ingest_episode(episode)
             await self._stitch(session, group, str(job.source_id), receipt)
         return str(receipt.episode_uuid)
 
@@ -587,16 +601,25 @@ class LanePool:
         """
         group = str(job.group_id)
         projection = self._container.fact_projection
-        if projection is not None:
-            # The source reads active facts from Postgres (worker role) and the projection
-            # writes them to the graph; lane routing already serializes the group.
-            service = FactProjectionService(
-                source=SqlAlchemyProjectionSource(self._container.workers), projection=projection
-            )
-            projected = await service.project_group(group)
-            log.info("project_facts.done", group_id=group, projected=projected)
+        async with self._container.workers() as session, session.begin():
+            await session.execute(_GROUP_LOCK, {"g": group})
+            if projection is not None:
+                service = FactProjectionService(
+                    source=SqlAlchemyProjectionSource(self._container.workers),
+                    projection=projection,
+                )
+                projected = await service.project_group(group)
+                log.info("project_facts.done", group_id=group, projected=projected)
+            await session.execute(_MARK_DONE, {"id": job.id})
+
+    async def _process_community_build(self, job: QueuedJob) -> None:
+        from vera.entrypoints.build_communities import build_group
+
+        group = str(job.group_id)
+        communities = await build_group(self._container, group)
         async with self._container.workers() as session, session.begin():
             await session.execute(_MARK_DONE, {"id": job.id})
+        log.info("build_communities.done", group_id=group, communities=communities)
 
     async def _process_embed_facts(self, job: QueuedJob) -> None:
         group = str(job.group_id)
@@ -675,14 +698,15 @@ class LanePool:
         try:
             with span("retract.cleanup", group_id=str(job.group_id)):
                 async with asyncio.timeout(budget):
-                    if edge_uuids:
-                        await self._container.memory.retract_episode(
-                            group_id=str(job.group_id), edge_uuids=edge_uuids
-                        )
-                    if erase:
-                        for key in s3_keys:
-                            await self._container.object_store.delete(key=key)
                     async with self._container.workers() as session, session.begin():
+                        await session.execute(_GROUP_LOCK, {"g": str(job.group_id)})
+                        if edge_uuids:
+                            await self._container.memory.retract_episode(
+                                group_id=str(job.group_id), edge_uuids=edge_uuids
+                            )
+                        if erase:
+                            for key in s3_keys:
+                                await self._container.object_store.delete(key=key)
                         await session.execute(_MARK_DONE, {"id": job.id})
             log.info(
                 "retract.cleanup.done",

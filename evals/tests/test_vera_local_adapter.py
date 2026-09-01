@@ -18,6 +18,7 @@ from evals.adapters import ActionResponse
 from evals.generate_load_fixture import records
 from evals.validate import ROOT, load_jsonl
 from vera.config.settings import Settings
+from vera.entrypoints.rollout_control import configuration_sha256, normalize_control_environment
 
 
 def _settings() -> Settings:
@@ -76,6 +77,141 @@ def test_plain_http_url_resolves_once_and_preserves_host(monkeypatch: pytest.Mon
     assert secure == ("https://api:8443/v2/knowledge/search", None)
     assert calls == 1
     adapter._resolved_http_url.cache_clear()
+
+
+def test_rollout_attestation_rejects_tampered_evidence() -> None:
+    transition = "role_enforcement_off_to_on"
+    definition = adapter.TRANSITIONS[transition]
+    environments = {
+        service: normalize_control_environment({definition.environment_key: definition.rollout})
+        for service in definition.services
+    }
+    evidence: dict[str, Any] = {
+        "transition": transition,
+        "direction": "rollout",
+        "group_id": "p:canary",
+        "before_revision": 1,
+        "after_revision": 2,
+        "process_ids": {
+            "before": {service: f"old-{service}" for service in definition.services},
+            "after": {service: f"new-{service}" for service in definition.services},
+        },
+        "service_environments": environments,
+        "effective_state": {definition.environment_key: definition.rollout},
+        "configuration_sha256": configuration_sha256(environments),
+        "configuration_applied": True,
+        "process_restarted": True,
+        "state_changed": True,
+        "invariants_preserved": True,
+        "baseline_restored": False,
+    }
+
+    assert adapter._rollout_attestation_verified(
+        evidence, transition=transition, direction="rollout", group_id="p:canary"
+    )
+    evidence["configuration_sha256"] = "0" * 64
+    assert not adapter._rollout_attestation_verified(
+        evidence, transition=transition, direction="rollout", group_id="p:canary"
+    )
+
+
+def test_rollout_preparation_is_fully_attested() -> None:
+    transition = "community_build_off_to_on"
+    definition = adapter.TRANSITIONS[transition]
+    environments = {
+        service: normalize_control_environment({definition.environment_key: definition.baseline})
+        for service in definition.services
+    }
+    evidence: dict[str, Any] = {
+        "operation": "prepare",
+        "transition": transition,
+        "group_id": "p:canary",
+        "before_revision": 1,
+        "after_revision": 2,
+        "process_ids": {
+            "before": {service: f"old-{service}" for service in definition.services},
+            "after": {service: f"new-{service}" for service in definition.services},
+        },
+        "service_environments": environments,
+        "effective_state": {definition.environment_key: definition.baseline},
+        "configuration_sha256": configuration_sha256(environments),
+        "configuration_applied": True,
+        "process_restarted": True,
+        "state_changed": False,
+        "invariants_preserved": True,
+    }
+
+    assert adapter._rollout_preparation_verified(
+        evidence, transition=transition, group_id="p:canary"
+    )
+    evidence["process_restarted"] = False
+    assert not adapter._rollout_preparation_verified(
+        evidence, transition=transition, group_id="p:canary"
+    )
+
+
+def test_authoritative_preservation_allows_additions_and_rejects_mutation() -> None:
+    before = {
+        "rows": {"facts": [{"id": "fact-1", "authority": 1.0}]},
+        "objects": {"artifact-1": {"sha256": "abc", "size": 3}},
+    }
+    extended = {
+        "rows": {
+            "facts": [
+                {"id": "fact-1", "authority": 1.0},
+                {"id": "fact-2", "authority": 1.0},
+            ]
+        },
+        "objects": {
+            "artifact-1": {"sha256": "abc", "size": 3},
+            "artifact-2": {"sha256": "def", "size": 3},
+        },
+    }
+    mutated = {
+        "rows": {"facts": [{"id": "fact-1", "authority": 0.1}]},
+        "objects": {"artifact-1": {"sha256": "changed", "size": 3}},
+    }
+
+    assert adapter._authoritative_preservation(before, extended)["preserved"] is True
+    report = adapter._authoritative_preservation(before, mutated)
+    assert report["preserved"] is False
+    assert report["missing_or_mutated_row_count"] == 1
+    assert report["missing_or_mutated_object_count"] == 1
+
+
+@pytest.mark.parametrize(
+    ("mode", "fact", "jobs", "edges"),
+    [
+        ("legacy", None, [], [{"published_episode_id": "episode-1"}]),
+        (
+            "dual",
+            {"id": "fact-1"},
+            [
+                {
+                    "artifact_version_id": "version-1",
+                    "job_kind": "ingest_graph",
+                    "status": "done",
+                }
+            ],
+            [{"published_episode_id": "episode-1"}],
+        ),
+        ("fabric", {"id": "fact-1"}, [], []),
+    ],
+)
+def test_rollout_mode_evidence_requires_real_write_path(
+    mode: str,
+    fact: dict[str, str] | None,
+    jobs: list[dict[str, str]],
+    edges: list[dict[str, str]],
+) -> None:
+    snapshot = {"jobs_state": jobs, "graph_edges_state": edges}
+    probe = {
+        "artifact_version_id": "version-1",
+        "episode_id": "episode-1",
+        "fact": fact,
+    }
+
+    assert adapter._rollout_mode_evidence(snapshot, probe, mode)["verified"] is True
 
 
 def test_curation_service_uses_active_voyage_embedding_identity(
@@ -141,6 +277,115 @@ def test_extractor_control_disables_and_restores_derivation() -> None:
     assert disabled.observations["extractor"] == {"state": "disabled", "version": "none"}
     assert enabled.status == "PASS"
     assert current == {"extractor_state": "enabled", "extractor_version": "recovered-v1"}
+
+
+def test_production_actions_dispatch_to_truthful_boundaries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    actions = {
+        "load.soak": "_production_load_soak",
+        "security.database_roles": "_production_database_roles",
+        "security.mcp_authorization": "_production_mcp_authorization",
+        "security.content_attacks": "_production_content_attacks",
+        "governance.retention_drill": "_production_retention_drill",
+        "recovery.backup_restore": "_production_backup_restore",
+        "observability.exercise": "_production_observability",
+        "incident.recovery_drill": "_production_incident_recovery",
+        "rollout.exercise": "_production_rollout",
+        "benchmark.production": "_production_benchmark",
+    }
+
+    for action, helper_name in actions.items():
+        called: list[str] = []
+
+        async def boundary(
+            *_args: Any,
+            helper: str = helper_name,
+            calls: list[str] = called,
+        ) -> adapter._Outcome:
+            calls.append(helper)
+            return adapter._Outcome(observations={"boundary": helper})
+
+        monkeypatch.setattr(adapter, helper_name, boundary)
+        outcome = asyncio.run(
+            adapter._handle_action(
+                object(),
+                {"action": action, "inputs": {}},
+                {},
+                {},
+            )
+        )
+
+        assert called == [helper_name]
+        assert outcome.observations == {"boundary": helper_name}
+
+
+def test_production_benchmark_uses_uniquely_answerable_queries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    aliases = [f"scope-{index:02d}" for index in range(20)]
+    perf_state = {
+        "load_fixture": {
+            "scope_count": 20,
+            "facts_per_scope": 200,
+            "query_count": 200,
+            "seed": 20260828,
+            "aliases": aliases,
+        },
+        "observations": {},
+        "principals": {
+            alias: {"api_key": f"key-{alias}", "group_id": f"group-{alias}"} for alias in aliases
+        },
+    }
+    queries: list[str] = []
+
+    async def search_http(**kwargs: Any) -> tuple[int, dict[str, Any]]:
+        query = str(kwargs["query"])
+        queries.append(query)
+        return 200, {
+            "facts": [
+                {
+                    "fact": query,
+                    "citation": {"structured_record": {"subject": query}},
+                }
+            ],
+            "latency_ms": 10.0,
+        }
+
+    monkeypatch.setattr(adapter, "_search_http", search_http)
+    outcome = asyncio.run(
+        adapter._production_benchmark(
+            SimpleNamespace(),  # type: ignore[arg-type]
+            {
+                "inputs": {
+                    "matrix_ref": {
+                        "corpus_size": 4000,
+                        "query_count": 200,
+                        "scope_distribution": [1, 5, 20],
+                    },
+                    "targets_ref": {
+                        "search_p95_ms": 800,
+                        "search_p99_ms": 3000,
+                        "search_error_rate": 0.01,
+                    },
+                }
+            },
+            {"cases": {"PERF-001": perf_state}},
+        )
+    )
+
+    assert len(queries) == 200
+    expected_queries = []
+    for index in range(200):
+        selected_scope_count = [1, 5, 20][index % 3]
+        scope_index = (index // 3) % selected_scope_count
+        triple = adapter.load_fact(scope_index, (index * 17) % 200, 20260828, 200)["triple"]
+        expected_queries.append(
+            " ".join(str(triple[key]) for key in ("subject", "predicate", "object"))
+        )
+    assert Counter(queries) == Counter(expected_queries)
+    assert outcome.observations["quality"]["critical_miss_count"] == 0
+    assert outcome.observations["decision"]["value"] == "GO"
 
 
 def test_disabled_extractor_derives_no_claims() -> None:
@@ -539,6 +784,42 @@ def test_search_equivalence_ignores_volatile_scores_but_keeps_provenance() -> No
 
     right[0]["citation"] = {**right[0]["citation"], "evidence_id": "evidence-2"}
     assert adapter._search_equivalence_key(left) != adapter._search_equivalence_key(right)
+
+
+def test_matching_search_equivalence_ignores_unrelated_ranked_results() -> None:
+    expected = {
+        "subject": "Production Service rollout 1",
+        "predicate": "RUNS_ON",
+        "object": "production-cluster-rollout-1",
+    }
+    seeded = {
+        "id": "fact-1",
+        "kind": "fact",
+        "fact": "Production Service rollout 1 RUNS_ON production-cluster-rollout-1",
+        "citation": {
+            "artifact_version_id": "version-1",
+            "assertion_id": "assertion-1",
+            "evidence_id": "evidence-1",
+        },
+    }
+    baseline = adapter._matching_search_equivalence_keys([seeded], expected)
+    after_probe = [
+        {
+            "id": "fact-2",
+            "kind": "fact",
+            "fact": "OPS-009 dual_to_fabric rollout write-path probe",
+            "citation": {"artifact_version_id": "version-2"},
+        },
+        seeded,
+    ]
+
+    assert adapter._matching_search_equivalence_keys(after_probe, expected) == baseline
+
+    after_probe[1] = {
+        **seeded,
+        "citation": {**seeded["citation"], "evidence_id": "evidence-changed"},
+    }
+    assert adapter._matching_search_equivalence_keys(after_probe, expected) != baseline
 
 
 def test_labeled_search_joins_product_fact_keys_to_fixture_ids(
@@ -1157,6 +1438,71 @@ def test_preflight_requires_exact_configured_ephemeral_scope(
 
     assert response["status"] == "FAIL"
     assert response["observations"]["safety"]["scope_run_owned"] is False
+
+
+def test_preflight_registers_the_principal_used_for_mcp_readiness(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    principal_id = "00000000-0000-0000-0000-000000000123"
+    saved: list[dict[str, Any]] = []
+
+    async def database_counts(_container: Any) -> dict[str, int]:
+        return {}
+
+    async def graph_counts(_settings: Settings) -> dict[str, int]:
+        return {"nodes": 0, "edges": 0}
+
+    async def zero_count(_settings: Settings) -> int:
+        return 0
+
+    async def api_readiness() -> dict[str, str]:
+        return {"status": "ok"}
+
+    async def register_principal() -> str:
+        return principal_id
+
+    async def mcp_readiness(_settings: Settings, actual_principal_id: str) -> int:
+        assert saved[0]["preflight"]["mcp_principal_id"] == actual_principal_id
+        assert actual_principal_id == principal_id
+        return 12
+
+    async def provider_preflight(_container: Any) -> dict[str, str]:
+        return {"candidate-model": "candidate-model"}
+
+    monkeypatch.setenv("VERA_EVAL_SCOPE_ID", "eval-owned")
+    monkeypatch.setattr(adapter, "_assert_disposable_endpoints", lambda _settings: None)
+    monkeypatch.setattr(adapter, "_runtime_manifest_errors", lambda *_args: ([], {}))
+    monkeypatch.setattr(adapter, "_database_counts", database_counts)
+    monkeypatch.setattr(adapter, "_graph_counts", graph_counts)
+    monkeypatch.setattr(adapter, "_object_count", zero_count)
+    monkeypatch.setattr(adapter, "_valkey_count", zero_count)
+    monkeypatch.setattr(adapter, "_api_readiness", api_readiness)
+    monkeypatch.setattr(adapter, "_register_mcp_readiness_principal", register_principal)
+    monkeypatch.setattr(adapter, "_mcp_readiness", mcp_readiness)
+    monkeypatch.setattr(adapter, "_provider_preflight", provider_preflight)
+    monkeypatch.setattr(adapter, "_save_state", lambda _run_id, state: saved.append(state.copy()))
+    state: dict[str, Any] = {}
+    request = {
+        "run_id": "preflight-run",
+        "request_nonce": "nonce",
+        "inputs": {
+            "evaluation_scope": {
+                "id": "eval-owned",
+                "kind": "ephemeral_stack",
+                "run_owned": True,
+                "production_writable": False,
+            }
+        },
+        "run_context": {},
+    }
+
+    response = asyncio.run(
+        adapter._preflight(SimpleNamespace(settings=_settings()), request, state)  # type: ignore[arg-type]
+    )
+
+    assert response["status"] == "PASS"
+    assert response["observations"]["safety"]["mcp_tool_count"] == 12
+    assert state["preflight"]["mcp_principal_id"] == principal_id
 
 
 def test_routing_joins_published_episode_durable_source_to_claim() -> None:

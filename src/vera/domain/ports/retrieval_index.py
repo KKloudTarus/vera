@@ -91,6 +91,7 @@ class FactHit:
 class FactCandidateSets:
     lexical: tuple[FactHit, ...]
     semantic: tuple[FactHit, ...]
+    hydrated: bool = False
 
 
 class FactCandidateBatchSource(Protocol):

@@ -13,6 +13,7 @@ from vera.domain.ports.projection import (
     ProjectionDrift,
     ProjectionSource,
 )
+from vera.observability.metrics import set_projection_drift
 
 
 class FactProjectionService:
@@ -42,8 +43,10 @@ class FactProjectionService:
     async def verify_group(self, group_id: str) -> ProjectionDrift:
         authoritative = await self._source.active_fact_keys(group_id=group_id)
         projected = await self._projection.projected_fact_keys(group_id=group_id)
-        return ProjectionDrift(
+        drift = ProjectionDrift(
             group_id=group_id,
             missing_in_graph=frozenset(authoritative - projected),
             extra_in_graph=frozenset(projected - authoritative),
         )
+        set_projection_drift(len(drift.missing_in_graph) + len(drift.extra_in_graph))
+        return drift

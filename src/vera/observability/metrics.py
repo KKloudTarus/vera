@@ -14,16 +14,30 @@ from socketserver import BaseServer
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, Histogram, generate_latest
 
 _LATENCY_BUCKETS = (0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0)
+_FRESHNESS_BUCKETS = (*_LATENCY_BUCKETS, 300.0, 900.0, 1800.0)
 
 ingestion_jobs = Counter(
     "vera_ingestion_jobs_total",
     "Ingestion jobs processed, by outcome.",
     labelnames=("result",),
 )
+write_failures = Counter(
+    "vera_write_failures_total",
+    "Authoritative API write requests that failed at a product or infrastructure boundary.",
+)
+extraction_failures = Counter(
+    "vera_extraction_failures_total",
+    "Claim extraction operations that raised an error.",
+)
 ingestion_duration = Histogram(
     "vera_ingestion_duration_seconds",
     "Wall-clock time to ingest one job into the graph.",
     buckets=_LATENCY_BUCKETS,
+)
+time_to_searchable = Histogram(
+    "vera_time_to_searchable_seconds",
+    "Wall-clock time from durable queue creation until searchable knowledge is published.",
+    buckets=_FRESHNESS_BUCKETS,
 )
 queue_depth = Gauge(
     "vera_queue_depth",
@@ -59,6 +73,14 @@ queue_backpressure = Counter(
     "vera_queue_backpressure_events_total",
     "Times the pending backlog crossed the configured alert threshold.",
 )
+queue_lag = Gauge(
+    "vera_queue_lag_seconds",
+    "Age in seconds of the oldest pending ingestion job.",
+)
+projection_drift = Gauge(
+    "vera_projection_drift_items",
+    "Missing plus extra facts observed by the latest projection verification.",
+)
 entity_resolution = Counter(
     "vera_entity_resolution_total",
     "Canonical entity resolutions by outcome (new entity vs linked to an existing one).",
@@ -75,6 +97,10 @@ mcp_tool_duration = Histogram(
     labelnames=("tool",),
     buckets=_LATENCY_BUCKETS,
 )
+community_builds = Counter(
+    "vera_community_builds_total",
+    "Scheduled community builds completed by the worker.",
+)
 
 
 def record_ingestion(*, result: str, duration_s: float) -> None:
@@ -83,14 +109,38 @@ def record_ingestion(*, result: str, duration_s: float) -> None:
         ingestion_duration.observe(duration_s)
 
 
+def record_write_failure() -> None:
+    write_failures.inc()
+
+
+def record_extraction_failure() -> None:
+    extraction_failures.inc()
+
+
+def record_time_to_searchable(seconds: float) -> None:
+    time_to_searchable.observe(max(0.0, seconds))
+
+
 def set_queue_depth(depths: dict[str, int]) -> None:
     for status in ("pending", "inflight", "dead"):
         queue_depth.labels(status=status).set(depths.get(status, 0))
 
 
+def set_queue_lag(seconds: float) -> None:
+    queue_lag.set(max(0.0, seconds))
+
+
+def set_projection_drift(items: int) -> None:
+    projection_drift.set(max(0, items))
+
+
 def record_entity_resolution(outcome: str) -> None:
     """Count an entity resolution outcome: created, linked_cosine, or linked_judge."""
     entity_resolution.labels(outcome=outcome).inc()
+
+
+def record_community_build() -> None:
+    community_builds.inc()
 
 
 def note_backpressure(depths: dict[str, int], threshold: int) -> bool:

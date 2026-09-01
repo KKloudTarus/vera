@@ -60,7 +60,8 @@ async def engine() -> AsyncIterator[AsyncEngine]:
 
 
 _MUTABLE_TABLES = (
-    "ingestion_jobs, retrieval_feedback, proposal_attempts, graph_node_map, graph_edge_map, "
+    "legal_holds, ingestion_jobs, retrieval_feedback, proposal_attempts, "
+    "graph_node_map, graph_edge_map, "
     "published_episodes, "
     "group_embedding_state, rerank_weights, "
     "context_packs, snapshot_fact_embeddings, snapshot_facts, knowledge_snapshots, "

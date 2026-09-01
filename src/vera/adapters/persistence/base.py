@@ -38,16 +38,17 @@ def create_engine(db: DatabaseSettings) -> AsyncEngine:
         pool_pre_ping=db.pool_pre_ping,
         pool_recycle=db.pool_recycle_s,
         echo=db.echo,
+        connect_args={"server_settings": {"application_name": db.application_name}},
     )
 
 
 def create_sessionmaker(
     engine: AsyncEngine, *, role: str | None = None
 ) -> async_sessionmaker[AsyncSession]:
-    """A session factory. When ``role`` is given, every transaction begins with
-    ``SET LOCAL ROLE <role>``, so the read and worker paths assume their non-superuser roles
-    even when the connection logs in as a superuser. SET LOCAL is transaction-scoped and
-    resets on commit or rollback, so it is safe under PgBouncer transaction pooling.
+    """Create sessions that bind every transaction to an approved runtime role.
+
+    The login must be a non-superuser member of the selected role. ``SET LOCAL`` resets on
+    commit or rollback, which keeps the binding safe under PgBouncer transaction pooling.
     """
     if role is None:
         return async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)

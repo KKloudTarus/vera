@@ -20,6 +20,8 @@ RUN --mount=type=cache,id=vera-pip,target=/root/.cache/pip \
     && python -m pip install --constraint constraints.lock -e ".[all]"
 
 COPY evals ./evals
+COPY deploy ./deploy
+COPY docs ./docs
 
 RUN groupadd --system evaluator \
     && useradd --system --gid evaluator --home-dir /workspace evaluator \

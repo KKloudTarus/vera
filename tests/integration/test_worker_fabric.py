@@ -35,7 +35,7 @@ from vera.domain.ports.memory_engine import EpisodeSpec, IngestReceipt
 from vera.domain.ports.projection import ProjectedFact
 from vera.entrypoints.worker.lane_pool import LanePool
 from vera.entrypoints.worker.main import run_until_empty
-from vera.shared.errors import is_err, is_ok
+from vera.shared.errors import Conflict, is_err, is_ok
 from vera.shared.ids import deterministic_id, uuid7
 from vera.shared.time import utc_now
 from vera.shared.types import GroupId, SourceId
@@ -942,6 +942,51 @@ async def test_retraction_withdraws_fabric_assertion_and_retracts_unsupported_fa
     assert row["artifact_version_id"] is not None
     assert projection_jobs == 1
     assert {"ASSERTION_WITHDRAWN", "FACT_RETRACTED"} <= event_types
+
+
+@pytest.mark.parametrize("erase_artifact", [False, True])
+async def test_active_legal_hold_prevents_retraction_before_mutation(
+    fabric_container: Container,
+    *,
+    erase_artifact: bool,
+) -> None:
+    container = fabric_container
+    group = f"p:w-{uuid7().hex[:12]}"
+    claim_id = await _ingest_provenance_claim(container, group, aligned=True)
+    source_id = f"{group}:{claim_id}"
+    async with _tenant(container.sessionmaker, group) as session:
+        await session.execute(
+            text("INSERT INTO legal_holds (group_id, source_id) VALUES (:group, :source)"),
+            {"group": group, "source": source_id},
+        )
+
+    result = await RetractionService(container.sessionmaker, container.memory).retract_source(
+        group_id=group,
+        source_id=source_id,
+        erase_artifact=erase_artifact,
+    )
+
+    assert is_err(result)
+    assert isinstance(result.error, Conflict)
+    async with _tenant(container.sessionmaker, group) as session:
+        state = (
+            await session.execute(
+                text(
+                    "SELECT pe.retracted_at, a.state AS assertion_state, "
+                    "f.lifecycle_state, cc.source_quote, "
+                    "(SELECT count(*) FROM audit_events ae "
+                    "WHERE ae.group_id=:group AND ae.target=:source) AS audit_count "
+                    "FROM published_episodes pe "
+                    "JOIN candidate_claims cc ON cc.id=:claim_id "
+                    "JOIN assertions a ON a.artifact_version_id=cc.artifact_version_id "
+                    "AND a.run_key='episode:' || :source "
+                    "JOIN facts f ON f.id=a.fact_id "
+                    "WHERE pe.group_id=:group AND pe.source_id=:source"
+                ),
+                {"group": group, "source": source_id, "claim_id": claim_id},
+            )
+        ).one()
+    assert tuple(state) == (None, "active", "active", _PROVENANCE_QUOTE, 0)
 
 
 async def test_retraction_only_withdraws_the_target_claim_from_shared_artifact(

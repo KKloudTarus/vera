@@ -25,6 +25,7 @@ from evals.runner import (
     _candidate_output_present,
     _normalize_metric,
     _observation_contract_errors,
+    _order_cases,
     _prepare_candidate_for_judging,
     _resolve_inputs,
     _strip_gold_labels,
@@ -743,6 +744,10 @@ def test_all_declared_scenarios_execute_through_the_production_protocol(
     assert report["cleanup"]["status"] == "PASS"
     assert report["quality_status"] == "PENDING_JUDGMENT"
     assert len(report["judge_packets"]) == 5
+    result_ids = [item["case_id"] for item in report["case_results"]]
+    assert result_ids.index("PERF-001") < result_ids.index("OPS-001")
+    assert result_ids.index("PERF-002") < result_ids.index("OPS-001")
+    assert result_ids.index("PERF-001") < result_ids.index("OPS-010")
     packet = load_json(Path(report["judge_packets"][0]["ref"]))
     serialized_packet = json.dumps(packet, sort_keys=True)
     assert packet["candidate"]["identity_blinded"] is True
@@ -793,6 +798,28 @@ def test_all_declared_scenarios_execute_through_the_production_protocol(
     )
 
 
+def test_case_order_honors_dependencies_before_priority() -> None:
+    cases = [
+        {"case_id": "OPS-001", "priority": "P0"},
+        {"case_id": "PERF-001", "priority": "P1"},
+        {"case_id": "SEC-001", "priority": "P0"},
+    ]
+
+    ordered = _order_cases(cases, {"OPS-001": ["PERF-001"]})
+
+    assert [case["case_id"] for case in ordered] == ["SEC-001", "PERF-001", "OPS-001"]
+
+
+def test_case_order_rejects_dependency_cycle() -> None:
+    cases = [
+        {"case_id": "OPS-001", "priority": "P0"},
+        {"case_id": "PERF-001", "priority": "P1"},
+    ]
+
+    with pytest.raises(RunnerError, match="case dependency cycle"):
+        _order_cases(cases, {"OPS-001": ["PERF-001"], "PERF-001": ["OPS-001"]})
+
+
 def test_empty_final_answer_does_not_create_a_judge_packet(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -819,6 +846,10 @@ def test_release_blocks_before_production_actions_when_targets_are_unresolved(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     root = _contract_copy(tmp_path, monkeypatch, fill_production=False)
+    production_path = root / "fixtures" / "production.json"
+    production = load_json(production_path)
+    production["targets"]["search_p95_ms"] = None
+    production_path.write_text(json.dumps(production), encoding="utf-8")
     cases = validate_module.load_cases()
     driver = SyntheticDriver(cases)
 

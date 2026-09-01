@@ -383,6 +383,11 @@ async def test_fact_embedding_migration_indexes_are_valid(
         "ix_chunk_embeddings_ann_256",
         "ix_chunk_embeddings_ann_512",
     }
+    ann_dimensions = {
+        f"ix_{prefix}_ann_{dimension}": dimension
+        for prefix in ("fact_embeddings", "snapshot_fact_embeddings")
+        for dimension in (256, 512, 1024, 1536)
+    } | {f"ix_chunk_embeddings_ann_{dimension}": dimension for dimension in (256, 512)}
     async with sessionmaker() as session:
         fact_embeddings_exists = await session.scalar(
             text("SELECT to_regclass('public.fact_embeddings') IS NOT NULL")
@@ -392,7 +397,8 @@ async def test_fact_embedding_migration_indexes_are_valid(
         indexes = (
             await session.execute(
                 text(
-                    "SELECT index.relname, index_def.indisvalid, index_def.indisready "
+                    "SELECT index.relname, index_def.indisvalid, index_def.indisready, "
+                    "pg_get_expr(index_def.indpred, index_def.indrelid) AS predicate "
                     "FROM pg_catalog.pg_index index_def "
                     "JOIN pg_catalog.pg_class index ON index.oid = index_def.indexrelid "
                     "JOIN pg_catalog.pg_namespace namespace ON namespace.oid = index.relnamespace "
@@ -404,6 +410,9 @@ async def test_fact_embedding_migration_indexes_are_valid(
 
     assert {row.relname for row in indexes} == expected
     assert all(row.indisvalid and row.indisready for row in indexes)
+    by_name = {row.relname: row for row in indexes}
+    for name, dimension in ann_dimensions.items():
+        assert f"dimension = {dimension}" in by_name[name].predicate
 
 
 async def test_one_fact_supported_by_multiple_sources(

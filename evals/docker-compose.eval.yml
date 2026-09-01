@@ -2,35 +2,57 @@
 # and remove its volumes after exporting the immutable report.
 x-eval-app-env: &eval-app-env
   VERA_ENVIRONMENT: dev
-  VERA_DB__DSN: postgresql+asyncpg://vera:vera@postgres:5432/vera
+  VERA_DB__DSN: postgresql+asyncpg://vera_runtime:${VERA_EVAL_DB_RUNTIME_PASSWORD_URLENCODED:-${VERA_EVAL_DB_RUNTIME_PASSWORD:?set a run-specific database runtime password}}@neo4j-proxy:5432/vera
   VERA_DB__POOL_SIZE: "30"
   VERA_DB__MAX_OVERFLOW: "15"
   VERA_DB__ROLE_ENFORCEMENT: "true"
+  VERA_ROLLOUT_LEGACY_DB_DSN: postgresql+asyncpg://vera_legacy:${VERA_EVAL_DB_LEGACY_PASSWORD_URLENCODED:-${VERA_EVAL_DB_LEGACY_PASSWORD:?set a run-specific legacy database password}}@neo4j-proxy:5432/vera
   VERA_NEO4J__URI: bolt://neo4j-proxy:7687
   VERA_NEO4J__USER: neo4j
   VERA_NEO4J__PASSWORD: vera-local-pass
   VERA_MEMORY__PROVIDER: graphiti
   VERA_MEMORY__GRAPH_BACKEND: neo4j
   VERA_MEMORY__FABRIC_WRITE_MODE: fabric
+  VERA_MEMORY__FABRIC_ENABLED: "false"
   VERA_MEMORY__VECTOR_SEARCH_ENABLED: "true"
   VERA_MEMORY__EMBEDDER: voyage
   VERA_VOYAGE__API_KEY: ${VERA_VOYAGE__API_KEY:?set VERA_VOYAGE__API_KEY for semantic evaluation}
+  VERA_VOYAGE__BASE_URL: ${VERA_VOYAGE__BASE_URL:-https://api.voyageai.com/v1}
   VERA_VOYAGE__EMBEDDING_MODEL: voyage-4-lite
   VERA_VOYAGE__EMBEDDING_DIM: "1024"
   VERA_VOYAGE__RERANK_MODEL: rerank-2.5
   VERA_RERANK__CROSS_ENCODER_ENABLED: "true"
   VERA_RERANK__CROSS_ENCODER_PROVIDER: voyage
   VERA_RERANK__CROSS_ENCODER_MIN_SCORE: "0.35"
+  VERA_WORKER__COMMUNITY_BUILD_ENABLED: "false"
   VERA_FALKOR__HOST: falkordb
   VERA_FALKOR__PORT: 6379
-  VERA_RESILIENCE__VALKEY_URL: redis://valkey:6379/0
-  VERA_OBJECTSTORE__ENDPOINT_URL: http://minio:9000
+  VERA_RESILIENCE__VALKEY_URL: redis://neo4j-proxy:6379/0
+  VERA_OBJECTSTORE__ENDPOINT_URL: http://neo4j-proxy:9000
   VERA_OBJECTSTORE__ACCESS_KEY: minioadmin
   VERA_OBJECTSTORE__SECRET_KEY: minioadmin
   VERA_MCP__JWT_SECRET: ${VERA_EVAL_MCP_JWT_SECRET:?set a run-specific MCP JWT secret}
   VERA_MCP__REQUIRED_SCOPES: '["memory:read"]'
+  VERA_OBSERVABILITY__OTLP_ENDPOINT: http://jaeger:4317
+  OTEL_TRACES_SAMPLER: parentbased_traceidratio
+  OTEL_TRACES_SAMPLER_ARG: "0.1"
 
 services:
+  rollout-state-init:
+    build: .
+    profiles: ["eval"]
+    user: "0:0"
+    command:
+      [
+        "sh",
+        "-c",
+        "rm -f /desired/*.json /status/*.json /state/*.json && chown 10001:10001 /desired /state && chown 0:10001 /status && chmod 0700 /desired /state && chmod 2750 /status",
+      ]
+    volumes:
+      - rollout-desired:/desired
+      - rollout-status:/status
+      - rollout-controller-state:/state
+
   postgres:
     ports: !reset []
 
@@ -79,6 +101,66 @@ services:
       neo4j-proxy:
         condition: service_healthy
 
+  postgres-proxy-init:
+    image: ghcr.io/shopify/toxiproxy:2.12.0@sha256:9378ed52a28bc50edc1350f936f518f31fa95f0d15917d6eb40b8e376d1a214e
+    entrypoint: ["/toxiproxy-cli"]
+    command:
+      [
+        "-h",
+        "http://neo4j-proxy:8474",
+        "create",
+        "-l",
+        "0.0.0.0:5432",
+        "-u",
+        "postgres:5432",
+        "postgres",
+      ]
+    depends_on:
+      neo4j-proxy:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+
+  minio-proxy-init:
+    image: ghcr.io/shopify/toxiproxy:2.12.0@sha256:9378ed52a28bc50edc1350f936f518f31fa95f0d15917d6eb40b8e376d1a214e
+    entrypoint: ["/toxiproxy-cli"]
+    command:
+      [
+        "-h",
+        "http://neo4j-proxy:8474",
+        "create",
+        "-l",
+        "0.0.0.0:9000",
+        "-u",
+        "minio:9000",
+        "minio",
+      ]
+    depends_on:
+      neo4j-proxy:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+
+  valkey-proxy-init:
+    image: ghcr.io/shopify/toxiproxy:2.12.0@sha256:9378ed52a28bc50edc1350f936f518f31fa95f0d15917d6eb40b8e376d1a214e
+    entrypoint: ["/toxiproxy-cli"]
+    command:
+      [
+        "-h",
+        "http://neo4j-proxy:8474",
+        "create",
+        "-l",
+        "0.0.0.0:6379",
+        "-u",
+        "valkey:6379",
+        "valkey",
+      ]
+    depends_on:
+      neo4j-proxy:
+        condition: service_healthy
+      valkey:
+        condition: service_healthy
+
   valkey:
     ports: !reset []
     healthcheck:
@@ -98,21 +180,57 @@ services:
       retries: 20
 
   migrate:
-    environment: *eval-app-env
+    environment:
+      <<: *eval-app-env
+      VERA_DB__APPLICATION_NAME: vera-migrate
+      VERA_DB__DSN: postgresql+asyncpg://vera:vera@neo4j-proxy:5432/vera
     depends_on:
       postgres:
         condition: service_healthy
       neo4j-proxy-init:
+        condition: service_completed_successfully
+      postgres-proxy-init:
+        condition: service_completed_successfully
+      minio-proxy-init:
+        condition: service_completed_successfully
+      valkey-proxy-init:
         condition: service_completed_successfully
       valkey:
         condition: service_healthy
       minio:
         condition: service_healthy
 
+  database-provision:
+    environment:
+      PGPASSWORD: vera
+      VERA_RUNTIME_PASSWORD: ${VERA_EVAL_DB_RUNTIME_PASSWORD:?set a run-specific database runtime password}
+      VERA_LEGACY_PASSWORD: ${VERA_EVAL_DB_LEGACY_PASSWORD:?set a run-specific legacy database password}
+
   api:
-    environment: *eval-app-env
+    user: "0:0"
+    command:
+      [
+        "python",
+        "-m",
+        "vera.entrypoints.rollout_supervisor",
+        "api",
+        "uvicorn",
+        "vera.entrypoints.api.main:app",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8000",
+      ]
+    environment:
+      <<: *eval-app-env
+      VERA_DB__APPLICATION_NAME: vera-api
+      VERA_ROLLOUT_DESIRED_ROOT: /rollout/desired
+      VERA_ROLLOUT_STATUS_ROOT: /rollout/status
     extra_hosts: ["host.docker.internal:host-gateway"]
     ports: !reset []
+    volumes:
+      - rollout-desired:/rollout/desired:ro
+      - rollout-status:/rollout/status
     healthcheck:
       test:
         [
@@ -125,6 +243,8 @@ services:
       timeout: 6s
       retries: 30
     depends_on:
+      rollout-state-init:
+        condition: service_completed_successfully
       migrate:
         condition: service_completed_successfully
       neo4j-proxy-init:
@@ -135,9 +255,31 @@ services:
         condition: service_healthy
 
   worker:
-    environment: *eval-app-env
+    user: "0:0"
+    command:
+      [
+        "python",
+        "-m",
+        "vera.entrypoints.rollout_supervisor",
+        "worker",
+        "python",
+        "-m",
+        "vera.entrypoints.worker.main",
+      ]
+    environment:
+      <<: *eval-app-env
+      VERA_DB__APPLICATION_NAME: vera-worker
+      VERA_DB__POOL_SIZE: "8"
+      VERA_DB__MAX_OVERFLOW: "4"
+      VERA_ROLLOUT_DESIRED_ROOT: /rollout/desired
+      VERA_ROLLOUT_STATUS_ROOT: /rollout/status
     extra_hosts: ["host.docker.internal:host-gateway"]
+    volumes:
+      - rollout-desired:/rollout/desired:ro
+      - rollout-status:/rollout/status
     depends_on:
+      rollout-state-init:
+        condition: service_completed_successfully
       migrate:
         condition: service_completed_successfully
       neo4j-proxy-init:
@@ -148,9 +290,29 @@ services:
         condition: service_healthy
 
   mcp:
-    environment: *eval-app-env
+    user: "0:0"
+    command:
+      [
+        "python",
+        "-m",
+        "vera.entrypoints.rollout_supervisor",
+        "mcp",
+        "python",
+        "-m",
+        "vera.entrypoints.mcp.main",
+      ]
+    environment:
+      <<: *eval-app-env
+      VERA_DB__APPLICATION_NAME: vera-mcp
+      VERA_DB__POOL_SIZE: "8"
+      VERA_DB__MAX_OVERFLOW: "4"
+      VERA_ROLLOUT_DESIRED_ROOT: /rollout/desired
+      VERA_ROLLOUT_STATUS_ROOT: /rollout/status
     extra_hosts: ["host.docker.internal:host-gateway"]
     ports: !reset []
+    volumes:
+      - rollout-desired:/rollout/desired:ro
+      - rollout-status:/rollout/status
     healthcheck:
       test:
         [
@@ -163,6 +325,8 @@ services:
       timeout: 6s
       retries: 30
     depends_on:
+      rollout-state-init:
+        condition: service_completed_successfully
       migrate:
         condition: service_completed_successfully
       neo4j-proxy-init:
@@ -171,6 +335,86 @@ services:
         condition: service_healthy
       minio:
         condition: service_healthy
+
+  prometheus:
+    build:
+      context: .
+      dockerfile: deploy/observability/Dockerfile
+    profiles: ["eval"]
+    ports: !reset []
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --web.enable-lifecycle
+
+  jaeger:
+    image: cr.jaegertracing.io/jaegertracing/jaeger:2.20.0@sha256:46a886260e04002d8f45e213fc39063fa11a50446048fdaa64786fc0840cb9f8
+    profiles: ["eval"]
+    ports: !reset []
+
+  recovery-harness:
+    build:
+      context: .
+      dockerfile: deploy/recovery/Dockerfile
+    profiles: ["eval"]
+    environment:
+      PGHOST: postgres
+      PGUSER: vera
+      PGPASSWORD: vera
+      VERA_RECOVERY_ROOT: /state/recovery
+    volumes:
+      - eval-state:/state
+    depends_on:
+      database-provision:
+        condition: service_completed_successfully
+
+  rollout-controller:
+    build: .
+    profiles: ["eval"]
+    user: "10001:10001"
+    command:
+      [
+        "uvicorn",
+        "vera.entrypoints.rollout_controller:app",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8090",
+      ]
+    environment:
+      VERA_ROLLOUT_CONTROLLER_TOKEN: ${VERA_EVAL_ROLLOUT_CONTROLLER_TOKEN:?set a run-specific rollout controller token}
+      VERA_ROLLOUT_DESIRED_ROOT: /rollout/desired
+      VERA_ROLLOUT_STATUS_ROOT: /rollout/status
+      VERA_ROLLOUT_CONTROLLER_STATE_ROOT: /rollout/state
+      VERA_ROLLOUT_RELEASE_BASELINE_JSON: '{"api":{"VERA_MEMORY__FABRIC_ENABLED":"false","VERA_MEMORY__FABRIC_WRITE_MODE":"fabric","VERA_DB__ROLE_ENFORCEMENT":"true","VERA_MEMORY__VECTOR_SEARCH_ENABLED":"true","VERA_WORKER__COMMUNITY_BUILD_ENABLED":"false","VERA_WORKER__COMMUNITY_BUILD_GROUP_ID":""},"worker":{"VERA_MEMORY__FABRIC_ENABLED":"false","VERA_MEMORY__FABRIC_WRITE_MODE":"fabric","VERA_DB__ROLE_ENFORCEMENT":"true","VERA_MEMORY__VECTOR_SEARCH_ENABLED":"true","VERA_WORKER__COMMUNITY_BUILD_ENABLED":"false","VERA_WORKER__COMMUNITY_BUILD_GROUP_ID":""},"mcp":{"VERA_MEMORY__FABRIC_ENABLED":"false","VERA_MEMORY__FABRIC_WRITE_MODE":"fabric","VERA_DB__ROLE_ENFORCEMENT":"true","VERA_MEMORY__VECTOR_SEARCH_ENABLED":"true","VERA_WORKER__COMMUNITY_BUILD_ENABLED":"false","VERA_WORKER__COMMUNITY_BUILD_GROUP_ID":""}}'
+      VERA_ROLLOUT_API_URL: http://api:8000
+      VERA_ROLLOUT_WORKER_METRICS_URL: http://worker:9100/metrics
+      VERA_ROLLOUT_MCP_HOST: mcp
+      VERA_ROLLOUT_MCP_PORT: "8080"
+    volumes:
+      - rollout-desired:/rollout/desired
+      - rollout-status:/rollout/status:ro
+      - rollout-controller-state:/rollout/state
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8090/health', timeout=5)",
+        ]
+      interval: 3s
+      timeout: 6s
+      retries: 30
+    depends_on:
+      rollout-state-init:
+        condition: service_completed_successfully
+      api:
+        condition: service_healthy
+      mcp:
+        condition: service_healthy
+      worker:
+        condition: service_started
 
   evaluator:
     build:
@@ -182,11 +426,23 @@ services:
         required: false
     environment:
       <<: *eval-app-env
+      VERA_DB__DSN: postgresql+asyncpg://vera:vera@neo4j-proxy:5432/vera
+      VERA_DB__ROLE_ENFORCEMENT: "false"
       VERA_EVAL_API_URL: http://api:8000
       VERA_EVAL_MCP_URL: http://mcp:8080/mcp
       VERA_EVAL_MCP_HOST_HEADER: localhost:8080
       VERA_EVAL_MODEL_TIMEOUT_S: "300"
       VERA_EVAL_DEPENDENCY_CONTROL_URL: http://neo4j-proxy:8474
+      VERA_EVAL_WORKER_METRICS_URL: http://worker:9100/metrics
+      VERA_EVAL_PROMETHEUS_URL: http://prometheus:9090
+      VERA_EVAL_SYNTHETIC_METRICS_PORT: "9200"
+      VERA_EVAL_ADMIN_DSN: postgresql+asyncpg://vera:vera@neo4j-proxy:5432/vera
+      VERA_EVAL_RUNTIME_DSN: postgresql+asyncpg://vera_runtime:${VERA_EVAL_DB_RUNTIME_PASSWORD_URLENCODED:-${VERA_EVAL_DB_RUNTIME_PASSWORD:?set a run-specific database runtime password}}@neo4j-proxy:5432/vera
+      VERA_EVAL_RUNTIME_DB_USER: vera_runtime
+      VERA_EVAL_RECOVERY_ROOT: /state/recovery
+      VERA_EVAL_TRACE_QUERY_URL: http://jaeger:16686
+      VERA_EVAL_ROLLOUT_CONTROLLER_URL: http://rollout-controller:8090
+      VERA_EVAL_ROLLOUT_CONTROLLER_TOKEN: ${VERA_EVAL_ROLLOUT_CONTROLLER_TOKEN:?set a run-specific rollout controller token}
       VERA_EVAL_SCOPE_ID: ${VERA_EVAL_SCOPE_ID:?set a run-specific evaluation scope ID}
       VERA_EVAL_STATE_ROOT: /state
     extra_hosts: ["host.docker.internal:host-gateway"]
@@ -201,8 +457,19 @@ services:
         condition: service_healthy
       worker:
         condition: service_started
+      prometheus:
+        condition: service_started
+      jaeger:
+        condition: service_started
+      recovery-harness:
+        condition: service_started
+      rollout-controller:
+        condition: service_healthy
 
 volumes:
   neo4j-data:
   minio-data:
   eval-state:
+  rollout-desired:
+  rollout-status:
+  rollout-controller-state:

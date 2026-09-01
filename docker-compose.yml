@@ -2,6 +2,20 @@
 # No managed single-cloud services (no SQS/DynamoDB/etc.).
 name: vera
 
+x-app-environment: &app-env
+  VERA_DB__DSN: postgresql+asyncpg://vera_runtime:${VERA_DB_RUNTIME_PASSWORD_URLENCODED:-${VERA_DB_RUNTIME_PASSWORD:-vera-runtime}}@postgres:5432/vera
+  VERA_DB__ROLE_ENFORCEMENT: "true"
+  VERA_NEO4J__URI: bolt://neo4j:7687
+  VERA_NEO4J__USER: neo4j
+  VERA_NEO4J__PASSWORD: vera-local-pass
+  VERA_MEMORY__PROVIDER: graphiti
+  VERA_FALKOR__HOST: falkordb
+  VERA_FALKOR__PORT: 6379
+  VERA_RESILIENCE__VALKEY_URL: redis://valkey:6379/0
+  VERA_OBJECTSTORE__ENDPOINT_URL: http://minio:9000
+  VERA_OBJECTSTORE__ACCESS_KEY: minioadmin
+  VERA_OBJECTSTORE__SECRET_KEY: minioadmin
+
 services:
   postgres:
     # pgvector's image is the official postgres:18 plus the `vector` extension, so the data
@@ -61,21 +75,23 @@ services:
     env_file:
       - path: .env
         required: false
-    environment: &app_env
+    environment:
       VERA_DB__DSN: postgresql+asyncpg://vera:vera@postgres:5432/vera
-      VERA_NEO4J__URI: bolt://neo4j:7687
-      VERA_NEO4J__USER: neo4j
-      VERA_NEO4J__PASSWORD: vera-local-pass
-      VERA_MEMORY__PROVIDER: graphiti
-      VERA_FALKOR__HOST: falkordb
-      VERA_FALKOR__PORT: 6379
-      VERA_RESILIENCE__VALKEY_URL: redis://valkey:6379/0
-      VERA_OBJECTSTORE__ENDPOINT_URL: http://minio:9000
-      VERA_OBJECTSTORE__ACCESS_KEY: minioadmin
-      VERA_OBJECTSTORE__SECRET_KEY: minioadmin
     depends_on:
       postgres:
         condition: service_healthy
+
+  database-provision:
+    build:
+      context: .
+      dockerfile: deploy/postgres/Dockerfile
+    profiles: ["app"]
+    environment:
+      PGPASSWORD: vera
+      VERA_RUNTIME_PASSWORD: ${VERA_DB_RUNTIME_PASSWORD:-vera-runtime}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
 
   api:
     build: .
@@ -83,10 +99,10 @@ services:
     env_file:
       - path: .env
         required: false
-    environment: *app_env
+    environment: *app-env
     ports: ["8000:8000"]
     depends_on:
-      migrate:
+      database-provision:
         condition: service_completed_successfully
 
   worker:
@@ -96,9 +112,9 @@ services:
     env_file:
       - path: .env
         required: false
-    environment: *app_env
+    environment: *app-env
     depends_on:
-      migrate:
+      database-provision:
         condition: service_completed_successfully
 
   mcp:
@@ -108,10 +124,10 @@ services:
     env_file:
       - path: .env
         required: false
-    environment: *app_env
+    environment: *app-env
     ports: ["127.0.0.1:8080:8080"]
     depends_on:
-      migrate:
+      database-provision:
         condition: service_completed_successfully
 
 volumes:

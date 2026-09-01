@@ -13,6 +13,82 @@ loss or corruption, and the routine backups that make it possible.
 - **Neo4j**: derived. Node and edge uuids are not stable across a rebuild; the
   `(group_id, canonical_entity_id)` mapping is the durable key.
 
+## Incident ownership
+
+Assign all four roles at declaration. The incident commander owns severity, timeline,
+communications, and closure. Operations owns dependency isolation, restore, and runtime changes.
+Security owns credential containment, evidence access, and exposure assessment. The application
+owner owns VERA behavior, authoritative parity, and functional recovery. Every handoff and
+follow-up receives a named owner and deadline.
+
+### postgres_unavailable
+
+**Owner:** operations
+
+1. The incident commander declares a write outage, freezes rollouts, and assigns the four roles.
+   Operations stops workers if retries are increasing load and confirms `/health/ready` reports
+   the database down.
+2. Operations restores connectivity or fails over using the database platform's tested process.
+   If storage integrity is uncertain, restore the latest base backup plus WAL to the approved
+   point in time. Never reconstruct PostgreSQL from the graph.
+3. The application owner verifies readiness, migration version, authoritative counts and
+   checksums, queue state, and a fixed read/write sample. Security preserves access evidence and
+   checks whether the outage involved unauthorized access before the commander restores traffic.
+
+### object_store_unavailable
+
+**Owner:** operations
+
+1. The incident commander freezes new ingestion and erasure work. Operations confirms the
+   S3-compatible endpoint, bucket, and credential path without exposing secrets.
+2. Restore service or fail over to a replica that has complete version history. If objects were
+   lost, restore object versions from the last verified replica or backup. Do not publish a
+   PostgreSQL artifact version whose raw object is absent.
+3. The application owner compares PostgreSQL artifact keys with restored objects, retries the
+   idempotent failed ingest, and verifies re-extraction of a sample. Security reviews object
+   access logs before the incident commander resumes connectors.
+
+### graph_corruption
+
+**Owner:** application owner
+
+1. The incident commander pauses graph-dependent rollout and community builds. Operations
+   isolates the graph and records the affected groups; PostgreSQL and object-store writes remain
+   the recovery authority.
+2. The application owner runs `python -m vera.entrypoints.reprocess <group_id>` for isolated
+   groups. For full loss, follow [Full Neo4j loss](#full-neo4j-loss).
+3. Require zero projection drift, successful built-in reprocess verification, and known-fact
+   searches for a fixed group sample. Security preserves graph access logs, then the incident
+   commander restores graph-dependent traffic.
+
+### queue_stall
+
+**Owner:** operations
+
+1. Freeze rollouts. Operations checks worker liveness, pending/in-flight/dead counts, oldest job
+   age, visibility timeouts, database health, and provider limits. The application owner traces
+   one oldest job to its first failing boundary.
+2. Restore the dependency or worker capacity. Allow automatic stuck-job reclamation and
+   idempotent retry to recover work. Do not skip per-group ordering or modify queue rows manually.
+3. The application owner verifies the queue drains in order, no new dead jobs appear, projection
+   drift is zero, and a queued canary becomes searchable. Security reviews access anomalies if
+   the stall followed a credential change; the commander records recovery time and follow-ups.
+
+### credential_compromise
+
+**Owner:** security
+
+1. The incident commander restricts incident evidence and freezes rollouts. Security revokes the
+   exposed API key or token, disables the affected principal when needed, and identifies every
+   system that accepted the credential.
+2. Operations rotates affected database, object-store, graph, identity, and provider credentials,
+   then restarts consumers through the normal secret-delivery path. Never place replacement
+   values in logs, tickets, or command history.
+3. Security reviews audit and dependency access logs from first possible exposure through
+   revocation. The application owner verifies authorization, readiness, writes, retrieval, queue
+   progress, and authoritative parity. The commander restores access only after containment and
+   assigns remediation owners.
+
 ## Backups (routine)
 
 - PostgreSQL: continuous WAL archiving plus a daily base backup (PITR). Verify restores

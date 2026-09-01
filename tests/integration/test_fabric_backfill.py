@@ -363,13 +363,41 @@ async def test_erasure_deletes_candidate_claims_verbatim_quote(
                 source_quote="verbatim personal data that must be erased",
             )
         )
+        retained_artifact = ArtifactRow(
+            source_id=source_id,
+            external_id="retained",
+            content_hash="retained-hash",
+            s3_key="retained-key",
+            reference_time=utc_now(),
+        )
+        s.add(retained_artifact)
+        await s.flush()
+        retained_version = ArtifactVersionRow(
+            artifact_id=retained_artifact.id,
+            version=1,
+            content_hash="retained-hash",
+            s3_key="retained-key",
+            reference_time=utc_now(),
+        )
+        s.add(retained_version)
+        await s.flush()
+        retained_version_id = retained_version.id
+        s.add(
+            CandidateClaimRow(
+                artifact_version_id=retained_version_id,
+                group_id=group,
+                statement="unrelated claim",
+                claim_type="fact",
+                source_quote="unrelated quote must remain",
+            )
+        )
 
     async with _tenant(sessionmaker, group) as s:
         assert (
             await s.scalar(
                 text("SELECT count(*) FROM candidate_claims WHERE group_id=:g"), {"g": group}
             )
-        ) == 1
+        ) == 2
 
     async with _tenant(sessionmaker, group) as s:
         await s.execute(
@@ -378,7 +406,14 @@ async def test_erasure_deletes_candidate_claims_verbatim_quote(
         )
 
     async with _tenant(sessionmaker, group) as s:
-        remaining = await s.scalar(
-            text("SELECT count(*) FROM candidate_claims WHERE group_id=:g"), {"g": group}
+        remaining_quotes = (
+            await s.scalars(
+                text("SELECT source_quote FROM candidate_claims WHERE group_id=:g"), {"g": group}
+            )
+        ).all()
+        retained_versions = await s.scalar(
+            text("SELECT count(*) FROM artifact_versions WHERE id IN (:erased, :retained)"),
+            {"erased": version_id, "retained": retained_version_id},
         )
-    assert remaining == 0  # before the fix the verbatim source_quote survived erasure
+    assert remaining_quotes == ["unrelated quote must remain"]
+    assert retained_versions == 2
