@@ -26,13 +26,13 @@ from vera.domain.ports.retrieval_index import (
 # Candidate generation favors recall: OR the query lexemes (plainto_tsquery ANDs them, so a
 # multi-word natural query would never match a terse fact doc). ts_rank still orders by how
 # well each row matches, and the downstream blend and diversity handle precision.
-_ORQ = "CAST(replace(CAST(plainto_tsquery('english', :q) AS text), ' & ', ' | ') AS tsquery)"
+_ORQ = "CAST(replace(CAST(plainto_tsquery('simple', :q) AS text), ' & ', ' | ') AS tsquery)"
 _FACT_LEXICAL_SCORE = """(ts_rank(f.search_vector, q.q)
-         + ts_rank(to_tsvector('english', cs.canonical_name), q.q)
-         + ts_rank(to_tsvector('english', coalesce(co.canonical_name, '')), q.q))"""
+         + ts_rank(to_tsvector('simple', cs.canonical_name), q.q)
+         + ts_rank(to_tsvector('simple', coalesce(co.canonical_name, '')), q.q))"""
 _FACT_LEXICAL_MATCH = """f.search_vector @@ q.q
-        OR to_tsvector('english', cs.canonical_name) @@ q.q
-        OR to_tsvector('english', coalesce(co.canonical_name, '')) @@ q.q"""
+        OR to_tsvector('simple', cs.canonical_name) @@ q.q
+        OR to_tsvector('simple', coalesce(co.canonical_name, '')) @@ q.q"""
 
 _PASSAGE = f"""
 SELECT c.id, c.artifact_version_id, c.text, c.content_hash, c.heading_path, c.symbol_name,
@@ -462,14 +462,14 @@ WHERE sf.snapshot_id = CAST(:snapshot_id AS uuid) AND sf.group_id = :g
 ORDER BY score DESC, sf.fact_id ASC
 LIMIT :lim
 """
-_SNAPSHOT_LEXICAL_SCORE = """(ts_rank(to_tsvector('english', sf.predicate || ' ' ||
+_SNAPSHOT_LEXICAL_SCORE = """(ts_rank(to_tsvector('simple', sf.predicate || ' ' ||
                              sf.normalized_object || ' ' || coalesce(sf.object_scalar, '')), q.q)
-        + ts_rank(to_tsvector('english', sf.subject_name), q.q)
-        + ts_rank(to_tsvector('english', sf.object_name), q.q))"""
-_SNAPSHOT_LEXICAL_MATCH = """to_tsvector('english', sf.predicate || ' ' ||
+        + ts_rank(to_tsvector('simple', sf.subject_name), q.q)
+        + ts_rank(to_tsvector('simple', sf.object_name), q.q))"""
+_SNAPSHOT_LEXICAL_MATCH = """to_tsvector('simple', sf.predicate || ' ' ||
                    sf.normalized_object || ' ' || coalesce(sf.object_scalar, '')) @@ q.q
-       OR to_tsvector('english', sf.subject_name) @@ q.q
-       OR to_tsvector('english', sf.object_name) @@ q.q"""
+       OR to_tsvector('simple', sf.subject_name) @@ q.q
+       OR to_tsvector('simple', sf.object_name) @@ q.q"""
 _FACTS_SNAPSHOT = _FACTS_SNAPSHOT_TMPL.format(
     score=_SNAPSHOT_LEXICAL_SCORE,
     query_join=f"CROSS JOIN (SELECT {_ORQ} AS q) q",

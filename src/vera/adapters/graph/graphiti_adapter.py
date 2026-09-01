@@ -69,8 +69,9 @@ _FALKOR_EDGE_VECTOR: LiteralString = (
     "RETURN e.fact AS fact, e.uuid AS uuid, e.valid_at AS valid_at, "
     "e.invalid_at AS invalid_at, score ORDER BY score DESC LIMIT $limit"
 )
-# Alphanumeric terms only, so a natural-language query is a safe RediSearch fulltext input.
-_FULLTEXT_TOKEN = re.compile(r"[A-Za-z0-9]+")
+# Unicode letters and digits only (no underscore or punctuation), so a natural-language query
+# in any language is a safe RediSearch/Lucene fulltext input. Non-ASCII terms are preserved.
+_FULLTEXT_TOKEN = re.compile(r"[^\W_]+")
 _RRF_K = 1  # reciprocal-rank-fusion constant, matching the Neo4j RRF recipe
 _COMMUNITIES: LiteralString = (
     "MATCH (c:Community) "
