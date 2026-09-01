@@ -1,0 +1,119 @@
+# Default values for a single-cluster VERA pilot. PostgreSQL and the object store are
+# authoritative; the graph is a rebuildable projection. The defaults boot with no external
+# credentials (deterministic embedder, local MCP principal). Set memory.openaiApiKey and
+# flip memory.embedder to openai for real semantic ingestion.
+
+nameOverride: ""
+fullnameOverride: ""
+
+image:
+  # The app image. For a single-node k3s pilot, build it and import it into the node's
+  # containerd, then keep pullPolicy IfNotPresent so the cluster uses the local image.
+  repository: vera
+  tag: "0.1.0"
+  pullPolicy: IfNotPresent
+  # Numeric UID of the non-root 'vera' user baked into the image (USER vera). kubelet needs
+  # the number to enforce runAsNonRoot; keep it in sync with the Dockerfile.
+  runAsUser: 999
+
+# local-dev: MCP uses one unauthenticated local principal and the API auth gate is off.
+# Set environment to prod, api.authRequired true, and mcp.jwtSecret for a real deployment.
+environment: local
+logJson: true
+
+api:
+  replicas: 1
+  authRequired: false
+  service:
+    type: ClusterIP
+    port: 8000
+  resources:
+    requests: { cpu: "100m", memory: "384Mi" }
+    limits: { cpu: "1", memory: "768Mi" }
+
+mcp:
+  replicas: 1
+  # Empty jwtSecret + environment=local means the MCP serves an unauthenticated local
+  # principal (pilot only). Set a long random secret for the OAuth 2.1 resource-server mode.
+  jwtSecret: ""
+  allowedHosts:
+    - "localhost:*"
+    - "127.0.0.1:*"
+    - "[::1]:*"
+    - "vera-mcp"
+    - "vera-mcp:*"
+    - "vera-mcp.vera.svc.cluster.local"
+    - "vera-mcp.vera.svc.cluster.local:*"
+  allowedOrigins: []
+  service:
+    type: ClusterIP
+    port: 8080
+  resources:
+    requests: { cpu: "100m", memory: "384Mi" }
+    limits: { cpu: "1", memory: "768Mi" }
+
+worker:
+  replicas: 1
+  resources:
+    requests: { cpu: "100m", memory: "384Mi" }
+    limits: { cpu: "2", memory: "768Mi" }
+
+calibrate:
+  enabled: true
+  schedule: "0 3 * * *"
+
+memory:
+  provider: graphiti          # graphiti | null
+  embedder: deterministic     # deterministic (no key) | openai | voyage
+  embeddingModel: "text-embedding-3-small"
+  embeddingDim: 1536
+  llmModel: "gpt-4.1-mini"
+  smallLlmModel: "gpt-4.1-nano"
+  # Set to enable the openai embedder and LLM extraction. Leave empty for an offline pilot.
+  openaiApiKey: ""
+
+graph:
+  # neo4j works with the released image out of the box. falkordb is lighter but its Python
+  # driver is not in the published image, so it needs an image built with the falkordb extra.
+  backend: neo4j              # neo4j | falkordb (needs the falkordb driver in the image)
+  falkordb:
+    image: falkordb/falkordb:latest
+    port: 6379
+    storage: 5Gi
+    resources:
+      requests: { cpu: "100m", memory: "384Mi" }
+      limits: { cpu: "1", memory: "1Gi" }
+  neo4j:
+    image: neo4j:5.26
+    password: vera-graph-pass
+    storage: 5Gi
+    resources:
+      requests: { cpu: "250m", memory: "1Gi" }
+      limits: { cpu: "1", memory: "2Gi" }
+
+postgres:
+  image: pgvector/pgvector:pg18
+  user: vera
+  password: vera-db-pass
+  database: vera
+  storage: 10Gi
+  resources:
+    requests: { cpu: "250m", memory: "512Mi" }
+    limits: { cpu: "2", memory: "1Gi" }
+
+valkey:
+  image: valkey/valkey:8
+  resources:
+    requests: { cpu: "50m", memory: "128Mi" }
+    limits: { cpu: "500m", memory: "512Mi" }
+
+minio:
+  image: minio/minio:latest
+  mcImage: minio/mc:latest
+  accessKey: minioadmin
+  secretKey: minioadmin
+  bucket: vera-artifacts
+  storage: 10Gi
+  resources:
+    requests: { cpu: "100m", memory: "256Mi" }
+    limits: { cpu: "1", memory: "768Mi" }

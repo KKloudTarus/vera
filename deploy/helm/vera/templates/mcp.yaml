@@ -1,0 +1,57 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "vera.mcpName" . }}
+  labels: {{- include "vera.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.mcp.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      vera.component: mcp
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        vera.component: mcp
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/config.yaml") . | sha256sum }}
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9101"
+        prometheus.io/path: "/metrics"
+    spec:
+      securityContext: {{- include "vera.podSecurityContext" . | nindent 8 }}
+      initContainers: {{- include "vera.waitForPostgres" . | nindent 8 }}
+      containers:
+        - name: mcp
+          image: {{ include "vera.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["python", "-m", "vera.entrypoints.mcp.main"]
+          ports:
+            - { containerPort: 8080, name: http }
+            - { containerPort: 9101, name: metrics }
+          envFrom: {{- include "vera.envFrom" . | nindent 12 }}
+          readinessProbe:
+            tcpSocket: { port: 8080 }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket: { port: 8080 }
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          resources: {{- toYaml .Values.mcp.resources | nindent 12 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "vera.mcpName" . }}
+  labels: {{- include "vera.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.mcp.service.type }}
+  selector:
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    vera.component: mcp
+  ports:
+    - name: http
+      port: {{ .Values.mcp.service.port }}
+      targetPort: 8080

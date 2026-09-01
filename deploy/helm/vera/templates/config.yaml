@@ -1,0 +1,51 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "vera.fullname" . }}-config
+  labels: {{- include "vera.labels" . | nindent 4 }}
+data:
+  VERA_ENVIRONMENT: {{ .Values.environment | quote }}
+  VERA_LOG_JSON: {{ .Values.logJson | quote }}
+  VERA_MEMORY__PROVIDER: {{ .Values.memory.provider | quote }}
+  VERA_MEMORY__EMBEDDER: {{ .Values.memory.embedder | quote }}
+  VERA_MEMORY__EMBEDDING_MODEL: {{ .Values.memory.embeddingModel | quote }}
+  VERA_MEMORY__EMBEDDING_DIM: {{ .Values.memory.embeddingDim | quote }}
+  VERA_MEMORY__LLM_MODEL: {{ .Values.memory.llmModel | quote }}
+  VERA_MEMORY__SMALL_LLM_MODEL: {{ .Values.memory.smallLlmModel | quote }}
+  VERA_MEMORY__GRAPH_BACKEND: {{ .Values.graph.backend | quote }}
+{{- if eq .Values.graph.backend "neo4j" }}
+  VERA_NEO4J__URI: "bolt://{{ include "vera.neo4jHost" . }}:7687"
+  VERA_NEO4J__USER: "neo4j"
+{{- else }}
+  VERA_FALKOR__HOST: {{ include "vera.falkordbHost" . | quote }}
+  VERA_FALKOR__PORT: {{ .Values.graph.falkordb.port | quote }}
+{{- end }}
+  VERA_RESILIENCE__VALKEY_URL: "redis://{{ include "vera.valkeyHost" . }}:6379/0"
+  VERA_OBJECTSTORE__ENDPOINT_URL: "http://{{ include "vera.minioHost" . }}:9000"
+  VERA_OBJECTSTORE__BUCKET: {{ .Values.minio.bucket | quote }}
+  VERA_API__AUTH_REQUIRED: {{ .Values.api.authRequired | quote }}
+  VERA_MCP__ALLOWED_HOSTS: {{ toJson .Values.mcp.allowedHosts | quote }}
+  VERA_MCP__ALLOWED_ORIGINS: {{ toJson .Values.mcp.allowedOrigins | quote }}
+  VERA_OBSERVABILITY__MCP_METRICS_HOST: "0.0.0.0"
+  VERA_OBSERVABILITY__MCP_METRICS_PORT: "9101"
+  VERA_OBSERVABILITY__WORKER_METRICS_PORT: "9100"
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ include "vera.fullname" . }}-secrets
+  labels: {{- include "vera.labels" . | nindent 4 }}
+type: Opaque
+stringData:
+  VERA_DB__DSN: {{ include "vera.dsn" . | quote }}
+  VERA_OBJECTSTORE__ACCESS_KEY: {{ .Values.minio.accessKey | quote }}
+  VERA_OBJECTSTORE__SECRET_KEY: {{ .Values.minio.secretKey | quote }}
+{{- if eq .Values.graph.backend "neo4j" }}
+  VERA_NEO4J__PASSWORD: {{ .Values.graph.neo4j.password | quote }}
+{{- end }}
+{{- if .Values.memory.openaiApiKey }}
+  VERA_MEMORY__OPENAI_API_KEY: {{ .Values.memory.openaiApiKey | quote }}
+{{- end }}
+{{- if .Values.mcp.jwtSecret }}
+  VERA_MCP__JWT_SECRET: {{ .Values.mcp.jwtSecret | quote }}
+{{- end }}

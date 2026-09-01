@@ -1,0 +1,113 @@
+{{- if eq .Values.graph.backend "falkordb" }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "vera.falkordbHost" . }}
+  labels: {{- include "vera.labels" . | nindent 4 }}
+spec:
+  selector:
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    vera.component: falkordb
+  ports:
+    - name: falkordb
+      port: {{ .Values.graph.falkordb.port }}
+      targetPort: 6379
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "vera.falkordbHost" . }}
+  labels: {{- include "vera.labels" . | nindent 4 }}
+spec:
+  serviceName: {{ include "vera.falkordbHost" . }}
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      vera.component: falkordb
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        vera.component: falkordb
+    spec:
+      containers:
+        - name: falkordb
+          image: {{ .Values.graph.falkordb.image }}
+          ports:
+            - containerPort: 6379
+          resources: {{- toYaml .Values.graph.falkordb.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: {{ .Values.graph.falkordb.storage }}
+{{- else if eq .Values.graph.backend "neo4j" }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "vera.neo4jHost" . }}
+  labels: {{- include "vera.labels" . | nindent 4 }}
+spec:
+  selector:
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    vera.component: neo4j
+  ports:
+    - name: bolt
+      port: 7687
+      targetPort: 7687
+    - name: http
+      port: 7474
+      targetPort: 7474
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "vera.neo4jHost" . }}
+  labels: {{- include "vera.labels" . | nindent 4 }}
+spec:
+  serviceName: {{ include "vera.neo4jHost" . }}
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      vera.component: neo4j
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        vera.component: neo4j
+    spec:
+      containers:
+        - name: neo4j
+          image: {{ .Values.graph.neo4j.image }}
+          env:
+            - name: NEO4J_AUTH
+              value: "neo4j/{{ .Values.graph.neo4j.password }}"
+          ports:
+            - containerPort: 7687
+            - containerPort: 7474
+          readinessProbe:
+            tcpSocket:
+              port: 7687
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          resources: {{- toYaml .Values.graph.neo4j.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: {{ .Values.graph.neo4j.storage }}
+{{- end }}

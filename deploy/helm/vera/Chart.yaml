@@ -1,0 +1,12 @@
+apiVersion: v2
+name: vera
+description: >-
+  VERA (Verified Episodic Recall for Agents): the API, MCP server, and ingestion
+  worker plus their datastores (PostgreSQL, a graph backend, Valkey, and an
+  S3-compatible object store), for a single-cluster pilot deployment.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+home: https://github.com/KKloudTarus/vera
+sources:
+  - https://github.com/KKloudTarus/vera
