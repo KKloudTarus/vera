@@ -12,7 +12,17 @@ data:
   VERA_MEMORY__EMBEDDING_DIM: {{ .Values.memory.embeddingDim | quote }}
   VERA_MEMORY__LLM_MODEL: {{ .Values.memory.llmModel | quote }}
   VERA_MEMORY__SMALL_LLM_MODEL: {{ .Values.memory.smallLlmModel | quote }}
+  VERA_MEMORY__VECTOR_SEARCH_ENABLED: {{ .Values.memory.vectorSearchEnabled | quote }}
   VERA_MEMORY__GRAPH_BACKEND: {{ .Values.graph.backend | quote }}
+{{- if eq .Values.memory.embedder "voyage" }}
+  VERA_VOYAGE__EMBEDDING_MODEL: {{ .Values.voyage.embeddingModel | quote }}
+  VERA_VOYAGE__EMBEDDING_DIM: {{ .Values.voyage.embeddingDim | quote }}
+  VERA_VOYAGE__RERANK_MODEL: {{ .Values.voyage.rerankModel | quote }}
+{{- end }}
+{{- if .Values.rerank.crossEncoderEnabled }}
+  VERA_RERANK__CROSS_ENCODER_ENABLED: "true"
+  VERA_RERANK__CROSS_ENCODER_PROVIDER: {{ .Values.rerank.crossEncoderProvider | quote }}
+{{- end }}
 {{- if eq .Values.graph.backend "neo4j" }}
   VERA_NEO4J__URI: "bolt://{{ include "vera.neo4jHost" . }}:7687"
   VERA_NEO4J__USER: "neo4j"

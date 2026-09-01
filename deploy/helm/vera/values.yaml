@@ -98,8 +98,24 @@ memory:
   embeddingDim: 1536
   llmModel: "gpt-4.1-mini"
   smallLlmModel: "gpt-4.1-nano"
+  # Add pgvector dense passage/code retrieval alongside full-text. Needs a real embedder.
+  vectorSearchEnabled: false
   # Set to enable the openai embedder and LLM extraction. Leave empty for an offline pilot.
   openaiApiKey: ""
+
+# Voyage AI provider (multilingual embeddings + reranker), used when memory.embedder=voyage
+# and/or rerank.crossEncoderProvider=voyage. The API key is a secret: with secrets.create=false
+# put VERA_VOYAGE__API_KEY in the external secret; otherwise set voyage.apiKey below.
+voyage:
+  apiKey: ""
+  embeddingModel: "voyage-3.5"
+  embeddingDim: 1024
+  rerankModel: "rerank-2.5"
+
+rerank:
+  # Stage-3 cross-encoder over the reranked head. Off by default (adds a model call per search).
+  crossEncoderEnabled: false
+  crossEncoderProvider: "llm"   # llm | voyage
 
 graph:
   # neo4j works with the released image out of the box. falkordb is lighter but its Python
