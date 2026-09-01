@@ -12,6 +12,9 @@ image:
   repository: vera
   tag: "0.1.0"
   pullPolicy: IfNotPresent
+  # Numeric UID of the non-root 'vera' user baked into the image (USER vera). kubelet needs
+  # the number to enforce runAsNonRoot; keep it in sync with the Dockerfile.
+  runAsUser: 999
 
 # local-dev: MCP uses one unauthenticated local principal and the API auth gate is off.
 # Set environment to prod, api.authRequired true, and mcp.jwtSecret for a real deployment.

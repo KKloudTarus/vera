@@ -36,6 +36,13 @@ postgresql+asyncpg://{{ .Values.postgres.user }}:{{ .Values.postgres.password }}
 {{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}
 {{- end -}}
 
+{{/* App pods run as the image's non-root vera user. kubelet needs the numeric UID to
+     confirm non-root, since the image's USER is a name. */}}
+{{- define "vera.podSecurityContext" -}}
+runAsNonRoot: true
+runAsUser: {{ .Values.image.runAsUser }}
+{{- end -}}
+
 {{/* App containers read all VERA_* from the ConfigMap and Secret. */}}
 {{- define "vera.envFrom" -}}
 - configMapRef:

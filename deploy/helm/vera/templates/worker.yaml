@@ -19,8 +19,7 @@ spec:
         prometheus.io/port: "9100"
         prometheus.io/path: "/metrics"
     spec:
-      securityContext:
-        runAsNonRoot: true
+      securityContext: {{- include "vera.podSecurityContext" . | nindent 8 }}
       initContainers: {{- include "vera.waitForPostgres" . | nindent 8 }}
       containers:
         - name: worker
