@@ -1557,6 +1557,8 @@ async def _search_mcp(
     project: str | None,
     as_of: datetime | None = None,
     known_as_of: datetime | None = None,
+    persist: bool = False,
+    token_budget: int = 2000,
 ) -> dict[str, Any]:
     arguments: dict[str, Any] = {"query": query, "limit": limit}
     if project is not None:
@@ -1564,11 +1566,17 @@ async def _search_mcp(
     if as_of is not None:
         arguments["as_of"] = _format_time(as_of)
     if known_as_of is not None:
+        if persist:
+            raise AdapterBlocked("persisted MCP context does not support known_as_of")
         arguments["known_as_of"] = _format_time(known_as_of)
+    tool_name = "knowledge_search"
+    if persist:
+        tool_name = "knowledge_get_context"
+        arguments.update({"persist": True, "token_budget": token_budget})
     payload, latency_ms = await _call_mcp_tool(
         settings,
         principal_id=principal_id,
-        name="knowledge_search",
+        name=tool_name,
         arguments=arguments,
     )
     facts, flattened = _normalize_product_search(payload)
@@ -1585,6 +1593,11 @@ async def _search_mcp(
     for key in ("trace_id", "request_id", "conflicts", "freshness_warnings", "omitted"):
         if key in payload:
             result[key] = payload[key]
+    if persist:
+        pack_id = payload.get("pack_id")
+        if not isinstance(pack_id, str) or not pack_id:
+            raise AdapterFailed("persisted MCP context omitted pack_id")
+        result["context_pack_id"] = pack_id
     return result
 
 
@@ -3100,11 +3113,14 @@ async def _handle_search(
     principal = _principal(current, alias)
     attempted = inputs.get("attempted_scope")
     project = str(principal["group_id"])
+    attribution_repetitions = int(
+        _CASES[str(request["case_id"])]["fixture"].get("train_feedback_repetitions", 1)
+    )
     if isinstance(attempted, str):
         attempted_principal = _principal(current, attempted)
         project = str(attempted_principal["group_id"])
 
-    async def run_one(query: str) -> tuple[int, dict[str, Any]]:
+    async def run_one(query: str, attribution_index: int = 0) -> tuple[int, dict[str, Any]]:
         if action == "search.http":
             return await _search_http(
                 api_key=str(principal["api_key"]),
@@ -3122,6 +3138,8 @@ async def _handle_search(
             project=project,
             as_of=_parse_time(inputs.get("as_of")),
             known_as_of=_parse_time(inputs.get("known_as_of")),
+            persist=attribution_repetitions > 1,
+            token_budget=2000 + attribution_index,
         )
         return 200, result
 
@@ -3141,31 +3159,34 @@ async def _handle_search(
                 return _Outcome(
                     status="BLOCKED", message=f"query reference {item!r} was not seeded"
                 )
-            status, result = await run_one(str(query_item.get("text", "")))
-            if not 200 <= status < 300:
-                return _Outcome(
-                    status="FAIL",
-                    message=f"{action} returned status {status} for query {index}",
-                    boundaries=("api" if action == "search.http" else "mcp",),
-                )
             query_id = str(query_item.get("query_id", index))
-            facts = [
-                cast(dict[str, Any], value)
-                for value in result["facts"]
-                if isinstance(value, dict) and isinstance(value.get("id"), str)
-            ]
-            result_ids = [str(value["id"]) for value in facts]
-            ranked[query_id] = [
-                _fixture_fact_id(value, current) or str(value["id"]) for value in facts
-            ]
-            events.append(
-                {
+            for attribution_index in range(attribution_repetitions):
+                status, result = await run_one(str(query_item.get("text", "")), attribution_index)
+                if not 200 <= status < 300:
+                    return _Outcome(
+                        status="FAIL",
+                        message=f"{action} returned status {status} for query {index}",
+                        boundaries=("api" if action == "search.http" else "mcp",),
+                    )
+                facts = [
+                    cast(dict[str, Any], value)
+                    for value in result["facts"]
+                    if isinstance(value, dict) and isinstance(value.get("id"), str)
+                ]
+                result_ids = [str(value["id"]) for value in facts]
+                ranked[query_id] = [
+                    _fixture_fact_id(value, current) or str(value["id"]) for value in facts
+                ]
+                event: dict[str, Any] = {
                     "query_id": query_id,
                     "result_ids": result_ids,
                     "results": facts,
                 }
-            )
-            latencies.append(float(result["latency_ms"]))
+                context_pack_id = result.get("context_pack_id")
+                if isinstance(context_pack_id, str):
+                    event["context_pack_id"] = context_pack_id
+                events.append(event)
+                latencies.append(float(result["latency_ms"]))
         return _Outcome(
             observations={
                 "ranked_results": ranked,
@@ -3274,9 +3295,6 @@ async def _feedback_submit(
     }
     queries = _labeled_queries(str(request["case_id"]))
     principal = _principal(current, "default")
-    repetitions = int(
-        _CASES[str(request["case_id"])]["fixture"].get("train_feedback_repetitions", 1)
-    )
     submitted: list[dict[str, Any]] = []
     joined = 0
     ambiguous = 0
@@ -3293,7 +3311,8 @@ async def _feedback_submit(
             continue
         relevance = cast(dict[str, Any], query["relevance"])
         results = event.get("results")
-        if not isinstance(results, list):
+        context_pack_id = event.get("context_pack_id")
+        if not isinstance(results, list) or not isinstance(context_pack_id, str):
             ambiguous += 1
             continue
         for result in results:
@@ -3305,26 +3324,18 @@ async def _feedback_submit(
                 ambiguous += 1
                 continue
             signal = "up" if float(relevance.get(fact_id, 0)) > 0 else "down"
-            raw_signals = result.get("signals")
-            signals = {
-                str(key): float(value)
-                for key, value in cast(dict[str, Any], raw_signals or {}).items()
-                if isinstance(value, (int, float)) and not isinstance(value, bool)
-            }
-            for _ in range(repetitions):
-                _, response = await _api_json(
-                    "POST",
-                    "/v2/knowledge/feedback",
-                    api_key=str(principal["api_key"]),
-                    body={
-                        "result_ref": str(result["id"]),
-                        "signal": signal,
-                        "query": str(query.get("text", "")),
-                        "signals": signals,
-                    },
-                    expected={200},
-                )
-                submitted.append(response)
+            _, response = await _api_json(
+                "POST",
+                "/v2/knowledge/feedback",
+                api_key=str(principal["api_key"]),
+                body={
+                    "context_pack_id": context_pack_id,
+                    "result_ref": str(result["id"]),
+                    "signal": signal,
+                },
+                expected={200},
+            )
+            submitted.append(response)
             joined += 1
     rate = joined / expected if expected else 0.0
     async with container.sessionmaker() as session:

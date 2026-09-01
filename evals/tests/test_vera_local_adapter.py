@@ -863,6 +863,7 @@ def test_labeled_search_joins_product_fact_keys_to_fixture_ids(
         adapter._handle_search(
             SimpleNamespace(settings=None),  # type: ignore[arg-type]
             {
+                "case_id": "E2E-001",
                 "action": "search.http",
                 "inputs": {
                     "queries_ref": [{"query_id": "q-owner", "text": "Who owns Payment API?"}],
@@ -875,6 +876,75 @@ def test_labeled_search_joins_product_fact_keys_to_fixture_ids(
 
     assert outcome.observations["ranked_results"] == {"q-owner": ["f-payment-owner"]}
     assert outcome.observations["retrieval"]["events"][0]["result_ids"] == ["product-fact-key"]
+
+
+def test_feedback_search_persists_distinct_attribution_packs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[bool, int]] = []
+
+    async def search(_settings: Any, **kwargs: Any) -> dict[str, Any]:
+        persist = bool(kwargs["persist"])
+        token_budget = int(kwargs["token_budget"])
+        calls.append((persist, token_budget))
+        return {
+            "facts": [
+                {
+                    "id": "product-fact-key",
+                    "citation": {
+                        "structured_record": {
+                            "subject": "Platform Team",
+                            "predicate": "OWNS",
+                            "object": "Payment API",
+                        }
+                    },
+                }
+            ],
+            "context_pack_id": f"pack-{token_budget}",
+            "latency_ms": 1.0,
+        }
+
+    monkeypatch.setattr(adapter, "_search_mcp", search)
+    current: dict[str, Any] = {
+        "principals": {
+            "default": {
+                "api_key": "case-key",
+                "group_id": "p:case",
+                "principal_id": "00000000-0000-0000-0000-000000000123",
+            }
+        },
+        "fixture_facts": [
+            {
+                "fact_id": "f-payment-owner",
+                "triple": {
+                    "subject": "Platform Team",
+                    "predicate": "OWNS",
+                    "object": "Payment API",
+                },
+            }
+        ],
+        "queries": [],
+    }
+
+    outcome = asyncio.run(
+        adapter._handle_search(
+            SimpleNamespace(settings=None),  # type: ignore[arg-type]
+            {
+                "case_id": "LEARN-001",
+                "action": "search.mcp",
+                "inputs": {
+                    "queries_ref": [{"query_id": "q-owner-en-1", "text": "Who owns Payment API?"}],
+                    "limit": 5,
+                },
+            },
+            current,
+        )
+    )
+
+    assert calls == [(True, 2000 + index) for index in range(5)]
+    assert [event["context_pack_id"] for event in outcome.observations["retrieval"]["events"]] == [
+        f"pack-{2000 + index}" for index in range(5)
+    ]
 
 
 def test_visibility_poll_waits_for_the_ingested_artifact(
@@ -950,6 +1020,7 @@ def test_mcp_search_uses_streamable_http_sdk_and_actual_tool_result(
             return SimpleNamespace(
                 is_error=False,
                 structured_content={
+                    "pack_id": "00000000-0000-0000-0000-000000000456",
                     "results": [
                         {
                             "kind": "fact",
@@ -957,7 +1028,7 @@ def test_mcp_search_uses_streamable_http_sdk_and_actual_tool_result(
                             "text": "Platform Team OWNS Payment API",
                             "citation": {"evidence_id": "evidence-1"},
                         }
-                    ]
+                    ],
                 },
                 content=[],
             )
@@ -985,6 +1056,28 @@ def test_mcp_search_uses_streamable_http_sdk_and_actual_tool_result(
     assert seen["arguments"] == {"query": "owner", "limit": 5, "project": "p:case"}
     assert result["facts"][0]["id"] == "fact-key-1"
     assert "trace_id" not in result
+
+    persisted = asyncio.run(
+        adapter._search_mcp(
+            _settings(),
+            principal_id="00000000-0000-0000-0000-000000000123",
+            query="owner",
+            limit=5,
+            project="p:case",
+            persist=True,
+            token_budget=2004,
+        )
+    )
+
+    assert seen["tool"] == "knowledge_get_context"
+    assert seen["arguments"] == {
+        "query": "owner",
+        "limit": 5,
+        "project": "p:case",
+        "persist": True,
+        "token_budget": 2004,
+    }
+    assert persisted["context_pack_id"] == "00000000-0000-0000-0000-000000000456"
 
 
 def test_mcp_token_uses_the_frozen_runtime_secret_without_a_duplicate_env(
@@ -1978,9 +2071,14 @@ def test_feedback_joins_blinded_queries_to_every_returned_fixture_fact(
                 "events": [
                     {
                         "query_id": "q-owner-en-1",
+                        "context_pack_id": "00000000-0000-0000-0000-000000000789",
                         "results": [owner_result, runtime_result],
                     },
-                    {"query_id": "q-negative-salary", "results": []},
+                    {
+                        "query_id": "q-negative-salary",
+                        "context_pack_id": "00000000-0000-0000-0000-000000000790",
+                        "results": [],
+                    },
                 ]
             }
         },
@@ -2045,10 +2143,18 @@ def test_feedback_joins_blinded_queries_to_every_returned_fixture_fact(
         "rate": 1.0,
         "ambiguity_count": 0,
     }
-    assert len(submitted) == 10
-    assert [body["signal"] for body in submitted] == ["up"] * 5 + ["down"] * 5
-    assert submitted[0]["signals"] == {"relevance": 1.0, "authority": 1.0}
-    assert submitted[-1]["result_ref"] == "runtime-result"
+    assert submitted == [
+        {
+            "context_pack_id": "00000000-0000-0000-0000-000000000789",
+            "result_ref": "owner-result",
+            "signal": "up",
+        },
+        {
+            "context_pack_id": "00000000-0000-0000-0000-000000000789",
+            "result_ref": "runtime-result",
+            "signal": "down",
+        },
+    ]
 
 
 def test_load_search_validates_matrix_and_uses_only_boundary_samples(
