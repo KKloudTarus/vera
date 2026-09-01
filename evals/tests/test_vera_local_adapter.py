@@ -320,6 +320,63 @@ def test_production_actions_dispatch_to_truthful_boundaries(
         assert outcome.observations == {"boundary": helper_name}
 
 
+def test_production_retention_drill_persists_frozen_context_pack(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class StopAfterContext(Exception):
+        pass
+
+    facts = iter(
+        [
+            {"principal": {"api_key": "key", "group_id": "group"}},
+            {"fact": {}},
+            {"fact": {}, "episode_source_id": "deleted-source"},
+            {"fact": {}, "episode_source_id": "held-source"},
+        ]
+    )
+    context_bodies: list[dict[str, Any]] = []
+
+    async def production_fact(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        return next(facts)
+
+    async def api_json(_method: str, path: str, **kwargs: Any) -> tuple[int, dict[str, Any]]:
+        if path == "/v2/knowledge/snapshots":
+            return 200, {"snapshot_id": "snapshot"}
+        context_bodies.append(kwargs["body"])
+        raise StopAfterContext
+
+    monkeypatch.setattr(adapter, "_production_fact", production_fact)
+    monkeypatch.setattr(adapter, "_api_json", api_json)
+
+    with pytest.raises(StopAfterContext):
+        asyncio.run(
+            adapter._production_retention_drill(
+                SimpleNamespace(),  # type: ignore[arg-type]
+                {
+                    "inputs": {
+                        "matrix_ref": {
+                            "clock_advance_seconds": 1,
+                            "states": ["active", "expired", "deleted", "legal_hold"],
+                            "stores": [
+                                "postgres",
+                                "object_store",
+                                "graph",
+                                "valkey",
+                                "snapshot",
+                                "context_pack",
+                                "audit",
+                            ],
+                        },
+                        "targets_ref": {},
+                    }
+                },
+                {},
+            )
+        )
+
+    assert context_bodies[0]["persist"] is True
+
+
 def test_production_benchmark_uses_uniquely_answerable_queries(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

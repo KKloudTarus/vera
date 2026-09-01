@@ -5569,6 +5569,7 @@ async def _production_retention_drill(
             "project": group_id,
             "limit": 10,
             "token_budget": 2000,
+            "persist": True,
         },
         expected={200},
     )
