@@ -163,6 +163,18 @@ confirms. The judge resolves synonyms, abbreviations, and cross-lingual names, a
 the larger model, which is stable on the sibling-versus-same distinction where the small
 model occasionally makes a corrupting false merge.
 
+## Multilingual knowledge
+
+Non-English content (for example Vietnamese) is a first-class case. Full-text search uses the
+PostgreSQL `simple` configuration rather than `english`, so there is no English stemming or
+stopword filtering and diacritics are preserved: tokens in any language index and match by
+their exact form. Entity alias normalization is Unicode-aware and keeps accents (they carry
+meaning), with `alias_norm` written by the application from `normalize_name` rather than a
+`[^a-zA-Z0-9]` database expression, so exact and fuzzy matching work for non-ASCII names.
+Chunking and the graph full-text tokenizer keep Unicode, so a non-English query reaches the
+lexical search half. Cross-lingual *semantic* matching (query one language, find a fact in
+another) additionally needs a multilingual embedder (OpenAI or Voyage).
+
 ## Temporal model
 
 Facts carry valid-time boundaries. A search defaults to "as of now", hiding superseded and

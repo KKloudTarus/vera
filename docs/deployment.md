@@ -6,8 +6,12 @@ rebuildable projection; Valkey is cache and rate limiter.
 
 ## The image
 
+The release workflow publishes the image to GHCR as a public package, so most deployments
+just pull it:
+
 ```bash
-docker build -t vera:local .
+docker pull ghcr.io/kkloudtarus/vera:latest   # or a version tag, e.g. :0.2.0
+docker build -t vera:local .                  # or build locally
 ```
 
 Multi-stage, non-root, runtime dependencies only. The base is pinned to
@@ -61,6 +65,35 @@ kubectl apply -f deploy/k8s/calibrate-cronjob.yaml
 Config and secrets are injected via `envFrom` (the ConfigMap and Secret). The worker scales
 on pending queue depth with KEDA; delete the `ScaledObject` and add a CPU HPA if KEDA is not
 installed. Per-group serialization is enforced in-process, so worker replicas are safe.
+
+The `deploy/k8s/` manifests are the app tier only and assume PostgreSQL, the graph, Valkey,
+and the object store are provided externally (managed services or your own).
+
+## Helm (full stack in one namespace)
+
+For a single-cluster install of the whole stack, including the datastores, use the chart in
+`deploy/helm/vera` (see its README for the full walkthrough). It installs the API, MCP, and
+worker plus PostgreSQL, a graph backend (`neo4j` by default, `falkordb` with one flag),
+Valkey, and MinIO, with a post-install migrate hook, a MinIO bucket bootstrap, and
+health-gated pods. It pulls the published image `ghcr.io/kkloudtarus/vera`, so no local build
+is needed.
+
+```bash
+helm install vera deploy/helm/vera -n vera --create-namespace --set graph.backend=falkordb
+```
+
+The defaults boot with no external credentials (a deterministic embedder and an unauthenticated
+local MCP principal). For real use, set an embedder key and turn on auth:
+
+```bash
+helm upgrade vera deploy/helm/vera -n vera \
+  --set memory.embedder=openai --set memory.openaiApiKey=sk-... \
+  --set environment=prod --set api.authRequired=true --set mcp.jwtSecret=<secret>
+```
+
+Two services are meant to be exposed through an ingress: `vera-api` (:8000) and `vera-mcp`
+(:8080). The MCP public host must match `mcp.jwtSecret`'s audience and the `mcp.allowedHosts`
+list. The datastores stay cluster-internal.
 
 ## Configuration
 

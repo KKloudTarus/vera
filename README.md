@@ -20,7 +20,9 @@ carries where it came from, how trusted it is, when it was true, and who may see
 The documentation site is at **https://kkloudtarus.github.io/vera/**. Source lives in
 [`docs/`](docs/index.md): [getting started](docs/getting-started.md),
 [loading knowledge](docs/loading-knowledge.md) (repositories, Markdown, Confluence),
-[using the API](docs/usage.md), [connecting an AI agent over MCP](docs/mcp.md),
+[using the API](docs/usage.md), [connecting an AI agent over MCP](docs/mcp.md), the
+[agent integration GUIDE](docs/integrations/GUIDE.md) with tested Claude Code, Cursor, and
+OpenCode [adapters](docs/integrations/adapters/claude-code.md),
 [deployment](docs/deployment.md), and [architecture and algorithms](docs/architecture.md).
 
 ## Contents
@@ -31,6 +33,7 @@ The documentation site is at **https://kkloudtarus.github.io/vera/**. Source liv
 - [Scoring methodology](#scoring-methodology-how-data-is-graded)
 - [Retrieval and ranking](#retrieval-and-ranking)
 - [Embeddings and entity resolution](#embeddings-and-entity-resolution)
+- [Multilingual knowledge](#multilingual-knowledge)
 - [Temporal model](#temporal-model-bi-temporal-truth)
 - [Retraction and erasure](#retraction-and-erasure)
 - [Feedback calibration](#feedback-calibration)
@@ -234,6 +237,27 @@ Each resolution is counted by `vera_entity_resolution_total` (created / linked b
 linked by judge), so precision can be watched on real data. Use `dedup_eval` to measure a
 threshold sweep and the judge's agreement on a labeled set before trusting it.
 
+## Multilingual knowledge
+
+VERA ingests and retrieves content in many languages (for example Vietnamese) alongside
+English, so a mixed-language corpus works without per-language configuration.
+
+- **Language-agnostic full-text search.** The `chunks` and `facts` full-text vectors and every
+  query use the PostgreSQL `simple` text-search configuration, not `english`. There is no
+  English stemming or stopword filtering, and diacritics are preserved, so tokens in any
+  language index and match by their exact form. (Vector retrieval still covers morphological
+  and cross-lingual matches when a semantic embedder is configured.)
+- **Diacritic-preserving entity resolution.** Alias normalization is Unicode-aware and keeps
+  accents, which carry meaning (`má`, `ma`, and `mà` are different words). `alias_norm` is
+  written by the application from `normalize_name`, so exact and fuzzy alias matching work for
+  non-ASCII names (`Đội nền tảng`, not the old mangled `i n n t ng`).
+- **Multilingual tokenization.** Chunking splits sentences before an accented uppercase start,
+  and the graph full-text tokenizer keeps Unicode letters, so a non-English query reaches the
+  lexical search half.
+- **Cross-lingual meaning** (query one language, find a fact in another) needs a multilingual
+  embedder: OpenAI `text-embedding-3-small` or Voyage `voyage-3.5`. The default deterministic
+  embedder is a non-semantic hash for offline runs.
+
 ## Temporal model
 
 Facts carry a valid-time window (`valid_from`, `valid_to`). A search defaults to "as of now",
@@ -329,7 +353,16 @@ exposes all canonical tools; `compatibility` additionally exposes the eight lega
 aliases. Visibility is separate from authorization: every call resolves caller scopes
 server-side and no tool performs raw graph mutation or publishes shared truth. When JWT auth
 is unset in the `local` environment, the server provisions a stable `Local MCP` principal
-with only its personal scope; non-local clients should use JWT.
+with only its personal scope; non-local clients should use JWT. Each tool carries a
+behavioral annotation and an authorization class (a read-only credential cannot propose, give
+feedback, or create a snapshot), enforces REST-equivalent input bounds, is rate-limited by a
+per-principal quota, and returns stable structured errors. The Streamable HTTP transport adds
+Host/Origin validation and a private metrics listener.
+
+**Agent integration.** The normative [integration GUIDE](docs/integrations/GUIDE.md) tells a
+coding agent how to detect its runtime, plan and apply the smallest config change, authenticate,
+and verify one bounded read, with tested adapters for Claude Code, Cursor, and OpenCode and a
+portable VERA skill. Retrieved content is untrusted reference data, never agent instructions.
 
 **Multi-hop reasoning** (`memory_explore` / `/memory/explore`): from a named entity, return
 the facts on paths within N hops (bounded), with provenance, to trace how entities connect
@@ -351,7 +384,14 @@ python -m vera.entrypoints.retrieval_eval <golden.json>    # score retrieval qua
 Disaster recovery: Postgres and S3 are authoritative and backed up; Neo4j is rebuilt with
 `reprocess`, which runs an automated post-rebuild check. See `docs/dr-runbook.md`.
 Kubernetes manifests (API, MCP, worker with KEDA queue-depth scaling, and the calibration
-CronJob) are in `deploy/k8s/`.
+CronJob) are in `deploy/k8s/`. For a single-cluster install of the whole stack (the three
+processes plus PostgreSQL, a graph backend, Valkey, and MinIO), the Helm chart in
+[`deploy/helm/vera`](deploy/helm/vera/README.md) runs a migrate hook and health-gated pods;
+it pulls the published image `ghcr.io/kkloudtarus/vera`, so no local build is needed:
+
+```bash
+helm install vera deploy/helm/vera -n vera --create-namespace --set graph.backend=falkordb
+```
 
 ## Getting started
 
@@ -369,10 +409,12 @@ make run-worker       # ingestion worker
 
 ### Container images
 
-One image runs all three processes; they differ only by the command.
+One image runs all three processes; they differ only by the command. Pull the published
+image, or build it locally.
 
 ```bash
-docker build -t vera:local .                 # multi-stage, non-root, runtime deps only
+docker pull ghcr.io/kkloudtarus/vera:latest  # published to GHCR by the release workflow
+docker build -t vera:local .                 # or build: multi-stage, non-root, runtime deps only
 docker compose --profile app up --build      # migrate, then api (:8000), worker, mcp (:8080)
 ```
 
