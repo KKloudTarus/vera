@@ -24,7 +24,11 @@ data:
   VERA_RESILIENCE__VALKEY_URL: "redis://valkey:6379/0"
   VERA_OBSERVABILITY__OTLP_ENDPOINT: "http://otel-collector:4317"
   VERA_OBSERVABILITY__WORKER_METRICS_PORT: "9100"
+  VERA_OBSERVABILITY__MCP_METRICS_HOST: "0.0.0.0"
+  VERA_OBSERVABILITY__MCP_METRICS_PORT: "9101"
   VERA_API__AUTH_REQUIRED: "true"
+  VERA_MCP__ALLOWED_HOSTS: '["vera-mcp","vera-mcp:*","vera-mcp.vera.svc.cluster.local","vera-mcp.vera.svc.cluster.local:*","mcp.vera.local","mcp.vera.local:*"]'
+  VERA_MCP__ALLOWED_ORIGINS: '["https://mcp.vera.local"]'
 ---
 # Fill these in before applying (or use an external secret manager / sealed-secrets).
 apiVersion: v1

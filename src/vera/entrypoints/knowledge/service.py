@@ -53,7 +53,7 @@ from vera.application.snapshot import (
     serialize_candidate,
 )
 from vera.bootstrap import Container
-from vera.config.settings import active_embedding
+from vera.config.settings import McpToolProfile, active_embedding
 from vera.domain.identity.models import Role, role_at_least
 from vera.domain.identity.scopes import ScopeKind, scope_kind
 from vera.domain.knowledge.fabric import (
@@ -306,6 +306,7 @@ class KnowledgeService:
             "feedback",
             "snapshot",
         ),
+        tool_profile: McpToolProfile = "coding",
     ) -> JsonDict:
         """Describe the caller's safe operating context without returning knowledge content."""
         scope = await self._resolve(principal_id)
@@ -371,6 +372,11 @@ class KnowledgeService:
             },
             "auth_profile": auth_profile,
             "capability_classes": list(capability_classes),
+            "tool_profile": {
+                "active": tool_profile,
+                "advanced_capabilities": tool_profile in {"advanced", "compatibility"},
+                "legacy_aliases": tool_profile == "compatibility",
+            },
             "shared_context_available": bool(projects),
             "projects": projects,
             "project_resolution": {
@@ -389,6 +395,14 @@ class KnowledgeService:
                 "personal_proposals": "personal-proposal" in granted_classes,
                 "personal_feedback": "feedback" in granted_classes,
                 "snapshots": "snapshot" in granted_classes,
+                "save_mode_default": "suggest",
+                "save_modes": [
+                    "off",
+                    "suggest",
+                    *(["auto-propose"] if "personal-proposal" in granted_classes else []),
+                ],
+                "proposal_approval_enforced_by": "runtime",
+                "auto_propose_requires_user_opt_in": True,
                 "shared_writes": "reviewed-only",
                 "auto_publish": False,
             },

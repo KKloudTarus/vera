@@ -85,3 +85,4 @@ nav:
       - "ADR-0004 Append-only ledger": adr/0004-append-only-knowledge-event-ledger.md
       - "ADR-0005 Chunking in VERA": adr/0005-structure-aware-chunking-in-vera.md
       - "ADR-0006 Incremental migration": adr/0006-incremental-backward-compatible-migration.md
+      - "ADR-0007 Agent integration records": adr/0007-agent-integration-operational-records.md

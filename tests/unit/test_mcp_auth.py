@@ -55,6 +55,21 @@ async def test_valid_token_yields_access_token() -> None:
 
 
 @pytest.mark.asyncio
+async def test_token_without_expiry_is_rejected() -> None:
+    token = jwt.encode(
+        {
+            "sub": str(_PRINCIPAL_ID),
+            "iss": _ISS,
+            "aud": _AUD,
+            "scope": "memory:read",
+        },
+        _SECRET,
+        algorithm="HS256",
+    )
+    assert await _verifier().verify_token(token) is None
+
+
+@pytest.mark.asyncio
 async def test_non_uuid_subject_is_rejected() -> None:
     assert await _verifier().verify_token(_token(sub="alice")) is None
 

@@ -322,12 +322,14 @@ golden.json`.
 Writing to memory goes through connectors and curation, not a raw ingest endpoint, so trust
 and provenance are never bypassed.
 
-**MCP server** (`vera-mcp`): the safe, minimal surface AI clients connect to. Tools:
-`memory_search`, `memory_get_context`, `memory_explore`, `memory_explain`,
-`memory_get_source`, `memory_recent_changes`, `memory_propose`, `memory_feedback`. Every
-tool resolves the caller's scopes server-side; tools expose only reads and proposals, never
-raw graph mutation. When JWT auth is unset in the `local` environment, the server provisions
-a stable `Local MCP` principal with only its personal scope; non-local clients should use JWT.
+**MCP server** (`vera-mcp`): the safe, minimal surface AI clients connect to. The default
+`coding` profile exposes ten canonical `knowledge_*` tools for bootstrap, bounded retrieval,
+evidence, feedback, and the personal proposal lifecycle. The explicit `advanced` profile
+exposes all canonical tools; `compatibility` additionally exposes the eight legacy `memory_*`
+aliases. Visibility is separate from authorization: every call resolves caller scopes
+server-side and no tool performs raw graph mutation or publishes shared truth. When JWT auth
+is unset in the `local` environment, the server provisions a stable `Local MCP` principal
+with only its personal scope; non-local clients should use JWT.
 
 **Multi-hop reasoning** (`memory_explore` / `/memory/explore`): from a named entity, return
 the facts on paths within N hops (bounded), with provenance, to trace how entities connect

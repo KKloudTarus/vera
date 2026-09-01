@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from typing import Any
 
 import pytest
@@ -20,6 +20,7 @@ from mcp.client.session import ClientSession
 from mcp.server.auth.provider import AccessToken
 from mcp.server.mcpserver import MCPServer
 from mcp.shared.exceptions import MCPError
+from prometheus_client import REGISTRY
 
 from vera.adapters.resilience.quota import InProcessQuota
 from vera.application.snapshot import ContextPackExpiredError
@@ -31,6 +32,10 @@ from vera.entrypoints.mcp.policy import ToolClass
 from vera.shared.errors import InfrastructureError
 
 pytestmark = pytest.mark.asyncio
+
+
+def _metric(name: str, labels: dict[str, str]) -> float:
+    return REGISTRY.get_sample_value(name, labels) or 0.0
 
 
 def _server(settings: Settings) -> MCPServer:
@@ -46,6 +51,10 @@ def _server(settings: Settings) -> MCPServer:
     async def boom(query: str) -> dict[str, Any]:
         # Stands in for an infrastructure failure surfacing from the service layer.
         raise InfrastructureError("postgres connection refused at 10.0.0.5:5432")
+
+    @guard.tool(ToolClass.READ)
+    async def explode(query: str) -> dict[str, Any]:
+        raise ValueError(f"unexpected value: {query}")
 
     @guard.tool(ToolClass.READ)
     async def invalid(query: str) -> dict[str, Any]:
@@ -84,20 +93,52 @@ async def test_annotations_reach_the_client() -> None:
 
 
 async def test_in_bounds_call_returns_data() -> None:
+    labels = {"tool": "probe", "result": "success"}
+    before = _metric("vera_mcp_tool_calls_total", labels)
     async with _client(get_settings()) as session:
         result = await session.call_tool("probe", {"query": "hello", "limit": 5})
         assert result.is_error is False
-        payload = json.loads(result.content[0].text)  # type: ignore[union-attr]
-        assert payload == {"echo": "hello", "limit": 5}
+    payload = json.loads(result.content[0].text)  # type: ignore[union-attr]
+    assert payload == {"echo": "hello", "limit": 5}
+    assert _metric("vera_mcp_tool_calls_total", labels) == before + 1
+
+
+async def test_tool_call_creates_a_bounded_trace_span(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, str] = {}
+
+    class CapturedSpan:
+        def set_attribute(self, key: str, value: str) -> None:
+            captured[key] = value
+
+    @contextmanager
+    def capture_span(name: str, **attributes: str) -> Any:
+        captured["name"] = name
+        captured.update(attributes)
+        yield CapturedSpan()
+
+    monkeypatch.setattr(guard_module, "span", capture_span)
+    async with _client(get_settings()) as session:
+        result = await session.call_tool("probe", {"query": "hello"})
+
+    assert result.is_error is False
+    assert captured == {
+        "name": "vera.mcp.tool",
+        "tool": "probe",
+        "tool_class": "read",
+        "vera.result": "success",
+    }
 
 
 async def test_out_of_bounds_call_is_a_structured_error() -> None:
+    labels = {"tool": "probe", "result": "error"}
+    before = _metric("vera_mcp_tool_calls_total", labels)
     async with _client(get_settings()) as session:
         with pytest.raises(MCPError) as exc:
             await session.call_tool("probe", {"query": "hello", "limit": 999})
     assert isinstance(exc.value.data, dict)
     assert exc.value.data["code"] == "invalid_input"
     assert exc.value.data["field"] == "limit"
+    assert _metric("vera_mcp_tool_calls_total", labels) == before + 1
 
 
 async def test_spent_quota_is_a_structured_error() -> None:
@@ -119,6 +160,52 @@ async def test_infrastructure_failure_is_a_redacted_internal_error() -> None:
     assert exc.value.data["code"] == "internal_error"
     # The connection string in the raw exception never reaches the client.
     assert "postgres" not in exc.value.message and "10.0.0.5" not in exc.value.message
+
+
+async def test_unexpected_failure_never_reaches_client_span_or_log(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sentinel = "PRIVATE_CALLER_INPUT_123"
+    span_exceptions: list[str] = []
+    logged: list[dict[str, str]] = []
+
+    class CapturedSpan:
+        def set_attribute(self, _key: str, _value: str) -> None:
+            pass
+
+    @contextmanager
+    def capture_span(_name: str, **_attributes: str) -> Any:
+        try:
+            yield CapturedSpan()
+        except Exception as exc:
+            span_exceptions.append(str(exc))
+            raise
+
+    class CapturedLog:
+        def error(self, event: str, **values: str) -> None:
+            logged.append({"event": event, **values})
+
+    monkeypatch.setattr(guard_module, "span", capture_span)
+    monkeypatch.setattr(guard_module, "log", CapturedLog())
+
+    async with _client(get_settings()) as session:
+        with pytest.raises(MCPError) as exc:
+            await session.call_tool("explode", {"query": sentinel})
+
+    exported = json.dumps(
+        {"client": str(exc.value), "span_exceptions": span_exceptions, "logged": logged}
+    )
+    assert sentinel not in exported
+    assert isinstance(exc.value.data, dict)
+    assert exc.value.data["code"] == "internal_error"
+    assert span_exceptions == []
+    assert logged == [
+        {
+            "event": "mcp_tool_unexpected_error",
+            "tool": "explode",
+            "exception_type": "ValueError",
+        }
+    ]
 
 
 async def test_service_validation_is_a_structured_input_error() -> None:

@@ -11,6 +11,10 @@ spec:
   template:
     metadata:
       labels: { app: vera-api }
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8000"
+        prometheus.io/path: "/metrics"
     spec:
       securityContext:
         runAsNonRoot: true

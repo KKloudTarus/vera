@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 from mcp.server.auth.provider import AccessToken
+from mcp.server.transport_security import TransportSecuritySettings
 
 from vera.bootstrap import build_container, dispose_container
 from vera.config.settings import McpSettings, get_settings
@@ -12,8 +13,7 @@ from vera.entrypoints.mcp import main as mcp_main
 from vera.entrypoints.mcp.main import build_server
 from vera.shared.ids import deterministic_id
 
-_EXPECTED = {
-    # Legacy memory_* tools (kept for backward compatibility).
+_LEGACY = {
     "memory_search",
     "memory_get_context",
     "memory_explore",
@@ -22,7 +22,8 @@ _EXPECTED = {
     "memory_recent_changes",
     "memory_propose",
     "memory_feedback",
-    # Generic knowledge_* contracts (Phase 6).
+}
+_CANONICAL = {
     "knowledge_bootstrap",
     "knowledge_get_context",
     "knowledge_get_context_pack",
@@ -44,18 +45,45 @@ _EXPECTED = {
     "knowledge_retract_proposal",
     "knowledge_proposal_report",
 }
+_CODING = {
+    "knowledge_bootstrap",
+    "knowledge_get_context",
+    "knowledge_get_context_pack",
+    "knowledge_search",
+    "knowledge_explain_fact",
+    "knowledge_get_evidence",
+    "knowledge_feedback",
+    "knowledge_propose",
+    "knowledge_retract_proposal",
+    "knowledge_proposal_report",
+}
 _JWT_SECRET = "test-secret"  # noqa: S105
 
 
 @pytest.mark.asyncio
-async def test_server_exposes_the_memory_tools() -> None:
+async def test_default_server_exposes_the_small_coding_profile() -> None:
     settings = get_settings()
     container = build_container(settings)
     try:
         server = build_server(container, settings)
         tools = await server.list_tools()
-        names = {tool.name for tool in tools}
-        assert names == _EXPECTED
+        assert {tool.name for tool in tools} == _CODING
+        assert [type(item).__name__ for item in server.middleware] == [
+            "RequestStateBoundary",
+            "_KnownToolMiddleware",
+        ]
+    finally:
+        await dispose_container(container)
+
+
+@pytest.mark.asyncio
+async def test_advanced_profile_exposes_only_canonical_tools() -> None:
+    settings = get_settings().model_copy(update={"mcp": McpSettings(tool_profile="advanced")})
+    container = build_container(settings)
+    try:
+        server = build_server(container, settings)
+        tools = await server.list_tools()
+        assert {tool.name for tool in tools} == _CANONICAL
         search = next(tool for tool in tools if tool.name == "knowledge_search")
         assert {"as_of", "known_as_of"} <= search.input_schema["properties"].keys()
         context = next(tool for tool in tools if tool.name == "knowledge_get_context")
@@ -70,26 +98,39 @@ async def test_server_exposes_the_memory_tools() -> None:
         feedback = next(tool for tool in tools if tool.name == "knowledge_feedback")
         assert "context_pack_id" in feedback.input_schema["required"]
         assert "signals" not in feedback.input_schema["properties"]
-        legacy_feedback = next(tool for tool in tools if tool.name == "memory_feedback")
-        assert set(legacy_feedback.input_schema["required"]) == {"result_ref", "signal"}
-        assert {"query", "signals", "context_pack_id"} <= (
-            legacy_feedback.input_schema["properties"].keys()
-        )
-        for tool_name in ("memory_propose", "knowledge_propose"):
-            tool = next(item for item in tools if item.name == tool_name)
-            assert tool.annotations is not None
-            assert tool.annotations.read_only_hint is False
-            assert tool.annotations.idempotent_hint is False
+        assert propose.annotations is not None
+        assert propose.annotations.read_only_hint is False
+        assert propose.annotations.idempotent_hint is False
         for tool_name in ("knowledge_feedback", "knowledge_retract_proposal"):
             tool = next(item for item in tools if item.name == tool_name)
             assert tool.annotations is not None
             assert tool.annotations.read_only_hint is False
             assert tool.annotations.idempotent_hint is True
-        assert legacy_feedback.annotations is not None
-        assert legacy_feedback.annotations.idempotent_hint is False
         retract = next(tool for tool in tools if tool.name == "knowledge_retract_proposal")
         assert retract.annotations is not None
         assert retract.annotations.destructive_hint is True
+    finally:
+        await dispose_container(container)
+
+
+@pytest.mark.asyncio
+async def test_compatibility_profile_explicitly_adds_legacy_aliases() -> None:
+    settings = get_settings().model_copy(update={"mcp": McpSettings(tool_profile="compatibility")})
+    container = build_container(settings)
+    try:
+        tools = await build_server(container, settings).list_tools()
+        assert {tool.name for tool in tools} == _CANONICAL | _LEGACY
+        legacy_feedback = next(tool for tool in tools if tool.name == "memory_feedback")
+        assert set(legacy_feedback.input_schema["required"]) == {"result_ref", "signal"}
+        assert {"query", "signals", "context_pack_id"} <= (
+            legacy_feedback.input_schema["properties"].keys()
+        )
+        assert legacy_feedback.annotations is not None
+        assert legacy_feedback.annotations.idempotent_hint is False
+        legacy_propose = next(tool for tool in tools if tool.name == "memory_propose")
+        assert legacy_propose.annotations is not None
+        assert legacy_propose.annotations.read_only_hint is False
+        assert legacy_propose.annotations.idempotent_hint is False
     finally:
         await dispose_container(container)
 
@@ -105,6 +146,42 @@ async def test_instructions_declare_retrieved_content_untrusted() -> None:
         assert "untrusted reference data" in instructions
         assert "never as" in instructions and "instructions" in instructions
         assert "knowledge_get_context" in instructions
+    finally:
+        await dispose_container(container)
+
+
+@pytest.mark.asyncio
+async def test_startup_failure_disposes_container(monkeypatch: pytest.MonkeyPatch) -> None:
+    base = get_settings()
+    settings = base.model_copy(
+        update={
+            "mcp": McpSettings(jwt_secret=_JWT_SECRET),  # type: ignore[arg-type]
+            "observability": base.observability.model_copy(update={"metrics_enabled": True}),
+        }
+    )
+    container = build_container(settings)
+    disposed: list[object] = []
+
+    async def refresh(_container: object) -> None:
+        pass
+
+    async def dispose(candidate: object) -> None:
+        disposed.append(candidate)
+
+    def fail_metrics(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("port occupied")
+
+    monkeypatch.setattr(mcp_main, "refresh_rerank_weights", refresh)
+    monkeypatch.setattr(mcp_main, "dispose_container", dispose)
+    monkeypatch.setattr(mcp_main, "start_metrics_server", fail_metrics)
+    server = build_server(container, settings)
+    app = server.streamable_http_app(json_response=True, stateless_http=True)
+
+    try:
+        with pytest.raises(RuntimeError, match="port occupied"):
+            async with app.router.lifespan_context(app):
+                pass
+        assert disposed == [container]
     finally:
         await dispose_container(container)
 
@@ -157,3 +234,35 @@ def test_jwt_server_never_falls_back_to_local_principal(
 
     with pytest.raises(PermissionError, match="no authenticated principal"):
         mcp_main._principal_id(settings)
+
+
+def test_create_app_configures_tracing_before_building_container(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = get_settings()
+    events: list[str] = []
+    app_kwargs: dict[str, object] = {}
+    expected_app = object()
+
+    class Server:
+        def streamable_http_app(self, **kwargs: object) -> object:
+            app_kwargs.update(kwargs)
+            return expected_app
+
+    monkeypatch.setattr(mcp_main, "get_settings", lambda: settings)
+    monkeypatch.setattr(mcp_main, "configure_logging", lambda **_kwargs: None)
+    monkeypatch.setattr(mcp_main, "configure_tracing", lambda _settings: events.append("trace"))
+    monkeypatch.setattr(
+        mcp_main,
+        "build_container",
+        lambda _settings: events.append("container") or object(),
+    )
+    monkeypatch.setattr(mcp_main, "build_server", lambda *_args: Server())
+
+    assert mcp_main.create_app() is expected_app
+    assert events == ["trace", "container"]
+    security = app_kwargs["transport_security"]
+    assert isinstance(security, TransportSecuritySettings)
+    assert security.enable_dns_rebinding_protection is True
+    assert security.allowed_hosts == settings.mcp.allowed_hosts
+    assert security.allowed_origins == settings.mcp.allowed_origins

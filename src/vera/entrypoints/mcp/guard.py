@@ -12,6 +12,7 @@ the advertised tool schema is unchanged.
 from __future__ import annotations
 
 import functools
+import time
 from collections.abc import Awaitable, Callable
 from typing import Any, TypeVar
 
@@ -31,10 +32,15 @@ from vera.entrypoints.knowledge.service import InputError
 from vera.entrypoints.knowledge.service import ScopeError as KnowledgeScopeError
 from vera.entrypoints.mcp import errors, policy
 from vera.entrypoints.mcp.policy import ToolClass
+from vera.entrypoints.mcp.profiles import tool_is_visible
 from vera.entrypoints.mcp.service import ScopeError as McpScopeError
+from vera.observability import get_logger
+from vera.observability.metrics import record_mcp_tool
+from vera.observability.tracing import span
 from vera.shared.errors import VeraError
 
 _Tool = TypeVar("_Tool", bound=Callable[..., Awaitable[Any]])
+log = get_logger(__name__)
 
 
 def _map_scope_error(exc: Exception) -> MCPError:
@@ -78,29 +84,60 @@ class Guard:
 
         def deco(fn: _Tool) -> _Tool:
             name = fn.__name__
+            if not tool_is_visible(self._settings.mcp.tool_profile, name):
+                return fn
 
             @self._server.tool(annotations=annotations)
             @functools.wraps(fn)
             async def wrapper(**kwargs: Any) -> Any:
-                await self._enforce(name, tool_class, kwargs)
-                try:
-                    return await fn(**kwargs)
-                except MCPError:
-                    raise
-                except InputError as exc:
-                    raise errors.invalid_input(exc.field, exc.reason) from exc
-                except ContextPackExpiredError as exc:
-                    raise errors.expired_context_pack() from exc
-                except ContextPackQuotaExceededError as exc:
-                    raise errors.quota_exceeded("context_storage") from exc
-                except (SnapshotNotFoundError, SnapshotNotReproducibleError) as exc:
-                    raise errors.invalid_input("snapshot_id", "is unavailable") from exc
-                except (KnowledgeScopeError, McpScopeError) as exc:
-                    raise _map_scope_error(exc) from exc
-                except VeraError as exc:
-                    # An infrastructure failure (DB, graph, object store). Its message can
-                    # carry internal detail, so give the client a stable, redacted code.
-                    raise errors.internal() from exc
+                failure: MCPError | None = None
+                result: Any = None
+                with span("vera.mcp.tool", tool=name, tool_class=tool_class.value) as tool_span:
+                    started = time.perf_counter()
+                    try:
+                        await self._enforce(name, tool_class, kwargs)
+                        result = await fn(**kwargs)
+                    except MCPError as exc:
+                        failure = exc
+                    except InputError as exc:
+                        failure = errors.invalid_input(exc.field, exc.reason)
+                    except ContextPackExpiredError:
+                        failure = errors.expired_context_pack()
+                    except ContextPackQuotaExceededError:
+                        failure = errors.quota_exceeded("context_storage")
+                    except (SnapshotNotFoundError, SnapshotNotReproducibleError):
+                        failure = errors.invalid_input("snapshot_id", "is unavailable")
+                    except (KnowledgeScopeError, McpScopeError) as exc:
+                        failure = _map_scope_error(exc)
+                    except VeraError:
+                        # Infrastructure messages can carry connection or tenant details.
+                        failure = errors.internal()
+                    except Exception as exc:
+                        log.error(
+                            "mcp_tool_unexpected_error",
+                            tool=name,
+                            exception_type=type(exc).__name__,
+                        )
+                        failure = errors.internal()
+
+                    if failure is not None:
+                        tool_span.set_attribute("vera.result", "error")
+                        record_mcp_tool(
+                            tool=name,
+                            result="error",
+                            duration_s=time.perf_counter() - started,
+                        )
+                    else:
+                        tool_span.set_attribute("vera.result", "success")
+                        record_mcp_tool(
+                            tool=name,
+                            result="success",
+                            duration_s=time.perf_counter() - started,
+                        )
+
+                if failure is not None:
+                    raise failure from None
+                return result
 
             return wrapper  # type: ignore[return-value]  # wraps preserves fn's signature
 

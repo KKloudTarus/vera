@@ -30,7 +30,7 @@ dependencies = [
     # --- API + MCP surface ---
     "fastapi>=0.115",
     "uvicorn[standard]>=0.32",
-    "mcp>=2.1",
+    "mcp==2.1.1",
     # --- domain / validation / config ---
     "pydantic>=2.9",
     "pydantic-settings>=2.6",

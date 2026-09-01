@@ -2,11 +2,21 @@
 
 from __future__ import annotations
 
+import json
+
+import httpx
+import pytest
+from mcp.server.mcpserver import MCPServer
 from opentelemetry import trace
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
+from vera.adapters.resilience.quota import InProcessQuota
+from vera.config.settings import get_settings
+from vera.entrypoints.mcp import main as mcp_main
+from vera.entrypoints.mcp.guard import Guard
+from vera.entrypoints.mcp.policy import ToolClass
 from vera.observability import span
 from vera.observability.cost import (
     UsageContext,
@@ -102,3 +112,67 @@ def test_span_is_recorded_with_attributes() -> None:
         assert current is not None
     names = [s.name for s in _span_exporter.get_finished_spans()]
     assert "memory.rerank" in names
+
+
+@pytest.mark.asyncio
+async def test_mcp_telemetry_excludes_raw_tool_names_request_ids_and_arguments(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    sentinel = "PRIVATE_TELEMETRY_VALUE_123"
+    _span_exporter.clear()
+    settings = get_settings()
+    server: MCPServer = MCPServer("probe")
+    mcp_main._harden_sdk_middleware(server)
+    guard = Guard(server, settings, InProcessQuota())
+
+    @guard.tool(ToolClass.READ)
+    async def probe(query: str) -> dict[str, str]:
+        return {"query": query}
+
+    app = server.streamable_http_app(
+        json_response=True,
+        stateless_http=True,
+        transport_security=mcp_main._transport_security(settings),
+        host="127.0.0.1",
+    )
+    headers = {"Accept": "application/json, text/event-stream"}
+    caplog.set_level("INFO")
+    caplog.clear()
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:8000"
+        ) as client,
+    ):
+        unknown = await client.post(
+            "/mcp",
+            json={
+                "jsonrpc": "2.0",
+                "id": sentinel,
+                "method": "tools/call",
+                "params": {"name": sentinel, "arguments": {}},
+            },
+            headers=headers,
+        )
+        known = await client.post(
+            "/mcp",
+            json={
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {"name": "probe", "arguments": {"query": sentinel}},
+            },
+            headers=headers,
+        )
+
+    spans = _span_exporter.get_finished_spans()
+    exported = json.dumps(
+        [{"name": item.name, "attributes": dict(item.attributes)} for item in spans],
+        default=str,
+    )
+    assert unknown.status_code == 200
+    assert unknown.json()["error"]["data"] == {"code": "invalid_input", "field": "name"}
+    assert known.status_code == 200
+    assert sentinel not in exported
+    assert sentinel not in caplog.text
+    assert [item.name for item in spans] == ["vera.mcp.tool"]
