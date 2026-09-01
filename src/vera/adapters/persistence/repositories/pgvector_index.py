@@ -252,7 +252,8 @@ WITH ann AS MATERIALIZED (
                          SELECT 1 FROM projects fwp
                          WHERE fwp.workspace_id = fs.workspace_id
                            AND fwp.group_id = f.group_id))))
-            AND (CAST(:repository AS text) IS NULL OR fs.config->>'repository' = :repository)
+            AND (CAST(:repository AS text) IS NULL
+                 OR canonical_repository_ref(fs.config->>'repository') = :repository)
             AND (CAST(:branch AS text) IS NULL OR fs.config->>'branch' = :branch)
             AND (CAST(:document_type AS text) IS NULL
                  OR fs.config->>'document_type' = :document_type)
@@ -334,14 +335,16 @@ def _combined_fact_query(*, dimension: int, snapshot: bool, restricted: bool = F
 
 
 _LIVE_SOURCE_FILTERS = """
-  AND (CAST(:repository AS text) IS NULL OR s.config->>'repository' = :repository)
+  AND (CAST(:repository AS text) IS NULL
+       OR canonical_repository_ref(s.config->>'repository') = :repository)
   AND (CAST(:branch AS text) IS NULL OR s.config->>'branch' = :branch)
   AND (CAST(:document_type AS text) IS NULL OR s.config->>'document_type' = :document_type)
   AND (CAST(:source_type AS text) IS NULL OR s.kind = :source_type)
   AND (CAST(:max_trust_tier AS integer) IS NULL OR s.trust_tier <= :max_trust_tier)
 """
 _SNAPSHOT_SOURCE_FILTERS = """
-  AND (CAST(:repository AS text) IS NULL OR ss.repository = :repository)
+  AND (CAST(:repository AS text) IS NULL
+       OR ss.repository = :repository OR canonical_repository_ref(ss.repository) = :repository)
   AND (CAST(:branch AS text) IS NULL OR ss.branch = :branch)
   AND (CAST(:document_type AS text) IS NULL OR ss.document_type = :document_type)
   AND (CAST(:source_type AS text) IS NULL OR ss.source_type = :source_type)

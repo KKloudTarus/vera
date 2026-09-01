@@ -104,6 +104,14 @@ class McpSettings(BaseModel):
     quota_snapshots_per_hour: int = 10
 
 
+class KnowledgeSettings(BaseModel):
+    """Safety limits for caller-created knowledge artifacts."""
+
+    context_pack_quota_per_scope: int = Field(default=1000, ge=1)
+    proposals_per_task: int = Field(default=20, ge=1)
+    proposal_evidence_max_chars: int = Field(default=8000, ge=1)
+
+
 class ObservabilitySettings(BaseModel):
     """Tracing, metrics, and LLM cost tracking.
 
@@ -284,6 +292,7 @@ class Settings(BaseSettings):
     api: ApiSettings = Field(default_factory=ApiSettings)
     worker: WorkerSettings = Field(default_factory=WorkerSettings)
     mcp: McpSettings = Field(default_factory=McpSettings)
+    knowledge: KnowledgeSettings = Field(default_factory=KnowledgeSettings)
     neo4j: Neo4jSettings = Field(default_factory=Neo4jSettings)
     falkor: FalkorSettings = Field(default_factory=FalkorSettings)
     memory: MemorySettings = Field(default_factory=MemorySettings)

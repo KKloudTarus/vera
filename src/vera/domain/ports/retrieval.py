@@ -90,6 +90,14 @@ class RetrievalReadModel(Protocol):
 
 
 class RetrievalFeedbackRepository(Protocol):
+    async def lock_attribution(
+        self, *, principal_id: UUID, context_pack_id: UUID, result_ref: str
+    ) -> None: ...
+
+    async def attributed_signal(
+        self, *, principal_id: UUID, context_pack_id: UUID, result_ref: str
+    ) -> str | None: ...
+
     async def record(
         self,
         *,
@@ -97,7 +105,9 @@ class RetrievalFeedbackRepository(Protocol):
         principal_id: UUID | None,
         query: str,
         result_ref: str,
+        context_pack_id: UUID | None = None,
         signal: str,
         weight: float = 1.0,
         signals: JsonDict | None = None,
+        rank: int | None = None,
     ) -> None: ...

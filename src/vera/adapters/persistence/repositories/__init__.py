@@ -35,6 +35,7 @@ from vera.adapters.persistence.repositories.graph_map import SqlAlchemyGraphMapR
 from vera.adapters.persistence.repositories.identity import SqlAlchemyIdentityRepository
 from vera.adapters.persistence.repositories.ontology import SqlAlchemyOntologyRepository
 from vera.adapters.persistence.repositories.outbox import SqlAlchemyOutboxRepository
+from vera.adapters.persistence.repositories.proposal import SqlAlchemyProposalAttemptRepository
 from vera.adapters.persistence.repositories.retrieval import (
     SqlAlchemyRetrievalFeedbackRepository,
     SqlAlchemyRetrievalReadModel,
@@ -66,6 +67,7 @@ __all__ = [
     "SqlAlchemyKnowledgeSourceRepository",
     "SqlAlchemyOntologyRepository",
     "SqlAlchemyOutboxRepository",
+    "SqlAlchemyProposalAttemptRepository",
     "SqlAlchemyPublishedEpisodeRepository",
     "SqlAlchemyRetrievalFeedbackRepository",
     "SqlAlchemyRetrievalReadModel",

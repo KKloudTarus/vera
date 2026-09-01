@@ -19,9 +19,11 @@ COPY pyproject.toml constraints.lock README.md LICENSE NOTICE ./
 COPY src ./src
 COPY tests ./tests
 COPY evals ./evals
+COPY docs ./docs
+COPY examples ./examples
 COPY migrations ./migrations
 COPY datasets ./datasets
-COPY alembic.ini ./
+COPY alembic.ini mkdocs.yml ./
 
 RUN --mount=type=cache,id=vera-pip,target=/root/.cache/pip \
     python -m pip install pip==26.2 setuptools==84.0.0 wheel==0.48.0 \

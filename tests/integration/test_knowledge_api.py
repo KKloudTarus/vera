@@ -157,6 +157,8 @@ async def test_knowledge_contracts_end_to_end(
     )
     assert ctx.status_code == 200, ctx.text
     body = ctx.json()
+    assert body["persisted"] is False
+    assert body["pack_id"] is None
     assert body["result_count"] >= 1
     assert any(r["kind"] == "fact" and r["ref"] == fact_key for r in body["results"])
     invalid_context = await app_client.post(
@@ -214,6 +216,23 @@ async def test_knowledge_contracts_end_to_end(
     assert any(c["object"] == "ecs" for c in conflicts.json())
 
     # propose lands in Alice's personal scope as a PROPOSED (not active, not shared) fact.
+    too_long = await app_client.post(
+        "/v2/knowledge/propose",
+        json={"subject": "s" * 513, "predicate": "RUNS_ON", "object": "fargate"},
+        headers=alice,
+    )
+    assert too_long.status_code == 422
+    oversized_predicate = await app_client.post(
+        "/v2/knowledge/propose",
+        json={"subject": "service", "predicate": "p" * 2049, "object": "fargate"},
+        headers=alice,
+    )
+    oversized_object = await app_client.post(
+        "/v2/knowledge/propose",
+        json={"subject": "service", "predicate": "RUNS_ON", "object": "o" * 2049},
+        headers=alice,
+    )
+    assert oversized_predicate.status_code == oversized_object.status_code == 422
     proposed = await app_client.post(
         "/v2/knowledge/propose",
         json={"subject": "newservice", "predicate": "RUNS_ON", "object": "fargate"},

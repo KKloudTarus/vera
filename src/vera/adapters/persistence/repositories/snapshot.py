@@ -86,7 +86,7 @@ _CAPTURE_SOURCE_CONFIGS = text(
     "INSERT INTO snapshot_sources "
     "(snapshot_id, knowledge_source_id, group_id, repository, branch, document_type, "
     "source_type, trust_tier) SELECT :sid, src.id, CAST(:g AS varchar), "
-    "src.config->>'repository', "
+    "canonical_repository_ref(src.config->>'repository'), "
     "src.config->>'branch', src.config->>'document_type', src.kind, src.trust_tier "
     "FROM knowledge_sources src WHERE EXISTS ("
     "SELECT 1 FROM snapshot_chunks sc WHERE sc.snapshot_id = :sid "
@@ -122,7 +122,8 @@ _CAPTURE_SOURCES = text(
     "artifact_version_id, assertion_recorded_at, repository, branch, document_type, "
     "source_type, trust_tier) "
     "SELECT sf.snapshot_id, sf.fact_id, a.id, sf.group_id, a.knowledge_source_id, "
-    "a.artifact_version_id, a.recorded_at, src.config->>'repository', src.config->>'branch', "
+    "a.artifact_version_id, a.recorded_at, "
+    "canonical_repository_ref(src.config->>'repository'), src.config->>'branch', "
     "src.config->>'document_type', "
     "src.kind, src.trust_tier FROM snapshot_facts sf "
     "JOIN assertions a ON a.fact_id = sf.fact_id AND a.group_id = sf.group_id "
@@ -233,6 +234,29 @@ _GET_PACK = text(
     "expires_at, assembler_version, request "
     "FROM context_packs WHERE id = :pid AND group_id = :g"
 )
+_LOCK_PACK_WRITES = text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))")
+_PRUNE_EXPIRED_PACKS = text("SELECT delete_expired_context_packs(:g)")
+_COUNT_PACKS = text("SELECT count(*) FROM context_packs WHERE group_id = :g AND expires_at > now()")
+_EQUIVALENT_PACK = text(
+    "SELECT id::text, results FROM context_packs WHERE group_id = :g AND request_hash = :rh "
+    "AND result_references = CAST(:refs AS jsonb) AND assembler_version = :av "
+    "AND expires_at > now() ORDER BY created_at DESC, id DESC"
+)
+
+
+def _stable_results(results: list[JsonDict]) -> list[JsonDict]:
+    """Drop time-dependent ranking values while retaining content and ordered references."""
+    stable_results: list[JsonDict] = []
+    for result in results:
+        stable = dict(result)
+        stable.pop("score", None)
+        signals = stable.get("signals")
+        if isinstance(signals, dict):
+            stable_signals = dict(cast("JsonDict", signals))
+            stable_signals.pop("recency", None)
+            stable["signals"] = stable_signals
+        stable_results.append(stable)
+    return stable_results
 
 
 class SqlAlchemySnapshotRepository:
@@ -248,7 +272,7 @@ class SqlAlchemySnapshotRepository:
         ontology_version_id: str | None = None,
         embedding_version: JsonDict | None = None,
         retrieval_index_version: str = "fts-v1",
-        assembler_version: str = "context-assembler-v2",
+        assembler_version: str = "context-assembler-v3",
         actor: str | None = None,
     ) -> Snapshot:
         session = self._session
@@ -399,6 +423,42 @@ class SqlAlchemySnapshotRepository:
 class SqlAlchemyContextPackRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
+
+    async def prepare_save(self, *, group_id: str) -> int:
+        await self._session.execute(_LOCK_PACK_WRITES, {"key": f"context-packs:{group_id}"})
+        await self._session.execute(_PRUNE_EXPIRED_PACKS, {"g": group_id})
+        count = await self._session.scalar(_COUNT_PACKS, {"g": group_id})
+        return int(count or 0)
+
+    async def equivalent(
+        self,
+        *,
+        group_id: str,
+        request_hash: str,
+        result_references: list[str],
+        results: list[JsonDict],
+        assembler_version: str,
+    ) -> ContextPack | None:
+        rows = (
+            (
+                await self._session.execute(
+                    _EQUIVALENT_PACK,
+                    {
+                        "g": group_id,
+                        "rh": request_hash,
+                        "refs": json.dumps(result_references),
+                        "av": assembler_version,
+                    },
+                )
+            )
+            .mappings()
+            .all()
+        )
+        expected = _stable_results(results)
+        for row in rows:
+            if _stable_results(cast("list[JsonDict]", row["results"])) == expected:
+                return await self.get(group_id=group_id, pack_id=str(row["id"]))
+        return None
 
     async def save(
         self,

@@ -19,8 +19,15 @@ from mcp.server.auth.middleware.auth_context import get_access_token
 from mcp.server.mcpserver import MCPServer
 from mcp.shared.exceptions import MCPError
 
+from vera.application.snapshot import (
+    ContextPackExpiredError,
+    ContextPackQuotaExceededError,
+    SnapshotNotFoundError,
+    SnapshotNotReproducibleError,
+)
 from vera.config.settings import Settings
 from vera.domain.ports.resilience import QuotaLimiter
+from vera.entrypoints.knowledge.service import InputError
 from vera.entrypoints.knowledge.service import ScopeError as KnowledgeScopeError
 from vera.entrypoints.mcp import errors, policy
 from vera.entrypoints.mcp.policy import ToolClass
@@ -60,8 +67,14 @@ class Guard:
         *,
         read_only: bool | None = None,
         idempotent: bool | None = None,
+        destructive: bool = False,
     ) -> Callable[[_Tool], _Tool]:
-        annotations = policy.annotations_for(tool_class, read_only=read_only, idempotent=idempotent)
+        annotations = policy.annotations_for(
+            tool_class,
+            read_only=read_only,
+            idempotent=idempotent,
+            destructive=destructive,
+        )
 
         def deco(fn: _Tool) -> _Tool:
             name = fn.__name__
@@ -74,6 +87,14 @@ class Guard:
                     return await fn(**kwargs)
                 except MCPError:
                     raise
+                except InputError as exc:
+                    raise errors.invalid_input(exc.field, exc.reason) from exc
+                except ContextPackExpiredError as exc:
+                    raise errors.expired_context_pack() from exc
+                except ContextPackQuotaExceededError as exc:
+                    raise errors.quota_exceeded("context_storage") from exc
+                except (SnapshotNotFoundError, SnapshotNotReproducibleError) as exc:
+                    raise errors.invalid_input("snapshot_id", "is unavailable") from exc
                 except (KnowledgeScopeError, McpScopeError) as exc:
                     raise _map_scope_error(exc) from exc
                 except VeraError as exc:
@@ -84,6 +105,10 @@ class Guard:
             return wrapper  # type: ignore[return-value]  # wraps preserves fn's signature
 
         return deco
+
+    def require(self, tool_class: ToolClass) -> str:
+        """Require an additional authorization class for a conditional write path."""
+        return self._authorize(tool_class)
 
     async def _enforce(self, name: str, tool_class: ToolClass, kwargs: dict[str, Any]) -> None:
         principal = self._authorize(tool_class)

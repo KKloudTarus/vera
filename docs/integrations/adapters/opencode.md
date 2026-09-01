@@ -4,11 +4,10 @@ Wire VERA into OpenCode as a remote MCP server. Values come from the official Op
 docs. The example config in `examples/integrations/opencode/opencode.json` is validated on
 every test run.
 
-!!! note "Status"
-    Connect, authenticate, verify, and uninstall are complete and B-independent. A full
-    end-to-end `PASS` and the whole [verification matrix](../GUIDE.md#verification-matrix)
-    also need project discovery and proposal undo (#15). Until then this runtime is not marked
-    released at Tier 1.
+!!! success "Status: Tier-1 reference available"
+    The configuration is schema-tested and the server prerequisites are available. An
+    installation reports `PASS` only after OpenCode loads it, `knowledge_bootstrap` resolves
+    one project, and one bounded read succeeds under the target deployment's policy.
 
 ## At a glance
 
@@ -72,7 +71,9 @@ OpenCode runs the configured MCP servers for the project. Keep VERA in the proje
 opencode mcp list       # servers and their auth status
 ```
 
-A bounded `knowledge_get_context` read confirms the tools work.
+Call `knowledge_bootstrap` with the sanitized Git remote and current branch, confirm one
+project and the expected capabilities, then make a bounded `knowledge_get_context` call with
+`persist=false`.
 
 ## Hooks and plugins
 
@@ -86,5 +87,6 @@ Session-start context hooks are not part of this adapter.
 
 ## Known limitations
 
-- Project discovery, ambiguous / out-of-scope / monorepo / worktree scenarios, and
-  `auto-propose` depend on #15. Use `suggest`.
+- Cloud and managed-policy surfaces are not covered by this local adapter.
+- `suggest` remains the default. Enable `auto-propose` only with explicit user selection and
+  the `personal-proposal` capability; report and undo through the proposal lifecycle tools.

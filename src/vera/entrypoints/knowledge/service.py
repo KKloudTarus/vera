@@ -9,13 +9,16 @@ PROPOSED fact with a pending assertion, never a published shared fact (invariant
 from __future__ import annotations
 
 import hashlib
+import json
 from datetime import datetime
 from typing import Any, Literal
 from uuid import UUID
 
+from vera import __version__
 from vera.adapters.persistence.repositories import (
     SqlAlchemyCanonicalEntityRepository,
     SqlAlchemyCommunityLineageRepository,
+    SqlAlchemyProposalAttemptRepository,
 )
 from vera.adapters.persistence.repositories.fabric import (
     SqlAlchemyAssertionRepository,
@@ -43,7 +46,12 @@ from vera.application.retrieval import (
     HybridFactCandidateSource,
     HybridPassageIndex,
 )
-from vera.application.snapshot import ContextPackService, SnapshotService, serialize_candidate
+from vera.application.snapshot import (
+    ContextPackExpiredError,
+    ContextPackService,
+    SnapshotService,
+    serialize_candidate,
+)
 from vera.bootstrap import Container
 from vera.config.settings import active_embedding
 from vera.domain.identity.models import Role, role_at_least
@@ -62,6 +70,7 @@ from vera.domain.knowledge.fabric import (
     slot_key,
 )
 from vera.domain.ontology import current_descriptor, diff_descriptors
+from vera.domain.ontology.registry import is_single_valued
 from vera.domain.ports.identity import ResolvedScope, ScopeResolver
 from vera.domain.ports.retrieval_index import (
     CodeIndex,
@@ -70,6 +79,7 @@ from vera.domain.ports.retrieval_index import (
     RetrievalFilters,
 )
 from vera.domain.ports.snapshot import ContextPack
+from vera.domain.repository_identity import canonical_repository_ref
 from vera.observability.cost import UsageContext, reset_usage_context, set_usage_context
 from vera.shared.ids import uuid7
 from vera.shared.time import utc_now
@@ -115,9 +125,64 @@ class ScopeError(Exception):
     """The principal has no resolvable scope, or requested a scope it may not access."""
 
 
+class InputError(Exception):
+    """A caller-controlled field failed service-level validation."""
+
+    def __init__(self, field: str, reason: str) -> None:
+        self.field = field
+        self.reason = reason
+        super().__init__(f"invalid {field}: {reason}")
+
+
+def _normalized_ref(value: str | None, *, name: str, lowercase: bool = False) -> str | None:
+    if value is None:
+        return None
+    normalized = value.strip()
+    if not normalized:
+        return None
+    if len(normalized) > 256 or any(ord(character) < 32 for character in normalized):
+        raise InputError(name, "must be a printable string of at most 256 characters")
+    return normalized.lower() if lowercase else normalized
+
+
+def _proposal_context(
+    *,
+    runtime: str | None,
+    session_ref: str | None,
+    task_ref: str | None,
+    repository_ref: str | None,
+) -> JsonDict:
+    context: JsonDict = {}
+    normalized_runtime = _normalized_ref(runtime, name="runtime", lowercase=True)
+    normalized_session = _normalized_ref(session_ref, name="session_ref")
+    normalized_task = _normalized_ref(task_ref, name="task_ref")
+    repository_input = _normalized_ref(repository_ref, name="repository_ref")
+    normalized_repository = canonical_repository_ref(repository_input)
+    if repository_input is not None and normalized_repository is None:
+        raise InputError("repository_ref", "must be a remote or server-side repository identity")
+    if normalized_runtime is not None:
+        context["runtime"] = normalized_runtime
+    if normalized_session is not None:
+        context["session_ref"] = normalized_session
+    if normalized_task is not None:
+        context["task_ref"] = normalized_task
+    if normalized_repository is not None:
+        context["repository_ref"] = normalized_repository
+    return context
+
+
+def _proposal_run_key(principal_id: UUID, context: JsonDict) -> str:
+    if not context:
+        return f"proposal:{principal_id}"
+    encoded = json.dumps(context, sort_keys=True, separators=(",", ":"))
+    digest = hashlib.sha256(encoded.encode()).hexdigest()[:32]
+    return f"proposal:{principal_id}:{digest}"
+
+
 def _context_pack_payload(pack: ContextPack) -> JsonDict:
     return {
         "pack_id": pack.id,
+        "persisted": pack.id is not None,
         "scope_id": pack.group_id,
         "snapshot_id": pack.snapshot_id,
         "query": pack.query,
@@ -200,7 +265,9 @@ class KnowledgeService:
         )
         self._snapshot_service = SnapshotService(uow_factory=self._uow_factory)
         self._context_pack_service = ContextPackService(
-            assembler=self._assembler, uow_factory=self._uow_factory
+            assembler=self._assembler,
+            uow_factory=self._uow_factory,
+            max_persisted_per_group=(container.settings.knowledge.context_pack_quota_per_scope),
         )
 
     async def _resolve(self, principal_id: UUID) -> ResolvedScope:
@@ -225,6 +292,112 @@ class KnowledgeService:
         if not shared and scope.personal_group_id:
             return scope.personal_group_id
         raise ScopeError("ambiguous scope: specify a project")
+
+    async def bootstrap(
+        self,
+        principal_id: UUID,
+        *,
+        auth_profile: Literal["local-dev", "remote-authenticated"],
+        repository: str | None = None,
+        branch: str | None = None,
+        capability_classes: tuple[str, ...] = (
+            "read",
+            "personal-proposal",
+            "feedback",
+            "snapshot",
+        ),
+    ) -> JsonDict:
+        """Describe the caller's safe operating context without returning knowledge content."""
+        scope = await self._resolve(principal_id)
+        async with SqlAlchemyUnitOfWork(self._c.sessionmaker) as uow:
+            principal = await uow.identity.get_principal(principal_id)
+        if principal is None:  # scope resolution and identity lookup must agree
+            raise ScopeError(f"principal {principal_id} was not found")
+
+        rows = await self._read.list_projects(group_ids=list(scope.group_ids))
+        projects: list[JsonDict] = []
+        repository_matches: list[JsonDict] = []
+        canonical_repository = canonical_repository_ref(repository)
+        for row in rows:
+            project: JsonDict = {
+                "project_id": row["project_id"],
+                "slug": row["slug"],
+                "name": row["name"],
+                "scope_id": row["group_id"],
+                "workspace_id": row["workspace_id"],
+                "workspace_slug": row["workspace_slug"],
+                "workspace_name": row["workspace_name"],
+            }
+            projects.append(project)
+            known_repositories = {
+                normalized
+                for value in row["repositories"]
+                if (normalized := canonical_repository_ref(str(value))) is not None
+            }
+            if canonical_repository is not None and canonical_repository in known_repositories:
+                repository_matches.append(project)
+
+        if not projects:
+            resolution = "personal_only"
+            candidates: list[JsonDict] = []
+        elif repository is not None and canonical_repository is None:
+            resolution = "unsupported_repository"
+            candidates = projects
+        elif canonical_repository is not None and len(repository_matches) == 1:
+            resolution = "selected"
+            candidates = repository_matches
+        elif canonical_repository is not None and len(repository_matches) > 1:
+            resolution = "selection_required"
+            candidates = repository_matches
+        elif canonical_repository is not None:
+            resolution = "unmapped"
+            candidates = projects
+        elif len(projects) == 1:
+            resolution = "selected"
+            candidates = projects
+        else:
+            resolution = "selection_required"
+            candidates = projects
+
+        selected = candidates[0] if resolution == "selected" else None
+        ontology = current_descriptor()
+        granted_classes = set(capability_classes)
+        return {
+            "server_version": __version__,
+            "principal": {
+                "id": str(principal.id),
+                "kind": principal.kind.value,
+                "display_name": principal.display_name,
+            },
+            "auth_profile": auth_profile,
+            "capability_classes": list(capability_classes),
+            "shared_context_available": bool(projects),
+            "projects": projects,
+            "project_resolution": {
+                "status": resolution,
+                "repository": canonical_repository,
+                "branch": branch.strip() if branch and branch.strip() else None,
+                "selected": selected,
+                "candidates": candidates,
+            },
+            "selection_policy": {
+                "request_scope": "one explicit project per request",
+                "monorepo": "select a project when one repository maps to multiple projects",
+                "multi_root": "resolve each repository root independently",
+            },
+            "write_policy": {
+                "personal_proposals": "personal-proposal" in granted_classes,
+                "personal_feedback": "feedback" in granted_classes,
+                "snapshots": "snapshot" in granted_classes,
+                "shared_writes": "reviewed-only",
+                "auto_publish": False,
+            },
+            "contract_versions": {
+                "bootstrap": 1,
+                "knowledge_api": "v2",
+                "ontology": ontology.version,
+            },
+        }
 
     # ---------------------------------------------------------------- context ---
 
@@ -251,13 +424,17 @@ class KnowledgeService:
         citation_mode: Literal["full", "compact"] = "full",
         conflict_handling: Literal["include", "exclude", "only"] = "include",
         usage_ref: str | None = None,
+        persist: bool = False,
     ) -> JsonDict:
         scope = await self._resolve(principal_id)
         group = await self._target_group(scope, project)
         embedding_version = active_embedding_version(self._c)
         retrieval_index_version = active_retrieval_index_version(self._c)
+        repository_ref = canonical_repository_ref(repository)
+        if repository is not None and repository.strip() and repository_ref is None:
+            raise InputError("repository", "must be a remote or server-side repository identity")
         filters = RetrievalFilters(
-            repository=repository,
+            repository=repository_ref,
             branch=branch,
             code_path=code_path,
             document_type=document_type,
@@ -285,6 +462,7 @@ class KnowledgeService:
                 active_embedding_version=embedding_version,
                 active_retrieval_index_version=retrieval_index_version,
                 actor=str(principal_id),
+                persist=persist,
             )
         finally:
             reset_usage_context(usage_token)
@@ -433,31 +611,81 @@ class KnowledgeService:
         self,
         principal_id: UUID,
         *,
+        context_pack_id: str,
         result_ref: str,
         signal: str,
-        query: str = "",
-        signals: JsonDict | None = None,
     ) -> JsonDict:
-        """Record a caller's up/down feedback on a knowledge result (a fact_key or context-pack
-        id). Feedback is a personal signal, so it is written under the caller's personal scope;
-        it never mutates shared truth.
-        """
+        """Record feedback using only attribution captured in a persisted context pack."""
         if signal not in {"up", "down"}:
-            raise ScopeError("signal must be 'up' or 'down'")
+            raise InputError("signal", "must be 'up' or 'down'")
+        try:
+            pack_uuid = UUID(context_pack_id)
+        except ValueError as exc:
+            raise InputError("context_pack_id", "must identify a persisted context pack") from exc
+        pack = await self.get_context_pack(principal_id, pack_id=str(pack_uuid))
+        if pack is None or not pack["persisted"]:
+            raise ContextPackExpiredError("context pack is unavailable to the caller")
+        query = str(pack["query"])
+        rank: int | None = None
+        signals: JsonDict | None = None
+        if result_ref != str(pack_uuid):
+            shown = next(
+                (
+                    (index, result)
+                    for index, result in enumerate(pack["results"], start=1)
+                    if str(result["ref"]) == result_ref
+                ),
+                None,
+            )
+            if shown is None:
+                raise InputError("result_ref", "was not shown in the attributed context pack")
+            rank, result = shown
+            signals = dict(result.get("signals") or {})
         scope = await self._resolve(principal_id)
         group = scope.personal_group_id
         async with SqlAlchemyUnitOfWork(self._c.sessionmaker) as uow:
             await uow.use_tenant(group)
+            await uow.feedback.lock_attribution(
+                principal_id=principal_id,
+                context_pack_id=pack_uuid,
+                result_ref=result_ref,
+            )
+            existing_signal = await uow.feedback.attributed_signal(
+                principal_id=principal_id,
+                context_pack_id=pack_uuid,
+                result_ref=result_ref,
+            )
+            if existing_signal is not None:
+                return {
+                    "status": "deduplicated",
+                    "context_pack_id": str(pack_uuid),
+                    "result_ref": result_ref,
+                    "signal": existing_signal,
+                    "requested_signal": signal,
+                    "query": query,
+                    "rank": rank,
+                    "signals": signals,
+                }
             await uow.feedback.record(
                 group_id=group,
                 principal_id=principal_id,
                 query=query,
                 result_ref=result_ref,
+                context_pack_id=pack_uuid,
                 signal=signal,
                 signals=signals,
+                rank=rank,
             )
             await uow.commit()
-        return {"status": "recorded", "result_ref": result_ref, "signal": signal}
+        return {
+            "status": "recorded",
+            "context_pack_id": str(pack_uuid),
+            "result_ref": result_ref,
+            "signal": signal,
+            "query": query,
+            "rank": rank,
+            "signals": signals,
+        }
 
     async def get_changes(self, principal_id: UUID, *, limit: int = 50) -> list[dict[str, Any]]:
         scope = await self._resolve(principal_id)
@@ -536,18 +764,148 @@ class KnowledgeService:
         object: str,
         qualifiers: JsonDict | None = None,
         evidence_text: str | None = None,
+        runtime: str | None = None,
+        session_ref: str | None = None,
+        task_ref: str | None = None,
+        repository_ref: str | None = None,
     ) -> JsonDict:
+        base_context = _proposal_context(
+            runtime=runtime,
+            session_ref=session_ref,
+            task_ref=task_ref,
+            repository_ref=None,
+        )
+        try:
+            proposal_context = _proposal_context(
+                runtime=runtime,
+                session_ref=session_ref,
+                task_ref=task_ref,
+                repository_ref=repository_ref,
+            )
+        except InputError as exc:
+            scope = await self._resolve(principal_id)
+            await self._record_proposal_rejection(
+                principal_id=principal_id,
+                group_id=scope.personal_group_id,
+                run_key=_proposal_run_key(principal_id, base_context),
+                context=base_context,
+                reason=str(exc),
+            )
+            raise
+        run_key = _proposal_run_key(principal_id, proposal_context)
         scope = await self._resolve(principal_id)
         group = scope.personal_group_id  # proposals are always personal, never shared truth
+        if not subject or len(subject) > 512:
+            await self._record_proposal_rejection(
+                principal_id=principal_id,
+                group_id=group,
+                run_key=run_key,
+                context=proposal_context,
+                reason="subject length must be 1..512",
+            )
+            raise InputError("subject", "length must be 1..512")
+        if not predicate or len(predicate) > 2048:
+            await self._record_proposal_rejection(
+                principal_id=principal_id,
+                group_id=group,
+                run_key=run_key,
+                context=proposal_context,
+                reason="predicate length must be 1..2048",
+            )
+            raise InputError("predicate", "length must be 1..2048")
+        if not object or len(object) > 2048:
+            await self._record_proposal_rejection(
+                principal_id=principal_id,
+                group_id=group,
+                run_key=run_key,
+                context=proposal_context,
+                reason="object length must be 1..2048",
+            )
+            raise InputError("object", "length must be 1..2048")
+        predicate = predicate.strip().upper()
+        allowed_predicates = {
+            policy.predicate for policy in current_descriptor().predicate_policies
+        }
+        if predicate not in allowed_predicates:
+            await self._record_proposal_rejection(
+                principal_id=principal_id,
+                group_id=group,
+                run_key=run_key,
+                context=proposal_context,
+                reason="predicate is not in the active ontology",
+            )
+            raise InputError("predicate", "is not in the active ontology")
+        if (
+            evidence_text is not None
+            and len(evidence_text) > self._c.settings.knowledge.proposal_evidence_max_chars
+        ):
+            await self._record_proposal_rejection(
+                principal_id=principal_id,
+                group_id=group,
+                run_key=run_key,
+                context=proposal_context,
+                reason="evidence_text exceeds the configured proposal evidence size limit",
+            )
+            raise InputError("evidence_text", "exceeds the configured proposal evidence size limit")
         async with SqlAlchemyUnitOfWork(self._c.sessionmaker) as uow:
             await uow.use_tenant(group)
             session = uow.session
-            canonical = SqlAlchemyCanonicalEntityRepository(session)
-            subject_entity = await canonical.resolve(group_id=group, name=subject) or (
-                await canonical.create(
-                    group_id=group, entity_type="Entity", canonical_name=subject, aliases=[]
+            attempts = SqlAlchemyProposalAttemptRepository(session)
+            assertions = SqlAlchemyAssertionRepository(session)
+            has_bounded_run = "task_ref" in proposal_context or "session_ref" in proposal_context
+            quota_since = utc_now().replace(hour=0, minute=0, second=0, microsecond=0)
+            if not has_bounded_run:
+                await assertions.lock_run_key(
+                    group_id=group,
+                    run_key=f"proposal-daily:{principal_id}:{quota_since.date().isoformat()}",
+                )
+            await assertions.lock_run_key(group_id=group, run_key=run_key)
+            proposal_count = (
+                await assertions.count_for_run_key(group_id=group, run_key=run_key)
+                if has_bounded_run
+                else await attempts.count_created_since(
+                    group_id=group,
+                    principal_id=principal_id,
+                    since=quota_since,
                 )
             )
+            canonical = SqlAlchemyCanonicalEntityRepository(session)
+            await canonical.lock_name(group_id=group, name=subject)
+            subject_entity = await canonical.resolve(group_id=group, name=subject)
+            if (
+                subject_entity is None
+                and proposal_count >= self._c.settings.knowledge.proposals_per_task
+            ):
+                await attempts.record(
+                    group_id=group,
+                    principal_id=principal_id,
+                    run_key=run_key,
+                    fact_key=None,
+                    proposal_ref=None,
+                    outcome="skipped",
+                    operation="skipped",
+                    context=proposal_context,
+                    detail={
+                        "reason": "task proposal limit reached",
+                        "subject": subject,
+                        "predicate": predicate,
+                        "object": object,
+                    },
+                )
+                await uow.commit()
+                return {
+                    "status": "skipped",
+                    "operation": "skipped",
+                    "fact_key": None,
+                    "lifecycle": "not_created",
+                    "group_id": group,
+                    "reason": "the configured proposal limit for this task has been reached",
+                    "proposal_context": proposal_context,
+                }
+            if subject_entity is None:
+                subject_entity = await canonical.create(
+                    group_id=group, entity_type="Entity", canonical_name=subject, aliases=[]
+                )
             fk = fact_key(
                 scope=group,
                 subject_entity_id=subject_entity.id,
@@ -555,24 +913,110 @@ class KnowledgeService:
                 object_scalar=object,
                 qualifiers=qualifiers,
             )
+            fact_slot_key = slot_key(
+                scope=group,
+                subject_entity_id=subject_entity.id,
+                predicate=predicate,
+                qualifiers=qualifiers,
+            )
             facts = SqlAlchemyFactRepository(session)
+            if is_single_valued(predicate):
+                await facts.lock_fact_key(group_id=group, fact_key=f"slot:{fact_slot_key}")
+            await facts.lock_fact_key(group_id=group, fact_key=fk)
+            if is_single_valued(predicate):
+                conflicts = [
+                    conflict
+                    for conflict in await facts.live_by_slot_key(
+                        group_id=group, slot_key=fact_slot_key
+                    )
+                    if conflict.fact_key != fk
+                ]
+                if conflicts:
+                    conflict_keys = [conflict.fact_key for conflict in conflicts]
+                    await attempts.record(
+                        group_id=group,
+                        principal_id=principal_id,
+                        run_key=run_key,
+                        fact_key=fk,
+                        proposal_ref=None,
+                        outcome="conflicted",
+                        operation="skipped",
+                        context=proposal_context,
+                        detail={"conflicts": conflict_keys},
+                    )
+                    await uow.commit()
+                    return {
+                        "status": "conflicted",
+                        "operation": "skipped",
+                        "fact_key": fk,
+                        "lifecycle": "not_created",
+                        "group_id": group,
+                        "conflicts": conflict_keys,
+                        "proposal_context": proposal_context,
+                    }
             existing = await facts.by_fact_key(group_id=group, fact_key=fk)
-            if existing is not None:
-                fact = existing
-            else:
+            if existing is not None and existing.lifecycle_state is not FactLifecycle.PROPOSED:
+                await attempts.record(
+                    group_id=group,
+                    principal_id=principal_id,
+                    run_key=run_key,
+                    fact_key=fk,
+                    proposal_ref=None,
+                    outcome="conflicted",
+                    operation="skipped",
+                    context=proposal_context,
+                    detail={"lifecycle": existing.lifecycle_state.value},
+                )
+                await uow.commit()
+                return {
+                    "status": "conflicted",
+                    "operation": "skipped",
+                    "fact_key": fk,
+                    "lifecycle": existing.lifecycle_state.value,
+                    "group_id": group,
+                    "proposal_context": proposal_context,
+                }
+            existing_assertion = (
+                await assertions.for_fact_and_run_key(
+                    group_id=group, fact_id=str(existing.id), run_key=run_key
+                )
+                if existing is not None
+                else None
+            )
+            if (
+                existing_assertion is None
+                and proposal_count >= self._c.settings.knowledge.proposals_per_task
+            ):
+                await attempts.record(
+                    group_id=group,
+                    principal_id=principal_id,
+                    run_key=run_key,
+                    fact_key=fk,
+                    proposal_ref=None,
+                    outcome="skipped",
+                    operation="skipped",
+                    context=proposal_context,
+                    detail={"reason": "task proposal limit reached"},
+                )
+                await uow.commit()
+                return {
+                    "status": "skipped",
+                    "operation": "skipped",
+                    "fact_key": fk,
+                    "lifecycle": "not_created",
+                    "group_id": group,
+                    "reason": "the configured proposal limit for this task has been reached",
+                    "proposal_context": proposal_context,
+                }
+            if existing is None:
                 fact = await facts.upsert(
                     Fact(
                         id=uuid7(),
                         group_id=group,
                         fact_key=fk,
-                        slot_key=slot_key(
-                            scope=group,
-                            subject_entity_id=subject_entity.id,
-                            predicate=predicate,
-                            qualifiers=qualifiers,
-                        ),
+                        slot_key=fact_slot_key,
                         subject_entity_id=subject_entity.id,
-                        predicate=predicate.upper(),
+                        predicate=predicate,
                         object_type=ObjectType.SCALAR,
                         normalized_object=normalize_object(object_scalar=object),
                         object_scalar=object,
@@ -582,7 +1026,9 @@ class KnowledgeService:
                         confidence=0.5,
                     )
                 )
-            assertion = await SqlAlchemyAssertionRepository(session).upsert(
+            else:
+                fact = existing
+            assertion, created = await assertions.create_proposal_if_absent(
                 Assertion(
                     id=uuid7(),
                     group_id=group,
@@ -593,10 +1039,10 @@ class KnowledgeService:
                     verification_state="pending",
                     observed_at=utc_now(),
                     recorded_at=utc_now(),
-                    run_key=f"proposal:{principal_id}",
+                    run_key=run_key,
                 )
             )
-            if evidence_text:
+            if created and evidence_text:
                 await SqlAlchemyEvidenceRepository(session).add(
                     Evidence(
                         id=uuid7(),
@@ -607,20 +1053,201 @@ class KnowledgeService:
                         confidentiality="internal",
                     )
                 )
-            await SqlAlchemyKnowledgeEventLog(session).append(
+            if created:
+                await SqlAlchemyKnowledgeEventLog(session).append(
+                    KnowledgeEvent(
+                        id=uuid7(),
+                        group_id=group,
+                        event_type=KnowledgeEventType.ASSERTION_ADDED,
+                        occurred_at=utc_now(),
+                        actor=str(principal_id),
+                        fact_id=fact.id,
+                        assertion_id=assertion.id,
+                        reason="agent proposal (personal scope)",
+                    )
+                )
+            await attempts.record(
+                group_id=group,
+                principal_id=principal_id,
+                run_key=run_key,
+                fact_key=fk,
+                proposal_ref=assertion.id,
+                outcome="created" if created else "deduplicated",
+                operation="created" if created else "deduplicated",
+                context=proposal_context,
+            )
+            await uow.commit()
+        return {
+            "status": "proposed",
+            "operation": "created" if created else "deduplicated",
+            "proposal_ref": str(assertion.id),
+            "fact_key": fk,
+            "lifecycle": "proposed",
+            "group_id": group,
+            "proposal_context": proposal_context,
+        }
+
+    async def _record_proposal_rejection(
+        self,
+        *,
+        principal_id: UUID,
+        group_id: str,
+        run_key: str,
+        context: JsonDict,
+        reason: str,
+    ) -> None:
+        async with SqlAlchemyUnitOfWork(self._c.sessionmaker) as uow:
+            await uow.use_tenant(group_id)
+            await SqlAlchemyProposalAttemptRepository(uow.session).record(
+                group_id=group_id,
+                principal_id=principal_id,
+                run_key=run_key,
+                fact_key=None,
+                proposal_ref=None,
+                outcome="rejected",
+                operation="rejected",
+                context=context,
+                detail={"reason": reason},
+            )
+            await uow.commit()
+
+    async def retract_proposal(self, principal_id: UUID, *, fact_key: str) -> JsonDict:
+        scope = await self._resolve(principal_id)
+        group = scope.personal_group_id
+        async with SqlAlchemyUnitOfWork(self._c.sessionmaker) as uow:
+            await uow.use_tenant(group)
+            session = uow.session
+            facts = SqlAlchemyFactRepository(session)
+            await facts.lock_fact_key(group_id=group, fact_key=fact_key)
+            fact = await facts.by_fact_key_for_update(group_id=group, fact_key=fact_key)
+            if fact is None:
+                raise ScopeError("proposal not found in the caller's personal scope")
+            if fact.lifecycle_state is FactLifecycle.RETRACTED:
+                return {
+                    "status": "retracted",
+                    "operation": "already_retracted",
+                    "fact_key": fact_key,
+                    "group_id": group,
+                }
+            if fact.lifecycle_state is not FactLifecycle.PROPOSED:
+                raise ScopeError("only a pending personal proposal can be retracted by its caller")
+
+            assertions = await SqlAlchemyAssertionRepository(session).withdraw_for_fact(
+                group_id=group, fact_id=str(fact.id)
+            )
+            events = SqlAlchemyKnowledgeEventLog(session)
+            for assertion in assertions:
+                await events.append(
+                    KnowledgeEvent(
+                        id=uuid7(),
+                        group_id=group,
+                        event_type=KnowledgeEventType.ASSERTION_WITHDRAWN,
+                        occurred_at=utc_now(),
+                        actor=str(principal_id),
+                        fact_id=fact.id,
+                        assertion_id=assertion.id,
+                        previous_state={"state": "active"},
+                        next_state={"state": "withdrawn"},
+                        reason="proposal retracted by caller",
+                    )
+                )
+            await facts.set_lifecycle(
+                group_id=group,
+                fact_id=str(fact.id),
+                state=FactLifecycle.RETRACTED,
+            )
+            await events.append(
                 KnowledgeEvent(
                     id=uuid7(),
                     group_id=group,
-                    event_type=KnowledgeEventType.ASSERTION_ADDED,
+                    event_type=KnowledgeEventType.FACT_RETRACTED,
                     occurred_at=utc_now(),
                     actor=str(principal_id),
                     fact_id=fact.id,
-                    assertion_id=assertion.id,
-                    reason="agent proposal (personal scope)",
+                    previous_state={"lifecycle": FactLifecycle.PROPOSED.value},
+                    next_state={"lifecycle": FactLifecycle.RETRACTED.value},
+                    reason="proposal retracted by caller",
                 )
             )
             await uow.commit()
-        return {"status": "proposed", "fact_key": fk, "lifecycle": "proposed", "group_id": group}
+        return {
+            "status": "retracted",
+            "operation": "retracted",
+            "fact_key": fact_key,
+            "group_id": group,
+        }
+
+    async def proposal_report(
+        self,
+        principal_id: UUID,
+        *,
+        runtime: str | None = None,
+        session_ref: str | None = None,
+        task_ref: str | None = None,
+        repository_ref: str | None = None,
+        cursor: str | None = None,
+        limit: int = 50,
+    ) -> JsonDict:
+        proposal_context = _proposal_context(
+            runtime=runtime,
+            session_ref=session_ref,
+            task_ref=task_ref,
+            repository_ref=repository_ref,
+        )
+        if not proposal_context:
+            raise InputError(
+                "proposal_context", "must include a runtime, session, task, or repository reference"
+            )
+        if not 1 <= limit <= 100:
+            raise InputError("limit", "must be between 1 and 100")
+        try:
+            cursor_id = UUID(cursor) if cursor else None
+        except ValueError as exc:
+            raise InputError("cursor", "must identify a proposal attempt") from exc
+        scope = await self._resolve(principal_id)
+        report = await self._read.proposal_report(
+            group_id=scope.personal_group_id,
+            context=proposal_context,
+            cursor=cursor_id,
+            limit=limit,
+        )
+        proposals: list[JsonDict] = []
+        for row in report["rows"]:
+            outcome = str(row["outcome"])
+            lifecycle = row["lifecycle_state"]
+            current_state = (
+                (
+                    "accepted"
+                    if lifecycle == FactLifecycle.ACTIVE.value
+                    else "rejected"
+                    if lifecycle == FactLifecycle.RETRACTED.value
+                    else "pending"
+                )
+                if lifecycle is not None
+                else None
+            )
+            proposals.append(
+                {
+                    "attempt_ref": row["attempt_ref"],
+                    "proposal_ref": row["proposal_ref"],
+                    "fact_key": row["fact_key"],
+                    "predicate": row["predicate"],
+                    "object": row["object"],
+                    "outcome": outcome,
+                    "operation": row["operation"],
+                    "current_state": current_state,
+                    "proposal_context": dict(row["context"]),
+                    "detail": dict(row["detail"]),
+                    "recorded_at": row["created_at"].isoformat(),
+                }
+            )
+        return {
+            "proposal_context": proposal_context,
+            "counts": dict(report["counts"]),
+            "states": dict(report["states"]),
+            "proposals": proposals,
+            "next_cursor": report["next_cursor"],
+        }
 
     # -------------------------------------------------------------- governance ---
 
@@ -673,9 +1300,12 @@ class KnowledgeService:
         async with SqlAlchemyUnitOfWork(self._c.sessionmaker) as uow:
             await uow.use_tenant(group)
             session = uow.session
-            await SqlAlchemyFactRepository(session).set_lifecycle(
-                group_id=group, fact_id=fact["fact_id"], state=to
-            )
+            facts = SqlAlchemyFactRepository(session)
+            await facts.lock_fact_key(group_id=group, fact_key=fact_key)
+            current = await facts.by_fact_key_for_update(group_id=group, fact_key=fact_key)
+            if current is None or current.lifecycle_state is not FactLifecycle.PROPOSED:
+                raise ScopeError("fact is not awaiting review")
+            await facts.set_lifecycle(group_id=group, fact_id=str(current.id), state=to)
             await SqlAlchemyKnowledgeEventLog(session).append(
                 KnowledgeEvent(
                     id=uuid7(),
@@ -683,7 +1313,7 @@ class KnowledgeService:
                     event_type=event,
                     occurred_at=utc_now(),
                     actor=str(principal_id),
-                    fact_id=UUID(fact["fact_id"]),
+                    fact_id=current.id,
                     reason=reason,
                 )
             )
@@ -694,7 +1324,7 @@ class KnowledgeService:
             ):
                 await SqlAlchemyOutboxRepository(session).add(
                     group_id=group,
-                    source_id=f"fact-activation:{fact['fact_id']}",
+                    source_id=f"fact-activation:{current.id}",
                     dedup_uuid=uuid7(),
                     payload={"job_kind": "embed_facts", "group_id": group},
                 )

@@ -7,6 +7,7 @@ queue and fact timeline are readable governance surfaces.
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from contextlib import asynccontextmanager
@@ -286,20 +287,515 @@ async def test_get_evidence_endpoint(
 async def test_feedback_endpoint_records_and_validates(
     sessionmaker: async_sessionmaker[AsyncSession], app_client: AsyncClient
 ) -> None:
-    _, admin_key, _ = await _tenancy(sessionmaker)
+    group, admin_key, _ = await _tenancy(sessionmaker)
+
+    context = await app_client.post(
+        "/v2/knowledge/context",
+        headers=_auth(admin_key),
+        json={"query": "where does it run", "project": group, "persist": True},
+    )
+    assert context.status_code == 200
+    pack_id = context.json()["pack_id"]
 
     ok = await app_client.post(
         "/v2/knowledge/feedback",
         headers=_auth(admin_key),
-        json={"result_ref": "some-fact-key", "signal": "up"},
+        json={
+            "context_pack_id": pack_id,
+            "result_ref": pack_id,
+            "signal": "up",
+        },
     )
     assert ok.status_code == 200
     assert ok.json()["status"] == "recorded"
+    assert ok.json()["query"] == "where does it run"
+    assert ok.json()["rank"] is None
+
+    replay = await app_client.post(
+        "/v2/knowledge/feedback",
+        headers=_auth(admin_key),
+        json={"context_pack_id": pack_id, "result_ref": pack_id, "signal": "down"},
+    )
+    assert replay.status_code == 200
+    assert replay.json()["status"] == "deduplicated"
+    assert replay.json()["signal"] == "up"
+    assert replay.json()["requested_signal"] == "down"
+    async with sessionmaker() as session:
+        stored_signal = await session.scalar(
+            text(
+                "SELECT signal FROM retrieval_feedback "
+                "WHERE context_pack_id = CAST(:pack_id AS uuid)"
+            ),
+            {"pack_id": pack_id},
+        )
+    assert stored_signal == "up"
+
+    spoofed = await app_client.post(
+        "/v2/knowledge/feedback",
+        headers=_auth(admin_key),
+        json={"context_pack_id": pack_id, "result_ref": "some-fact-key", "signal": "up"},
+    )
+    assert spoofed.status_code == 400
+
+    async with sessionmaker.begin() as session:
+        expired_pack_id = await session.scalar(
+            text(
+                "INSERT INTO context_packs "
+                "(group_id, query, token_estimate, result_count, omitted, conflicts, "
+                "freshness_warnings, results, request_hash, result_references, expires_at, "
+                "assembler_version, request) VALUES "
+                "(:group_id, 'expired query', 0, 0, 0, 0, 0, '[]'::jsonb, :request_hash, "
+                "'[]'::jsonb, now() - interval '1 second', 'context-assembler-v3', '{}'::jsonb) "
+                "RETURNING id"
+            ),
+            {"group_id": group, "request_hash": "e" * 64},
+        )
+    expired = await app_client.post(
+        "/v2/knowledge/feedback",
+        headers=_auth(admin_key),
+        json={
+            "context_pack_id": str(expired_pack_id),
+            "result_ref": str(expired_pack_id),
+            "signal": "up",
+        },
+    )
+    assert expired.status_code == 410
 
     # An invalid signal is rejected by request validation.
     bad = await app_client.post(
         "/v2/knowledge/feedback",
         headers=_auth(admin_key),
-        json={"result_ref": "some-fact-key", "signal": "sideways"},
+        json={"context_pack_id": pack_id, "result_ref": pack_id, "signal": "sideways"},
     )
     assert bad.status_code == 422
+
+
+async def test_personal_proposal_retry_report_and_self_retract_are_idempotent(
+    sessionmaker: async_sessionmaker[AsyncSession], app_client: AsyncClient
+) -> None:
+    _, other_key, caller_key = await _tenancy(sessionmaker)
+    proposal = {
+        "subject": "checkout-api",
+        "predicate": "RUNS_ON",
+        "object": "staging",
+        "evidence_text": "Observed in the deployment manifest",
+        "runtime": "OpenCode",
+        "session_ref": "session-7",
+        "task_ref": "task-15",
+        "repository_ref": "https://token@github.com/Acme/Checkout.git?secret=yes",
+    }
+
+    created = await app_client.post(
+        "/v2/knowledge/propose", headers=_auth(caller_key), json=proposal
+    )
+    assert created.status_code == 200
+    assert created.json()["operation"] == "created"
+    assert created.json()["proposal_context"]["runtime"] == "opencode"
+    assert created.json()["proposal_context"]["repository_ref"] == ("github.com/Acme/Checkout")
+    fact_key = created.json()["fact_key"]
+
+    retried = await app_client.post(
+        "/v2/knowledge/propose", headers=_auth(caller_key), json=proposal
+    )
+    assert retried.status_code == 200
+    assert retried.json()["operation"] == "deduplicated"
+    assert retried.json()["proposal_ref"] == created.json()["proposal_ref"]
+    async with sessionmaker() as session:
+        evidence_count = await session.scalar(
+            text("SELECT count(*) FROM evidence WHERE assertion_id = CAST(:proposal_ref AS uuid)"),
+            {"proposal_ref": created.json()["proposal_ref"]},
+        )
+    assert evidence_count == 1
+
+    conflict = await app_client.post(
+        "/v2/knowledge/propose",
+        headers=_auth(caller_key),
+        json={**proposal, "object": "production"},
+    )
+    assert conflict.status_code == 200
+    assert conflict.json()["status"] == "conflicted"
+
+    rejected = await app_client.post(
+        "/v2/knowledge/propose",
+        headers=_auth(caller_key),
+        json={**proposal, "predicate": "NOT_IN_ONTOLOGY"},
+    )
+    assert rejected.status_code == 400
+    invalid_context = await app_client.post(
+        "/v2/knowledge/propose",
+        headers=_auth(caller_key),
+        json={**proposal, "repository_ref": "/home/alice/private/checkout"},
+    )
+    assert invalid_context.status_code == 400
+    credential_context = await app_client.post(
+        "/v2/knowledge/propose",
+        headers=_auth(caller_key),
+        json={**proposal, "repository_ref": "user:secret@github.com/Acme/Checkout.git"},
+    )
+    assert credential_context.status_code == 400
+    assert "secret" not in credential_context.text
+    other_context = await app_client.post(
+        "/v2/knowledge/propose",
+        headers=_auth(caller_key),
+        json={
+            **proposal,
+            "subject": "other-session-api",
+            "session_ref": "session-8",
+            "repository_ref": "git@github.com:Acme/Other.git",
+        },
+    )
+    assert other_context.status_code == 200
+    assert other_context.json()["operation"] == "created"
+
+    concurrent = {
+        **proposal,
+        "subject": "concurrent-api",
+        "evidence_text": None,
+    }
+    first, second = await asyncio.gather(
+        app_client.post(
+            "/v2/knowledge/propose",
+            headers=_auth(caller_key),
+            json={**concurrent, "object": "staging"},
+        ),
+        app_client.post(
+            "/v2/knowledge/propose",
+            headers=_auth(caller_key),
+            json={**concurrent, "object": "production"},
+        ),
+    )
+    assert {first.json()["status"], second.json()["status"]} == {
+        "proposed",
+        "conflicted",
+    }
+
+    # Historical rows with the same fact key must not duplicate attempt rows in reports.
+    group = created.json()["group_id"]
+    async with _tenant(sessionmaker, group) as session:
+        await session.execute(
+            text(
+                "INSERT INTO facts (group_id, fact_key, slot_key, subject_entity_id, predicate, "
+                "object_type, normalized_object, object_entity_id, object_scalar, qualifiers, "
+                "lifecycle_state, authority, confidence, valid_from, valid_to, expires_at, "
+                "system_from, system_to, ontology_version_id) "
+                "SELECT group_id, fact_key, slot_key, subject_entity_id, predicate, object_type, "
+                "normalized_object, object_entity_id, object_scalar, qualifiers, 'retracted', "
+                "authority, confidence, valid_from, valid_to, expires_at, "
+                "system_from - interval '1 hour', system_from - interval '30 minutes', "
+                "ontology_version_id FROM facts WHERE fact_key = :fact_key "
+                "ORDER BY system_from DESC LIMIT 1"
+            ),
+            {"fact_key": fact_key},
+        )
+
+    report_params = {
+        "runtime": "opencode",
+        "session_ref": "session-7",
+        "task_ref": "task-15",
+        "repository_ref": "git@github.com:Acme/Checkout.git",
+    }
+    report = await app_client.get(
+        "/v2/knowledge/proposals/report",
+        headers=_auth(caller_key),
+        params=report_params,
+    )
+    assert report.status_code == 200
+    assert report.json()["counts"] == {
+        "created": 2,
+        "skipped": 2,
+        "deduplicated": 1,
+        "conflicted": 2,
+        "rejected": 1,
+    }
+    assert report.json()["states"] == {"pending": 2}
+    assert len(report.json()["proposals"]) == 6
+    assert report.json()["next_cursor"] is None
+    assert "/home/alice" not in str(report.json())
+    assert all(
+        item["proposal_context"].get("session_ref") == "session-7"
+        for item in report.json()["proposals"]
+    )
+
+    first_page = await app_client.get(
+        "/v2/knowledge/proposals/report",
+        headers=_auth(caller_key),
+        params={**report_params, "limit": 2},
+    )
+    assert first_page.status_code == 200
+    assert len(first_page.json()["proposals"]) == 2
+    assert first_page.json()["counts"] == report.json()["counts"]
+    assert first_page.json()["states"] == report.json()["states"]
+    assert first_page.json()["next_cursor"] is not None
+    second_page = await app_client.get(
+        "/v2/knowledge/proposals/report",
+        headers=_auth(caller_key),
+        params={
+            **report_params,
+            "cursor": first_page.json()["next_cursor"],
+            "limit": 2,
+        },
+    )
+    assert second_page.status_code == 200
+    assert len(second_page.json()["proposals"]) == 2
+    assert {item["attempt_ref"] for item in first_page.json()["proposals"]}.isdisjoint(
+        item["attempt_ref"] for item in second_page.json()["proposals"]
+    )
+
+    empty_report = await app_client.get("/v2/knowledge/proposals/report", headers=_auth(caller_key))
+    assert empty_report.status_code == 400
+
+    denied = await app_client.post(
+        f"/v2/knowledge/proposals/{fact_key}/retract", headers=_auth(other_key)
+    )
+    assert denied.status_code == 403
+
+    retracted = await app_client.post(
+        f"/v2/knowledge/proposals/{fact_key}/retract", headers=_auth(caller_key)
+    )
+    assert retracted.status_code == 200
+    assert retracted.json()["operation"] == "retracted"
+    repeated = await app_client.post(
+        f"/v2/knowledge/proposals/{fact_key}/retract", headers=_auth(caller_key)
+    )
+    assert repeated.status_code == 200
+    assert repeated.json()["operation"] == "already_retracted"
+    cannot_reactivate = await app_client.post(
+        f"/v2/knowledge/review/{fact_key}/promote", headers=_auth(caller_key)
+    )
+    assert cannot_reactivate.status_code == 403
+
+    updated_report = await app_client.get(
+        "/v2/knowledge/proposals/report",
+        headers=_auth(caller_key),
+        params={"session_ref": "session-7", "task_ref": "task-15"},
+    )
+    assert updated_report.status_code == 200
+    assert updated_report.json()["counts"]["rejected"] == 3
+    assert updated_report.json()["states"] == {"rejected": 1, "pending": 1}
+
+    async with _tenant(sessionmaker, group) as session:
+        lifecycle = await session.scalar(
+            text(
+                "SELECT lifecycle_state FROM facts WHERE fact_key = :fact_key "
+                "ORDER BY system_from DESC, id DESC LIMIT 1"
+            ),
+            {"fact_key": fact_key},
+        )
+        assertion_state = await session.scalar(
+            text("SELECT state FROM assertions WHERE id = CAST(:id AS uuid)"),
+            {"id": created.json()["proposal_ref"]},
+        )
+        retract_events = await session.scalar(
+            text(
+                "SELECT count(*) FROM knowledge_events "
+                "WHERE fact_id IN (SELECT id FROM facts WHERE fact_key = :fact_key) "
+                "AND event_type = 'FACT_RETRACTED'"
+            ),
+            {"fact_key": fact_key},
+        )
+    assert lifecycle == "retracted"
+    assert assertion_state == "withdrawn"
+    assert retract_events == 1
+
+
+async def test_fallback_proposal_quota_serializes_across_repository_contexts(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    app_client: AsyncClient,
+    governance_container: Container,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, _, caller_key = await _tenancy(sessionmaker)
+    monkeypatch.setattr(governance_container.settings.knowledge, "proposals_per_task", 1)
+
+    first, second = await asyncio.gather(
+        app_client.post(
+            "/v2/knowledge/propose",
+            headers=_auth(caller_key),
+            json={
+                "subject": "quota-api-one",
+                "predicate": "RUNS_ON",
+                "object": "staging",
+                "runtime": "opencode",
+                "repository_ref": "git@github.com:Acme/One.git",
+            },
+        ),
+        app_client.post(
+            "/v2/knowledge/propose",
+            headers=_auth(caller_key),
+            json={
+                "subject": "quota-api-two",
+                "predicate": "RUNS_ON",
+                "object": "staging",
+                "runtime": "opencode",
+                "repository_ref": "git@github.com:Acme/Two.git",
+            },
+        ),
+    )
+
+    assert first.status_code == second.status_code == 200
+    assert {first.json()["operation"], second.json()["operation"]} == {"created", "skipped"}
+
+
+async def test_proposal_retraction_serializes_with_a_concurrent_retry(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    app_client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, _, caller_key = await _tenancy(sessionmaker)
+    proposal = {
+        "subject": "race-api",
+        "predicate": "RUNS_ON",
+        "object": "staging",
+        "task_ref": "race-task",
+    }
+    created = await app_client.post(
+        "/v2/knowledge/propose", headers=_auth(caller_key), json=proposal
+    )
+    assert created.status_code == 200
+    target_fact_key = str(created.json()["fact_key"])
+
+    original_lock = SqlAlchemyFactRepository.lock_fact_key
+    original_read = SqlAlchemyFactRepository.by_fact_key_for_update
+    retraction_holding = asyncio.Event()
+    proposal_waiting = asyncio.Event()
+    release_retraction = asyncio.Event()
+    target_lock_calls = 0
+
+    async def tracked_lock(
+        repository: SqlAlchemyFactRepository, *, group_id: str, fact_key: str
+    ) -> None:
+        nonlocal target_lock_calls
+        if fact_key == target_fact_key:
+            target_lock_calls += 1
+            if target_lock_calls == 2:
+                proposal_waiting.set()
+        await original_lock(repository, group_id=group_id, fact_key=fact_key)
+
+    async def paused_read(
+        repository: SqlAlchemyFactRepository, *, group_id: str, fact_key: str
+    ) -> Fact | None:
+        fact = await original_read(repository, group_id=group_id, fact_key=fact_key)
+        retraction_holding.set()
+        await release_retraction.wait()
+        return fact
+
+    monkeypatch.setattr(SqlAlchemyFactRepository, "lock_fact_key", tracked_lock)
+    monkeypatch.setattr(SqlAlchemyFactRepository, "by_fact_key_for_update", paused_read)
+
+    retraction = asyncio.create_task(
+        app_client.post(
+            f"/v2/knowledge/proposals/{target_fact_key}/retract",
+            headers=_auth(caller_key),
+        )
+    )
+    await asyncio.wait_for(retraction_holding.wait(), timeout=2)
+    retry = asyncio.create_task(
+        app_client.post("/v2/knowledge/propose", headers=_auth(caller_key), json=proposal)
+    )
+    try:
+        await asyncio.wait_for(proposal_waiting.wait(), timeout=2)
+        assert not retry.done()
+    finally:
+        release_retraction.set()
+    retracted, retried = await asyncio.gather(retraction, retry)
+
+    assert retracted.status_code == 200
+    assert retracted.json()["operation"] == "retracted"
+    assert retried.status_code == 200
+    assert retried.json()["status"] == "conflicted"
+    async with sessionmaker() as session:
+        active_assertions = await session.scalar(
+            text(
+                "SELECT count(*) FROM assertions a JOIN facts f ON f.id = a.fact_id "
+                "WHERE f.fact_key = :fact_key AND a.state = 'active'"
+            ),
+            {"fact_key": target_fact_key},
+        )
+    assert active_assertions == 0
+
+
+async def test_proposal_retraction_serializes_with_a_concurrent_promotion(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    app_client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, _, caller_key = await _tenancy(sessionmaker)
+    created = await app_client.post(
+        "/v2/knowledge/propose",
+        headers=_auth(caller_key),
+        json={"subject": "review-race-api", "predicate": "RUNS_ON", "object": "staging"},
+    )
+    assert created.status_code == 200
+    target_fact_key = str(created.json()["fact_key"])
+
+    original_lock = SqlAlchemyFactRepository.lock_fact_key
+    original_read = SqlAlchemyFactRepository.by_fact_key_for_update
+    retraction_holding = asyncio.Event()
+    promotion_waiting = asyncio.Event()
+    release_retraction = asyncio.Event()
+    target_lock_calls = 0
+    target_read_calls = 0
+
+    async def tracked_lock(
+        repository: SqlAlchemyFactRepository, *, group_id: str, fact_key: str
+    ) -> None:
+        nonlocal target_lock_calls
+        if fact_key == target_fact_key:
+            target_lock_calls += 1
+            if target_lock_calls == 2:
+                promotion_waiting.set()
+        await original_lock(repository, group_id=group_id, fact_key=fact_key)
+
+    async def paused_read(
+        repository: SqlAlchemyFactRepository, *, group_id: str, fact_key: str
+    ) -> Fact | None:
+        nonlocal target_read_calls
+        fact = await original_read(repository, group_id=group_id, fact_key=fact_key)
+        if fact_key == target_fact_key:
+            target_read_calls += 1
+            if target_read_calls == 1:
+                retraction_holding.set()
+                await release_retraction.wait()
+        return fact
+
+    monkeypatch.setattr(SqlAlchemyFactRepository, "lock_fact_key", tracked_lock)
+    monkeypatch.setattr(SqlAlchemyFactRepository, "by_fact_key_for_update", paused_read)
+
+    retraction = asyncio.create_task(
+        app_client.post(
+            f"/v2/knowledge/proposals/{target_fact_key}/retract",
+            headers=_auth(caller_key),
+        )
+    )
+    await asyncio.wait_for(retraction_holding.wait(), timeout=2)
+    promotion = asyncio.create_task(
+        app_client.post(
+            f"/v2/knowledge/review/{target_fact_key}/promote",
+            headers=_auth(caller_key),
+        )
+    )
+    try:
+        await asyncio.wait_for(promotion_waiting.wait(), timeout=2)
+        assert not promotion.done()
+    finally:
+        release_retraction.set()
+    retracted, promoted = await asyncio.gather(retraction, promotion)
+
+    assert retracted.status_code == 200
+    assert retracted.json()["operation"] == "retracted"
+    assert promoted.status_code == 403
+    async with sessionmaker() as session:
+        lifecycle = await session.scalar(
+            text("SELECT lifecycle_state FROM facts WHERE fact_key = :fact_key"),
+            {"fact_key": target_fact_key},
+        )
+        activation_events = await session.scalar(
+            text(
+                "SELECT count(*) FROM knowledge_events "
+                "WHERE fact_id = (SELECT id FROM facts WHERE fact_key = :fact_key) "
+                "AND event_type = 'FACT_ACTIVATED'"
+            ),
+            {"fact_key": target_fact_key},
+        )
+    assert lifecycle == "retracted"
+    assert activation_events == 0

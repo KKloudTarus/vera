@@ -8,7 +8,9 @@ the MCP SDK responds 401 with the protected-resource metadata pointer.
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from typing import Any, cast
+from uuid import UUID
 
 import jwt
 from mcp.server.auth.provider import AccessToken, TokenVerifier
@@ -23,12 +25,14 @@ class JwtTokenVerifier(TokenVerifier):
         issuer: str,
         audience: str,
         required_scopes: list[str],
+        principal_exists: Callable[[UUID], Awaitable[bool]],
     ) -> None:
         self._secret = secret
         self._algorithm = algorithm
         self._issuer = issuer
         self._audience = audience
         self._required_scopes = set(required_scopes)
+        self._principal_exists = principal_exists
 
     def _scopes(self, claims: dict[str, Any]) -> list[str]:
         raw = claims.get("scope")
@@ -57,11 +61,17 @@ class JwtTokenVerifier(TokenVerifier):
         subject = claims.get("sub")
         if not subject:
             return None
+        try:
+            principal_id = UUID(str(subject))
+        except ValueError:
+            return None
+        if not await self._principal_exists(principal_id):
+            return None
         return AccessToken(
             token=token,
-            client_id=str(subject),
+            client_id=str(principal_id),
             scopes=scopes,
-            subject=str(subject),
+            subject=str(principal_id),
             resource=self._audience,
             claims=claims,
         )

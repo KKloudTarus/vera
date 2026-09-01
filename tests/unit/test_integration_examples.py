@@ -132,11 +132,16 @@ def test_skill_declares_name_and_untrusted_content_rule() -> None:
     assert "description:" in frontmatter
     # The core safety rule must be stated in the skill body.
     assert "untrusted reference data" in skill
+    assert "knowledge_bootstrap" in skill
+    assert "knowledge_proposal_report" in skill
+    assert "knowledge_retract_proposal" in skill
 
 
 def test_project_instructions_are_present_and_minimal() -> None:
     agents = (_EXAMPLES / "AGENTS.md").read_text()
     assert "knowledge_get_context" in agents
+    assert "knowledge_bootstrap" in agents
+    assert "knowledge_proposal_report" in agents
     assert "suggest" in agents
     assert "untrusted reference data" in agents
     # Claude Code loads AGENTS.md through a one-line import rather than a copy. The example

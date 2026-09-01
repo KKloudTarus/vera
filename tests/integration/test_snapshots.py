@@ -34,6 +34,7 @@ from vera.adapters.persistence.unit_of_work import SqlAlchemyUnitOfWork
 from vera.application.retrieval import ContextAssembler
 from vera.application.snapshot import (
     ContextPackExpiredError,
+    ContextPackQuotaExceededError,
     ContextPackService,
     SnapshotNotFoundError,
     SnapshotNotReproducibleError,
@@ -68,10 +69,12 @@ def _context_service(
     sessionmaker: async_sessionmaker[AsyncSession],
     *,
     read_sessionmaker: async_sessionmaker[AsyncSession] | None = None,
+    max_persisted_per_group: int = 1000,
 ) -> ContextPackService:
     return ContextPackService(
         assembler=_assembler(read_sessionmaker or sessionmaker),
         uow_factory=lambda: SqlAlchemyUnitOfWork(sessionmaker),
+        max_persisted_per_group=max_persisted_per_group,
     )
 
 
@@ -435,6 +438,102 @@ async def test_snapshot_query_is_reproducible_after_supersession(
     assert not any(r["kind"] == "fact" and r["ref"] == eks_key for r in latest.results)
 
 
+async def test_snapshot_fact_filter_canonicalizes_legacy_repository(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    from vera.adapters.persistence.models.knowledge import ArtifactRow, ArtifactVersionRow
+
+    group = f"p:s-{uuid7().hex[:12]}"
+    subject = await _setup(sessionmaker, group)
+    fact_id, fact_key = await _add_fact(sessionmaker, group, subject, "eks")
+    async with sessionmaker() as session:
+        project = (
+            await session.execute(
+                text("SELECT id, workspace_id FROM projects WHERE group_id = :group"),
+                {"group": group},
+            )
+        ).one()
+    async with SqlAlchemyUnitOfWork(sessionmaker) as uow:
+        await uow.use_tenant(group)
+        source_id = await uow.sources.create(
+            workspace_id=project.workspace_id,
+            project_id=project.id,
+            kind="cmdb",
+            name="Legacy repository",
+            trust_tier=1,
+        )
+        await uow.commit()
+    async with _tenant(sessionmaker, group) as session:
+        await session.execute(
+            text("UPDATE knowledge_sources SET config = CAST(:config AS jsonb) WHERE id = :id"),
+            {
+                "id": source_id,
+                "config": '{"repository":"https://token@github.com/Acme/Legacy.git"}',
+            },
+        )
+        artifact = ArtifactRow(
+            source_id=source_id,
+            external_id="legacy-repository-fact",
+            content_hash="legacy-repository-fact",
+            s3_key="legacy-repository-fact",
+            reference_time=utc_now(),
+        )
+        session.add(artifact)
+        await session.flush()
+        version = ArtifactVersionRow(
+            artifact_id=artifact.id,
+            version=1,
+            content_hash="legacy-repository-fact",
+            s3_key="legacy-repository-fact",
+            reference_time=utc_now(),
+        )
+        session.add(version)
+        await session.flush()
+        await SqlAlchemyAssertionRepository(session).upsert(
+            Assertion(
+                id=uuid7(),
+                group_id=group,
+                fact_id=fact_id,
+                polarity=Polarity.SUPPORTS,
+                recorded_at=utc_now(),
+                run_key=str(uuid7()),
+                knowledge_source_id=source_id,
+                artifact_id=artifact.id,
+                artifact_version_id=version.id,
+            )
+        )
+
+    snapshot = await _snapshot_service(sessionmaker).create(group_id=group)
+    async with sessionmaker() as session, session.begin():
+        await session.execute(
+            text(
+                "ALTER TABLE snapshot_fact_sources DISABLE TRIGGER snapshot_fact_sources_immutable"
+            )
+        )
+        await session.execute(
+            text(
+                "UPDATE snapshot_fact_sources SET repository = :repository "
+                "WHERE snapshot_id = CAST(:snapshot_id AS uuid) AND fact_id = :fact_id"
+            ),
+            {
+                "repository": "https://token@github.com/Acme/Legacy.git",
+                "snapshot_id": snapshot.id,
+                "fact_id": fact_id,
+            },
+        )
+        await session.execute(
+            text("ALTER TABLE snapshot_fact_sources ENABLE TRIGGER snapshot_fact_sources_immutable")
+        )
+    pack = await _context_service(sessionmaker).create(
+        group_id=group,
+        query="eks",
+        snapshot_id=snapshot.id,
+        filters=RetrievalFilters(repository="github.com/Acme/Legacy"),
+    )
+
+    assert any(result["ref"] == fact_key for result in pack.results)
+
+
 async def test_context_pack_is_persisted_and_retrievable(
     sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -453,12 +552,14 @@ async def test_context_pack_is_persisted_and_retrievable(
     assert len(created.request_hash) == 64
     assert created.result_references == [str(result["ref"]) for result in created.results]
     assert created.expires_at > created.created_at
-    assert created.assembler_version == "context-assembler-v2"
+    assert created.assembler_version == "context-assembler-v3"
     assert created.request["query"] == "eks"
     assert created.request["hints"] == {"task": "deploy"}
     canonical_request = json.dumps(created.request, sort_keys=True, separators=(",", ":"))
     assert hashlib.sha256(canonical_request.encode()).hexdigest() == created.request_hash
     assert all(r["citation"]["ref"] for r in created.results)  # citations survive the round trip
+    retried = await service.create(group_id=group, query="eks", hints={"task": "deploy"})
+    assert retried.id == created.id
     assert await service.get(group_id=f"p:other-{uuid7().hex[:12]}", pack_id=created.id) is None
     before = await _count(sessionmaker, group, "SELECT count(*) FROM context_packs")
     assert await service.get(group_id=group, pack_id=created.id) == created
@@ -525,7 +626,7 @@ async def test_context_pack_is_persisted_and_retrievable(
                 request_hash="1" * 64,
                 result_references=[],
                 expires_at=utc_now() + timedelta(days=1),
-                assembler_version="context-assembler-v2",
+                assembler_version="context-assembler-v3",
                 request={},
             )
             await uow.commit()
@@ -549,7 +650,7 @@ async def test_context_pack_is_persisted_and_retrievable(
         old_assembler_snapshot = await uow.snapshots.create(
             group_id=group,
             policy_version="ontology-v2",
-            assembler_version="context-assembler-v1",
+            assembler_version="context-assembler-v2",
         )
         await uow.commit()
     with pytest.raises(SnapshotNotReproducibleError, match="assembler version"):
@@ -592,6 +693,185 @@ async def test_context_pack_is_persisted_and_retrievable(
         )
     with pytest.raises(SnapshotNotReproducibleError, match="predates frozen retrieval"):
         await service.create(group_id=group, query="eks", snapshot_id=str(legacy_id))
+
+
+async def test_context_pack_persistence_is_explicit_pruned_and_quota_bounded(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    group = f"p:cp-{uuid7().hex[:12]}"
+    subject = await _setup(sessionmaker, group)
+    await _add_fact(sessionmaker, group, subject, "eks")
+    service = _context_service(sessionmaker, max_persisted_per_group=1)
+
+    ephemeral = await service.create(group_id=group, query="ephemeral", persist=False)
+    assert ephemeral.id is None
+    assert await _count(sessionmaker, group, "SELECT count(*) FROM context_packs") == 0
+
+    persisted = await service.create(group_id=group, query="persisted")
+    assert persisted.id is not None
+    with pytest.raises(ContextPackQuotaExceededError, match="quota reached"):
+        await service.create(group_id=group, query="another persisted pack")
+
+    expired_group = f"p:cp-{uuid7().hex[:12]}"
+    expired_subject = await _setup(sessionmaker, expired_group)
+    await _add_fact(sessionmaker, expired_group, expired_subject, "ecs")
+    async with sessionmaker() as session, session.begin():
+        await session.execute(
+            text(
+                "INSERT INTO context_packs "
+                "(group_id, query, request_hash, expires_at, assembler_version) "
+                "SELECT :group_id, 'expired', repeat('e', 64), now() - interval '1 second', "
+                "'context-assembler-v3' FROM generate_series(1, 1001)"
+            ),
+            {"group_id": expired_group},
+        )
+
+    replacement = await _context_service(sessionmaker, max_persisted_per_group=1).create(
+        group_id=expired_group, query="replacement"
+    )
+    assert replacement.id is not None
+    assert await _count(sessionmaker, expired_group, "SELECT count(*) FROM context_packs") == 2
+    assert (
+        await _count(
+            sessionmaker,
+            expired_group,
+            "SELECT count(*) FROM context_packs WHERE expires_at <= now()",
+        )
+        == 1
+    )
+
+
+async def test_context_pack_retry_deduplicates_time_dependent_recency(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    group = f"p:cp-{uuid7().hex[:12]}"
+    subject = await _setup(sessionmaker, group)
+    await _add_fact(
+        sessionmaker,
+        group,
+        subject,
+        "eks",
+        valid_from=utc_now() - timedelta(days=1),
+    )
+    service = _context_service(sessionmaker, max_persisted_per_group=1)
+
+    first = await service.create(group_id=group, query="dated retry")
+    second = await service.create(group_id=group, query="dated retry")
+
+    assert second.id == first.id
+    assert await _count(sessionmaker, group, "SELECT count(*) FROM context_packs") == 1
+
+
+async def test_context_pack_dedup_finds_an_older_stable_match(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    group = f"p:cp-{uuid7().hex[:12]}"
+    await _setup(sessionmaker, group)
+    expires_at = utc_now() + timedelta(days=1)
+    result_a = [{"ref": "fact", "text": "A", "score": 0.2, "signals": {"recency": 0.2}}]
+    result_b = [{"ref": "fact", "text": "B", "score": 0.3, "signals": {"recency": 0.3}}]
+    async with SqlAlchemyUnitOfWork(sessionmaker) as uow:
+        await uow.use_tenant(group)
+        first = await uow.context_packs.save(
+            group_id=group,
+            query="retry",
+            token_estimate=1,
+            result_count=1,
+            omitted=0,
+            conflicts=0,
+            freshness_warnings=0,
+            results=result_a,
+            request_hash="a" * 64,
+            result_references=["fact"],
+            expires_at=expires_at,
+            assembler_version="context-assembler-v3",
+            request={"query": "retry"},
+        )
+        await uow.context_packs.save(
+            group_id=group,
+            query="retry",
+            token_estimate=1,
+            result_count=1,
+            omitted=0,
+            conflicts=0,
+            freshness_warnings=0,
+            results=result_b,
+            request_hash="a" * 64,
+            result_references=["fact"],
+            expires_at=expires_at,
+            assembler_version="context-assembler-v3",
+            request={"query": "retry"},
+        )
+        await uow.context_packs.save(
+            group_id=group,
+            query="retry",
+            token_estimate=1,
+            result_count=1,
+            omitted=0,
+            conflicts=0,
+            freshness_warnings=0,
+            results=result_a,
+            request_hash="a" * 64,
+            result_references=["fact"],
+            expires_at=expires_at,
+            assembler_version="context-assembler-v2",
+            request={"query": "retry"},
+        )
+        equivalent = await uow.context_packs.equivalent(
+            group_id=group,
+            request_hash="a" * 64,
+            result_references=["fact"],
+            results=[{"ref": "fact", "text": "A", "score": 0.1, "signals": {"recency": 0.1}}],
+            assembler_version="context-assembler-v3",
+        )
+        await uow.commit()
+
+    assert equivalent is not None
+    assert equivalent.id == first.id
+
+
+async def test_worker_maintenance_deletes_expired_context_in_bounded_batches(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    engine: AsyncEngine,
+) -> None:
+    group = f"p:cp-{uuid7().hex[:12]}"
+    await _setup(sessionmaker, group)
+    async with sessionmaker() as session, session.begin():
+        await session.execute(
+            text(
+                "INSERT INTO context_packs "
+                "(group_id, query, request_hash, expires_at, assembler_version) "
+                "SELECT :group_id, 'expired', repeat('e', 64), now() - interval '1 second', "
+                "'context-assembler-v3' FROM generate_series(1, 2001)"
+            ),
+            {"group_id": group},
+        )
+
+    workers = create_sessionmaker(engine, role="vera_worker")
+    first_batch_locked = asyncio.Event()
+    release_first_batch = asyncio.Event()
+
+    async def cleanup(*, hold_transaction: bool = False) -> int:
+        async with workers() as session, session.begin():
+            removed = await session.scalar(text("SELECT delete_all_expired_context_packs()"))
+            if hold_transaction:
+                first_batch_locked.set()
+                await release_first_batch.wait()
+        return int(removed or 0)
+
+    first = asyncio.create_task(cleanup(hold_transaction=True))
+    await asyncio.wait_for(first_batch_locked.wait(), timeout=2)
+    try:
+        second_removed = await cleanup()
+    finally:
+        release_first_batch.set()
+    first_removed = await first
+    third_removed = await cleanup()
+
+    assert first_removed == 1000
+    assert second_removed == 1000
+    assert third_removed == 1
+    assert await _count(sessionmaker, group, "SELECT count(*) FROM context_packs") == 0
 
 
 @pytest.mark.issue6_acceptance

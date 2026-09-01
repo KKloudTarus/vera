@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from sqlalchemy import select, update
+from sqlalchemy import select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from vera.adapters.persistence.models.canonical import CanonicalEntityRow, EntityAliasRow
@@ -27,6 +27,12 @@ def _to_entity(row: CanonicalEntityRow) -> CanonicalEntity:
 class SqlAlchemyCanonicalEntityRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
+
+    async def lock_name(self, *, group_id: str, name: str) -> None:
+        await self._session.execute(
+            text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+            {"key": f"{group_id}:entity:{normalize_name(name)}"},
+        )
 
     async def create(
         self,

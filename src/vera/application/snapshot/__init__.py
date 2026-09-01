@@ -2,6 +2,7 @@
 
 from vera.application.snapshot.service import (
     ContextPackExpiredError,
+    ContextPackQuotaExceededError,
     ContextPackService,
     SnapshotNotFoundError,
     SnapshotNotReproducibleError,
@@ -11,6 +12,7 @@ from vera.application.snapshot.service import (
 
 __all__ = [
     "ContextPackExpiredError",
+    "ContextPackQuotaExceededError",
     "ContextPackService",
     "SnapshotNotFoundError",
     "SnapshotNotReproducibleError",
