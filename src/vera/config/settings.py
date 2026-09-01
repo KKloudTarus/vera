@@ -249,6 +249,9 @@ class MemorySettings(BaseModel):
     # The graph backend behind Graphiti. Neither is privileged; the graph is a rebuildable
     # projection, so switching is a config change plus a reprocess.
     graph_backend: Literal["neo4j", "falkordb"] = "neo4j"
+    # Cross-lingual retrieval and entity resolution need a multilingual embedder: openai
+    # (text-embedding-3-small) or voyage (voyage-3.5) both embed many languages into one
+    # space. The deterministic embedder is a hash with no semantics, for offline runs only.
     embedder: Literal["deterministic", "openai", "voyage"] = "deterministic"
     embedding_model: str = "text-embedding-3-small"
     embedding_model_version: str = "1"

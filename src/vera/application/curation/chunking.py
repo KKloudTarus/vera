@@ -18,7 +18,10 @@ from vera.domain.knowledge.fabric import Chunk, chunk_key
 from vera.shared.ids import uuid7
 
 _HEADING = re.compile(r"^(#{1,6})[ \t]+(.*?)\s*$")
-_SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+(?=[A-Z(0-9\"'])")
+# Split after sentence punctuation when the next token starts a new sentence. The negative
+# class (not space, digit, or ASCII lowercase) keeps English behavior (no split on "e.g." or
+# a decimal) while also breaking before an accented uppercase start (Vietnamese Đ/Ơ/Ư, etc.).
+_SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+(?=[^\s\da-z])")
 _PY_SYMBOL = re.compile(r"^(async\s+def|def|class)\s+([A-Za-z_][A-Za-z0-9_]*)")
 
 _DEFAULT_MAX_TOKENS = 512

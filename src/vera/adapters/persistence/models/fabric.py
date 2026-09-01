@@ -80,7 +80,7 @@ class ChunkRow(Base, UUIDPK):
     search_vector: Mapped[str | None] = mapped_column(
         TSVECTOR,
         Computed(
-            "to_tsvector('english', "
+            "to_tsvector('simple', "
             "coalesce(heading_path,'') || ' ' || coalesce(symbol_name,'') || ' ' || text)",
             persisted=True,
         ),
@@ -151,7 +151,7 @@ class FactRow(Base, UUIDPK, Timestamps):
     search_vector: Mapped[str | None] = mapped_column(
         TSVECTOR,
         Computed(
-            "to_tsvector('english', "
+            "to_tsvector('simple', "
             "predicate || ' ' || normalized_object || ' ' || coalesce(object_scalar,''))",
             persisted=True,
         ),

@@ -159,14 +159,14 @@ JOIN (
 """
 
 _FACT_OR_QUERY = (
-    "CAST(replace(CAST(plainto_tsquery('english', :q) AS text), ' & ', ' | ') AS tsquery)"
+    "CAST(replace(CAST(plainto_tsquery('simple', :q) AS text), ' & ', ' | ') AS tsquery)"
 )
 _FACT_LEXICAL_SCORE = """(ts_rank(f.search_vector, q.q)
-         + ts_rank(to_tsvector('english', cs.canonical_name), q.q)
-         + ts_rank(to_tsvector('english', coalesce(co.canonical_name, '')), q.q))"""
+         + ts_rank(to_tsvector('simple', cs.canonical_name), q.q)
+         + ts_rank(to_tsvector('simple', coalesce(co.canonical_name, '')), q.q))"""
 _FACT_LEXICAL_MATCH = """f.search_vector @@ q.q
-        OR to_tsvector('english', cs.canonical_name) @@ q.q
-        OR to_tsvector('english', coalesce(co.canonical_name, '')) @@ q.q"""
+        OR to_tsvector('simple', cs.canonical_name) @@ q.q
+        OR to_tsvector('simple', coalesce(co.canonical_name, '')) @@ q.q"""
 _FACTS_COMBINED_LIVE_LIGHTWEIGHT = f"""
 WITH ann AS MATERIALIZED (
     SELECT fe.fact_id,
