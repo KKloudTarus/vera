@@ -2765,6 +2765,12 @@ def test_load_ingestion_builds_expected_and_actual_canonical_facts(
         completed = datetime.now(UTC) - timedelta(milliseconds=10)
         return dict.fromkeys(artifact_ids, completed)
 
+    async def projection_times(
+        _container: Any, _group_id: str, artifact_ids: list[str]
+    ) -> dict[str, datetime]:
+        completed = datetime.now(UTC)
+        return dict.fromkeys(artifact_ids, completed)
+
     async def search_http(**kwargs: Any) -> tuple[int, dict[str, Any]]:
         visibility_queries.append(str(kwargs["query"]))
         return 200, {"facts": [{"id": "actual-result", "fact": "visible"}]}
@@ -2785,6 +2791,7 @@ def test_load_ingestion_builds_expected_and_actual_canonical_facts(
     monkeypatch.setattr(adapter, "_ingest", ingest)
     monkeypatch.setattr(adapter, "_wait_for_group_jobs", settle)
     monkeypatch.setattr(adapter, "_artifact_durable_times", durable_times)
+    monkeypatch.setattr(adapter, "_artifact_projection_times", projection_times)
     monkeypatch.setattr(adapter, "_search_http", search_http)
     monkeypatch.setattr(adapter, "_text_hit", lambda facts, expected: bool(facts and expected))
     monkeypatch.setattr(adapter, "_database_snapshot", snapshot)

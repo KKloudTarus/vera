@@ -23,6 +23,7 @@ from vera.domain.ports.retrieval_index import (
     FactHit,
     PassageHit,
     RetrievalFilters,
+    is_exact_fact_query_candidate,
 )
 from vera.observability import get_logger
 
@@ -545,10 +546,7 @@ class PgVectorHybridFactCandidateSource:
             and restrict_fact_ids is None
             and snapshot_id is None
             and filters is None
-            and any(
-                len(token) >= 3 and token == token.upper() and token.replace("_", "").isalpha()
-                for token in query.split()
-            )
+            and is_exact_fact_query_candidate(query)
         ):
             exact_semaphore = self._exact_semaphore
             if exact_semaphore is None:

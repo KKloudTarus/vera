@@ -4061,6 +4061,38 @@ async def _artifact_durable_times(
     return result
 
 
+async def _artifact_projection_times(
+    container: Container, group_id: str, artifact_version_ids: list[str]
+) -> dict[str, datetime]:
+    if not artifact_version_ids:
+        return {}
+    async with container.sessionmaker() as session:
+        rows = (
+            await session.execute(
+                text(
+                    "SELECT payload #>> '{_fabric,artifact_version_id}' AS id, "
+                    "max(completed_at) AS completed_at FROM ingestion_jobs "
+                    "WHERE group_id=:group_id AND status='done' "
+                    "AND payload #>> '{_fabric,artifact_version_id}' "
+                    "= ANY(CAST(:artifact_version_ids AS text[])) "
+                    "GROUP BY payload #>> '{_fabric,artifact_version_id}'"
+                ),
+                {
+                    "group_id": group_id,
+                    "artifact_version_ids": artifact_version_ids,
+                },
+            )
+        ).mappings()
+    result = {
+        str(row["id"]): row["completed_at"]
+        for row in rows
+        if isinstance(row["completed_at"], datetime)
+    }
+    if len(result) != len(artifact_version_ids):
+        raise AdapterFailed("durable artifact projection timestamps are incomplete")
+    return result
+
+
 async def _load_ingestion(
     container: Container, request: dict[str, Any], current: dict[str, Any]
 ) -> _Outcome:
@@ -4172,9 +4204,9 @@ async def _load_ingestion(
             group_id,
             timeout_s=_timeout("VERA_EVAL_LOAD_SETTLE_TIMEOUT_S", _DEFAULT_TIMEOUT_S * 20),
         )
-        queue_confirmed_at = datetime.now(UTC)
         completed_ids = [value for value in artifact_version_ids if isinstance(value, str)]
         durable_times = await _artifact_durable_times(container, group_id, completed_ids)
+        projection_times = await _artifact_projection_times(container, group_id, completed_ids)
 
         visible: list[bool] = [False] * record_count
         search_semaphore = asyncio.Semaphore(concurrency)
@@ -4231,7 +4263,7 @@ async def _load_ingestion(
             raise AdapterFailed("ingestion profile produced no provider-reported token usage")
 
         profile_queue_samples = [
-            max(0.0, (queue_confirmed_at - durable_times[value]).total_seconds() * 1000)
+            max(0.0, (projection_times[value] - durable_times[value]).total_seconds() * 1000)
             for value in completed_ids
         ]
         profile_searchable_samples = [

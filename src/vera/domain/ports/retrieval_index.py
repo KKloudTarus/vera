@@ -15,6 +15,13 @@ from typing import Literal, Protocol
 from vera.shared.types import JsonDict
 
 
+def is_exact_fact_query_candidate(query: str) -> bool:
+    return any(
+        len(token) >= 3 and token == token.upper() and token.replace("_", "").isalpha()
+        for token in query.split()
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class RetrievalFilters:
     repository: str | None = None

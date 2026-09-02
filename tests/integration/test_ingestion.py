@@ -166,6 +166,30 @@ async def test_claim_carries_trace_context(
     assert mine[0].attempts == 1
 
 
+async def test_complete_records_completion_time(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    make_container: Callable[[object], Container],
+) -> None:
+    container = make_container(RecordingMemoryEngine())
+    suffix = uuid7().hex[:12]
+    source = f"complete:{suffix}"
+    await _enqueue(container, group=f"p:{suffix}", source=source)
+    jobs = await container.queue.claim(batch_size=10)
+    job = next(value for value in jobs if str(value.source_id) == source)
+
+    await container.queue.complete(job.id)
+
+    async with sessionmaker() as session:
+        row = (
+            await session.execute(
+                text("SELECT status, completed_at FROM ingestion_jobs WHERE id = :id"),
+                {"id": job.id},
+            )
+        ).one()
+    assert row.status == "done"
+    assert row.completed_at is not None
+
+
 async def test_fail_reschedules_then_dead_letters(
     sessionmaker: async_sessionmaker[AsyncSession],
     make_container: Callable[[object], Container],
@@ -348,12 +372,12 @@ async def test_lane_pool_serializes_per_group_and_parallelizes_across_groups(
     crossed = any(a[2] < b[3] and b[2] < a[3] for a in a_iv for b in b_iv)
     assert crossed is True
 
-    # Every job for these groups is done.
+    # Every job for these groups is done and has a durable completion timestamp.
     async with sessionmaker() as s:
         remaining = await s.scalar(
             text(
                 "SELECT count(*) FROM ingestion_jobs "
-                "WHERE group_id IN (:a, :b) AND status <> 'done'"
+                "WHERE group_id IN (:a, :b) AND (status <> 'done' OR completed_at IS NULL)"
             ),
             {"a": group_a, "b": group_b},
         )

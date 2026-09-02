@@ -115,10 +115,14 @@ _ENQUEUE_CLEANUP = text(
     "VALUES (:g, :s, :dedup, CAST(:payload AS jsonb), now() + (:delay * interval '1 second')) "
     "RETURNING id"
 )
-_MARK_JOB_DONE = text("UPDATE ingestion_jobs SET status = 'done', last_error = NULL WHERE id = :id")
+_MARK_JOB_DONE = text(
+    "UPDATE ingestion_jobs SET status = 'done', last_error = NULL, "
+    "completed_at = now() WHERE id = :id"
+)
 _GROUP_LOCK = text("SELECT pg_advisory_xact_lock(hashtextextended(:g, 0))")
 _CANCEL_SOURCE_JOBS = text(
     "UPDATE ingestion_jobs SET status='done', last_error='cancelled: source retracted', "
+    "completed_at=now(), "
     "locked_until=NULL WHERE group_id=:g AND source_id=:s AND status IN ('pending','inflight') "
     "AND COALESCE(payload->>'job_kind', '') NOT IN ('project_facts', 'retract_cleanup')"
 )

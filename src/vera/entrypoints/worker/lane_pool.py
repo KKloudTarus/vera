@@ -60,7 +60,10 @@ from vera.shared.types import GroupId, JsonDict, SourceId
 
 log = get_logger(__name__)
 
-_MARK_DONE = text("UPDATE ingestion_jobs SET status = 'done', last_error = NULL WHERE id = :id")
+_MARK_DONE = text(
+    "UPDATE ingestion_jobs SET status = 'done', last_error = NULL, "
+    "completed_at = now() WHERE id = :id"
+)
 _GROUP_LOCK = text("SELECT pg_advisory_xact_lock(hashtextextended(:g, 0))")
 _EPISODE_BY_SOURCE = text(
     "SELECT id FROM published_episodes WHERE group_id = :group_id AND source_id = :source_id"

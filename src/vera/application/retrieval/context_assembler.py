@@ -25,6 +25,7 @@ from vera.domain.ports.retrieval_index import (
     PassageHit,
     PassageIndex,
     RetrievalFilters,
+    is_exact_fact_query_candidate,
 )
 from vera.shared.time import utc_now
 from vera.shared.types import JsonDict
@@ -342,6 +343,14 @@ class ContextAssembler:
         code_task: asyncio.Task[list[PassageHit]] | None = None
         fact_hits: list[FactHit] | None = None
         exact_fact_match = False
+        probe_exact_fact_first = (
+            as_of is None
+            and known_as_of is None
+            and snapshot_fact_ids is None
+            and snapshot_id is None
+            and filters is None
+            and is_exact_fact_query_candidate(query)
+        )
         async with asyncio.TaskGroup() as group:
             facts_task = group.create_task(
                 self._facts.search(
@@ -362,6 +371,9 @@ class ContextAssembler:
                 available = await availability_task
             if facts_task.done():
                 fact_hits = facts_task.result()
+                exact_fact_match = any(hit.exact_match for hit in fact_hits)
+            elif probe_exact_fact_first:
+                fact_hits = await facts_task
                 exact_fact_match = any(hit.exact_match for hit in fact_hits)
             if available.passages and not exact_fact_match:
                 passages_task = group.create_task(

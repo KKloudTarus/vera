@@ -47,6 +47,7 @@ _CLAIM = text(
     UPDATE ingestion_jobs u
     SET status = 'inflight',
         attempts = u.attempts + 1,
+        completed_at = NULL,
         locked_until = now() + make_interval(secs => :visibility)
     FROM ready
     WHERE u.id = ready.id
@@ -55,7 +56,10 @@ _CLAIM = text(
     """
 )
 
-_COMPLETE = text("UPDATE ingestion_jobs SET status = 'done', last_error = NULL WHERE id = :id")
+_COMPLETE = text(
+    "UPDATE ingestion_jobs SET status = 'done', last_error = NULL, "
+    "completed_at = now() WHERE id = :id"
+)
 _DEPTH = text("SELECT status, count(*) FROM ingestion_jobs GROUP BY status")
 
 _FAIL = text(
@@ -63,6 +67,7 @@ _FAIL = text(
     UPDATE ingestion_jobs
     SET status = CASE WHEN attempts >= max_attempts THEN 'dead' ELSE 'pending' END,
         last_error = :error,
+        completed_at = NULL,
         locked_until = NULL,
         next_visible_at = now() + make_interval(secs => :retry_in)
     WHERE id = :id
@@ -75,6 +80,7 @@ _RELEASE = text(
     SET status = 'pending',
         attempts = greatest(attempts - 1, 0),
         last_error = :reason,
+        completed_at = NULL,
         locked_until = NULL,
         next_visible_at = now()
     WHERE id = :id AND status = 'inflight'
@@ -84,7 +90,7 @@ _RELEASE = text(
 _RECLAIM = text(
     """
     UPDATE ingestion_jobs
-    SET status = 'pending', next_visible_at = now()
+    SET status = 'pending', completed_at = NULL, next_visible_at = now()
     WHERE status = 'inflight' AND locked_until IS NOT NULL AND locked_until < now()
     """
 )

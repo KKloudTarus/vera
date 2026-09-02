@@ -211,6 +211,7 @@ async def test_assemble_exact_fact_omits_passage_and_code_candidates() -> None:
     ).assemble(query="paymentapi RUNS_ON eks", group_id="p:x")
 
     assert [(candidate.kind, candidate.ref) for candidate in result.results] == [("fact", "exact")]
+    assert passages.calls == code.calls == 0
 
 
 @pytest.mark.asyncio
