@@ -742,7 +742,7 @@ class SqlAlchemyFactCandidateSource:
         }
         async with self._session_factory() as session:
             rows = (await session.execute(text(_FACTS_EXACT_LATEST), params)).mappings().all()
-        return fact_hits(rows)
+        return fact_hits(rows, exact_match=True)
 
     async def hydrate(
         self,
@@ -787,7 +787,7 @@ class SqlAlchemyFactCandidateSource:
         return fact_hits(rows)
 
 
-def fact_hits(rows: Any) -> list[FactHit]:
+def fact_hits(rows: Any, *, exact_match: bool = False) -> list[FactHit]:
     hits: list[FactHit] = []
     for row in rows:
         object_name = row["object_name"] or ""
@@ -810,6 +810,7 @@ def fact_hits(rows: Any) -> list[FactHit]:
                 confidence=float(row["confidence"]),
                 lifecycle_state=row["lifecycle_state"],
                 score=float(row["score"]),
+                exact_match=exact_match,
                 valid_from=row["valid_from"],
                 supporting_source_ids=tuple(str(s) for s in sources),
                 evidence_id=row["evidence_id"],

@@ -4483,7 +4483,9 @@ async def _production_load_soak(
             "project": first_principal["group_id"],
             "limit": 5,
             "token_budget": 1000,
+            "persist": True,
         },
+        extra_scopes=("memory:snapshot",),
     )
     _explore, _explore_latency = await _call_mcp_tool(
         container.settings,

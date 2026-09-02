@@ -459,6 +459,7 @@ async def test_exact_fact_query_bypasses_semantic_providers(
     assert [(hit.subject_name, hit.predicate, hit.object_name) for hit in result.lexical] == [
         ("paymentapi", "RUNS_ON", "Payment API")
     ]
+    assert result.lexical[0].exact_match is True
     assert result.semantic == ()
 
 

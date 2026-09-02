@@ -69,6 +69,7 @@ class FactHit:
     confidence: float
     lifecycle_state: str
     score: float
+    exact_match: bool = False
     valid_from: datetime | None = None
     supporting_source_ids: tuple[str, ...] = field(default_factory=tuple)
     evidence_id: str | None = None

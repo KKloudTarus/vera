@@ -134,7 +134,14 @@ class _FakeContentAvailability:
         return self._available
 
 
-def _fact(key: str, obj: str, lifecycle: str = "active", authority: float = 1.0) -> FactHit:
+def _fact(
+    key: str,
+    obj: str,
+    lifecycle: str = "active",
+    authority: float = 1.0,
+    *,
+    exact_match: bool = False,
+) -> FactHit:
     return FactHit(
         fact_key=key,
         fact_id=key,
@@ -146,6 +153,7 @@ def _fact(key: str, obj: str, lifecycle: str = "active", authority: float = 1.0)
         confidence=0.9,
         lifecycle_state=lifecycle,
         score=0.5,
+        exact_match=exact_match,
         supporting_source_ids=("src-1",),
     )
 
@@ -189,6 +197,20 @@ async def test_assemble_uses_one_result_identity_per_chunk() -> None:
     )
 
     assert [(candidate.kind, candidate.ref) for candidate in result.results] == [("code", "shared")]
+
+
+@pytest.mark.asyncio
+async def test_assemble_exact_fact_omits_passage_and_code_candidates() -> None:
+    passages = _FakePassages([_passage("passage", "ver-1", 1.0)])
+    code = _FakePassages([_passage("code", "ver-1", 1.0)])
+
+    result = await ContextAssembler(
+        facts=_FakeFacts([_fact("exact", "eks", exact_match=True)]),
+        passages=passages,
+        code=code,
+    ).assemble(query="paymentapi RUNS_ON eks", group_id="p:x")
+
+    assert [(candidate.kind, candidate.ref) for candidate in result.results] == [("fact", "exact")]
 
 
 @pytest.mark.asyncio

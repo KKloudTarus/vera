@@ -490,6 +490,102 @@ def test_production_benchmark_uses_uniquely_answerable_queries(
     assert outcome.observations["decision"]["value"] == "GO"
 
 
+def test_production_load_soak_persists_context_pack(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class StopAfterContext(Exception):
+        pass
+
+    production = json.loads((ROOT / "fixtures" / "production.json").read_text())
+    profile = {
+        "p99_ms": 1.0,
+        "error_rate": 0.0,
+        "sample_count": 1,
+    }
+    search_case = {
+        "observations": {
+            "profiles": {
+                "matrix": [
+                    {**profile, "scope_count": 1, "cache_state": "cold", "virtual_users": 1},
+                    {**profile, "scope_count": 5, "cache_state": "warm", "virtual_users": 8},
+                    {**profile, "scope_count": 20, "cache_state": "warm", "virtual_users": 32},
+                ],
+                "http_reference": {"p95_ms": 1.0, "sample_count": 1},
+            }
+        },
+        "principals": {
+            "scope-00": {
+                "api_key": "key",
+                "principal_id": "principal",
+                "group_id": "p:case",
+            }
+        },
+    }
+    ingestion_case = {
+        "observations": {
+            "profiles": {
+                "matrix": [
+                    {
+                        "concurrency": 1,
+                        "record_count": 1,
+                        "records_per_second": 2.0,
+                        "queue_wait_p95_ms": 1.0,
+                        "time_to_searchable_p95_ms": 1.0,
+                    }
+                ],
+                "expected_fixture": [],
+                "final_state": [],
+            }
+        }
+    }
+    seen: dict[str, Any] = {}
+
+    async def call_mcp_tool(
+        _settings_value: Any,
+        *,
+        principal_id: str,
+        name: str,
+        arguments: dict[str, Any],
+        extra_scopes: tuple[str, ...] = (),
+    ) -> tuple[dict[str, Any], float]:
+        seen.update(
+            principal_id=principal_id,
+            name=name,
+            arguments=arguments,
+            extra_scopes=extra_scopes,
+        )
+        raise StopAfterContext
+
+    monkeypatch.setattr(adapter, "_call_mcp_tool", call_mcp_tool)
+
+    with pytest.raises(StopAfterContext):
+        asyncio.run(
+            adapter._production_load_soak(
+                SimpleNamespace(settings=_settings()),  # type: ignore[arg-type]
+                {
+                    "inputs": {
+                        "matrix_ref": production["load_soak"],
+                        "targets_ref": production["targets"],
+                    }
+                },
+                {"cases": {"PERF-001": search_case, "PERF-002": ingestion_case}},
+            )
+        )
+
+    assert seen == {
+        "principal_id": "principal",
+        "name": "knowledge_get_context",
+        "arguments": {
+            "query": "service-00-0000",
+            "project": "p:case",
+            "limit": 5,
+            "token_budget": 1000,
+            "persist": True,
+        },
+        "extra_scopes": ("memory:snapshot",),
+    }
+
+
 def test_disabled_extractor_derives_no_claims() -> None:
     extracted = asyncio.run(
         adapter._DisabledExtractor().extract(
