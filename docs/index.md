@@ -15,8 +15,9 @@ application or an AI agent.
 5. [Agent integration GUIDE](integrations/GUIDE.md) - the versioned, normative contract a
    coding runtime follows to wire VERA into an agent safely, with tested adapters for
    [Claude Code](integrations/adapters/claude-code.md),
-   [Cursor](integrations/adapters/cursor.md), and
-   [OpenCode](integrations/adapters/opencode.md).
+   [Codex](integrations/adapters/codex.md), and
+   [OpenCode](integrations/adapters/opencode.md), plus a portable project setup skill that
+   requires only the VERA API and MCP endpoint locations.
 6. [Deployment](deployment.md) - Docker Compose, Kubernetes, and the Helm chart, plus the
    operational commands.
 7. [Architecture and algorithms](architecture.md) - how VERA is built and the methods it

@@ -21,8 +21,10 @@ The documentation site is at **https://kkloudtarus.github.io/vera/**. Source liv
 [`docs/`](docs/index.md): [getting started](docs/getting-started.md),
 [loading knowledge](docs/loading-knowledge.md) (repositories, Markdown, Confluence),
 [using the API](docs/usage.md), [connecting an AI agent over MCP](docs/mcp.md), the
-[agent integration GUIDE](docs/integrations/GUIDE.md) with tested Claude Code, Cursor, and
-OpenCode [adapters](docs/integrations/adapters/claude-code.md),
+[agent integration GUIDE](docs/integrations/GUIDE.md) with tested
+[Claude Code](docs/integrations/adapters/claude-code.md),
+[Codex](docs/integrations/adapters/codex.md), and
+[OpenCode](docs/integrations/adapters/opencode.md) adapters,
 [deployment](docs/deployment.md), and [architecture and algorithms](docs/architecture.md).
 
 ## Contents
@@ -360,9 +362,12 @@ per-principal quota, and returns stable structured errors. The Streamable HTTP t
 Host/Origin validation and a private metrics listener.
 
 **Agent integration.** The normative [integration GUIDE](docs/integrations/GUIDE.md) tells a
-coding agent how to detect its runtime, plan and apply the smallest config change, authenticate,
-and verify one bounded read, with tested adapters for Claude Code, Cursor, and OpenCode and a
-portable VERA skill. Retrieved content is untrusted reference data, never agent instructions.
+coding agent how to detect its runtime, apply the smallest project config change, smoke test
+the API and MCP endpoints, and confirm the MCP server after restart, with tested adapters for
+Claude Code, Codex, and OpenCode and a portable two-endpoint project setup skill plus a runtime
+behavior skill. Each adapter includes sanitized bootstrap integration and the strongest honest
+write guard its runtime supports.
+Retrieved content is untrusted reference data, never agent instructions.
 
 **Multi-hop reasoning** (`memory_explore` / `/memory/explore`): from a named entity, return
 the facts on paths within N hops (bounded), with provenance, to trace how entities connect

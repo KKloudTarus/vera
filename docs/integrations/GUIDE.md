@@ -1,6 +1,6 @@
 # VERA agent integration GUIDE
 
-The normative contract for wiring VERA into a coding-agent runtime (Claude Code, Cursor,
+The normative contract for wiring VERA into a coding-agent runtime (Claude Code, Codex,
 OpenCode, and others). It defines how an agent discovers VERA, sets itself up safely,
 retrieves organizational memory, optionally proposes new knowledge, and reports the outcome,
 in language a human reviewer and an agent can both act on.
@@ -10,13 +10,15 @@ The reference for the tools themselves (parameters, side effects, cost, retentio
 reference.
 
 - Contract version: `vera_integration_contract: 1`
-- Document status: `v1.2.0`
+- Document status: `v1.4.0`
 - Server version this contract was verified against: `0.1.0`
 
 !!! success "Implementation status"
     The EPIC contract is implemented across the MCP hardening work (#14), public contract
-    and GUIDE (#16), Tier-1 reference adapters (#21), and bootstrap/proposal/context-pack
-    lifecycle (#15). Authentication profiles, per-tool authorization, structured errors,
+    and GUIDE (#16), Tier-1 reference adapters (#21), bootstrap/proposal/context-pack
+    lifecycle (#15), plus the portable project setup skill and Claude Code, Codex, and
+    OpenCode lifecycle references.
+    Authentication profiles, per-tool authorization, structured errors,
     annotations, bounds, quotas, bootstrap and project discovery, canonical repository
     identity, exact feedback attribution, personal proposal report/retract, and bounded
     explicit context-pack persistence are available and verified in code.
@@ -25,9 +27,9 @@ reference.
 
 This GUIDE is the integrated EPIC contract: defaults, setup protocol, ownership model,
 runtime capability matrix, support tiers, and links to the tested configuration references
-for Claude Code, Cursor, and OpenCode. A deployment still runs the applicable rows of the
+for Claude Code, Codex, and OpenCode. A deployment still runs the applicable rows of the
 [verification matrix](#verification-matrix) against its actual runtime and policy before
-marking that installation `PASS`.
+using VERA for production work.
 
 ## Normative language
 
@@ -284,63 +286,32 @@ point):
 
 ## Required agent setup protocol
 
-When a user asks a runtime to integrate VERA, the agent MUST execute this sequence and MUST
-NOT skip a step. Each step is a MUST unless marked otherwise.
+The executable workflow is `examples/integrations/vera-project-setup/SKILL.md`. It takes exactly
+two inputs, `VERA_API_URL` and `VERA_MCP_URL`, and installs the selected runtime's project-local
+VERA integration.
 
-1. Identify the coding tool, its exact runtime surface, version, operating system,
-   repository root, worktree, and workspace-trust state.
-2. Read the VERA contract version and the runtime's supported capability profile.
-3. Inspect all relevant existing MCP, instruction, skill, hook, plugin, permission, and
-   managed-policy sources before proposing any change.
-4. Resolve a sanitized repository identity to exactly one VERA project, or stop and ask the
-   user to select one. See [Repository identity and project resolution](#repository-identity-and-project-resolution).
-5. Check the VERA endpoint, authentication profile, capabilities, principal, and granted
-   tool classes.
-6. Produce a plan that names the exact files, keys, snippets, dependencies, hooks, scope
-   changes, credential flow, and security and privacy effects of the change.
-7. Show a reviewable diff and request approval before writing anything.
-8. Re-read the target files and abort if they changed since planning.
-9. Apply the smallest structured merge. Do not replace unrelated content.
-10. Perform interactive authentication outside tracked files.
-11. Verify the server handshake, tool discovery, principal identity, scope, project mapping,
-    and one bounded read.
-12. Verify that the runtime actually loaded the intended skill, instructions, MCP server, and
-    optional hooks.
-13. Record the VERA-owned files, keys, blocks, versions, and pre-apply hashes for later
-    update and uninstall.
-14. Report `PASS`, `PARTIAL`, `BLOCKED`, or `UNSUPPORTED` with exact remediation steps.
+The setup skill MUST read `references/preflight.md`, `references/apply.md`, the portable
+behavior skill, and exactly one selected runtime `SPEC.md`.
+
+1. Detect the coding tool, version, operating system, and repository root.
+2. Validate the supplied URLs. Call the API liveness and readiness endpoints without
+   credentials, then make one short non-streaming request to the MCP URL. Any non-404 HTTP
+   response below 500 proves MCP reachability; authentication may happen later.
+3. Inspect the selected runtime's existing project files.
+4. Report the exact project-local diff and apply the selected runtime spec with the smallest
+   structured merge. Preserve unrelated content and require separate approval for conflicts,
+   dependencies, or non-project changes.
+5. Parse each changed config and check JavaScript hook syntax.
+6. Ask the user to restart the coding tool and return to the same setup session.
+7. In the resumed session, confirm that the project MCP server named `vera` is connected and
+   its tools are visible.
+8. Report `VERA setup completed for <runtime>`, endpoint smoke-test results, and changed files.
 
 !!! success "Status: available"
     `knowledge_bootstrap` reports the server version, principal, active auth profile, exact
     capability classes granted by the caller's token, active tool profile, readable projects,
     repository mapping, executable save-mode policy, and contract versions without returning
     knowledge content.
-
-### Setup outcomes
-
-The agent MUST end setup in exactly one of four states and report it explicitly.
-
-| Outcome | Meaning |
-|---|---|
-| `PASS` | Setup completed and every verification in steps 11 and 12 succeeded. |
-| `PARTIAL` | Setup applied, but at least one verification could not be confirmed. The report MUST name what is unverified and how to complete it. |
-| `BLOCKED` | Setup could not proceed safely (a conflict, a managed-policy restriction, an untrusted workspace, or missing approval). The report MUST name the blocker and the remediation. |
-| `UNSUPPORTED` | The runtime or a required capability is not supported at the current tier. The report MUST name the missing capability. |
-
-```mermaid
-flowchart TD
-    A[Detect runtime, repo, trust] --> B{Runtime supported?}
-    B -- no --> U[UNSUPPORTED]
-    B -- yes --> C{Repo maps to one project?}
-    C -- no --> K1[BLOCKED: ambiguous or out-of-scope project]
-    C -- yes --> D[Plan and show diff]
-    D --> E{Approved and files unchanged?}
-    E -- no --> K2[BLOCKED: no approval or drift]
-    E -- yes --> F[Apply smallest merge, authenticate]
-    F --> G{Handshake, discovery, bounded read verified?}
-    G -- all --> P[PASS]
-    G -- some --> PT[PARTIAL: name the unverified checks]
-```
 
 ## Repository identity and project resolution
 
@@ -379,12 +350,9 @@ The agent MUST resolve a repository to exactly one VERA project before binding r
   be preserved safely, the agent MUST stop and show a manual patch instead of writing.
 - The agent MUST NOT require symlinks, because Windows and managed environments may reject
   them.
-- The apply step MUST be concurrency-safe: the agent compares pre-apply content hashes and
-  aborts on drift (setup protocol step 8).
-- Ownership metadata MUST identify exactly what VERA added: the files, keys, blocks,
-  contract version, and pre-apply hashes (setup protocol step 13).
-- Uninstall MUST remove only VERA-owned content and MUST leave later user edits intact,
-  through a three-way merge or a conflict report.
+- The selected runtime spec defines the exact VERA-owned files, keys, and blocks.
+- Uninstall MUST remove only unchanged VERA-owned files and exact VERA keys or blocks. It MUST
+  preserve later user edits and report a conflict instead of deleting mixed content.
 - Managed-policy restrictions and untrusted-workspace restrictions MUST NOT be bypassed.
 
 ## Context integration contract
@@ -422,6 +390,26 @@ with agent-initiated retrieval during the task. The flow MUST be:
 - Repository URL credentials and unrelated local paths MUST be removed before transmission.
 - Prompt and transcript forwarding remain opt-in data-policy decisions, never setup
   defaults.
+
+The Claude Code reference hook in `examples/integrations/claude-code/vera-hook.cjs` follows
+Serena's lightweight project-hook pattern: a stateless `SessionStart` command derives and
+sanitizes Git metadata locally, then adds only bootstrap arguments to agent context. A separate
+`PreToolUse` hook forces normal user confirmation for VERA write and persisted-context tools.
+It deliberately does not call MCP from `SessionStart`, auto-approve VERA tools, block local
+code reads, forward prompts, or inject retrieved knowledge.
+
+The Codex reference uses the same bounded `SessionStart` pattern through project
+`.codex/hooks.json`. Codex does not currently support `permissionDecision: "ask"` from
+`PreToolUse`; the adapter therefore uses the MCP server's
+`default_tools_approval_mode = "writes"`. This safely prompts for every non-read-only VERA
+tool, including both ephemeral and persisted `knowledge_get_context` calls because that tool
+is conditionally write-capable.
+
+The OpenCode reference uses a project-local `chat.message` plugin to append the same sanitized
+reminder once per in-process session and exact `permission.vera_* = "ask"` rules for
+write-capable tools. The plugin does not call VERA or enforce permissions. `Always` and
+`--auto` can bypass OpenCode prompts, so automation requiring a hard write boundary MUST use a
+read-only VERA principal and deny write tools.
 
 ## Memory-save contract
 
@@ -481,14 +469,13 @@ action it did not observe. The complete decision and extension rule are in
   and only as explicit opt-in.
 - Appended text MAY contain concise behavioral policy, and MUST NOT contain retrieved
   organizational content.
-- Portable behavior SHOULD live in a VERA skill, minimal project instructions, the MCP
-  server instructions, and precise tool descriptions.
-- `AGENTS.md` SHOULD be the common project instruction source where the runtime supports it.
-- Claude Code SHOULD receive a minimal `CLAUDE.md` that imports `AGENTS.md`, rather than a
-  duplicated copy of the instructions.
+- Portable behavior SHOULD live in the VERA skill, runtime hooks/plugins, MCP server
+  instructions, and precise tool descriptions rather than a duplicate project instruction
+  file.
 - Instruction files are guidance. Authorization, secret handling, and write restrictions
-  MUST be enforced by client permissions, hooks, and the VERA server, never by instruction
-  text alone.
+  MUST be enforced by the VERA server and by client permissions or hooks where the runtime
+  supports them, never by instruction text alone. A runtime mode that can bypass required
+  write consent MUST use a read-only principal or report that mode as unsupported.
 - MCP prompts and resources MAY be added as optional capabilities, and setup correctness
   MUST NOT depend on a client loading them automatically.
 
@@ -508,8 +495,8 @@ The GUIDE models runtime surfaces rather than assuming one universal MCP or hook
 
 ### Support tiers
 
-- **Tier 1**: Claude Code, Cursor local, and OpenCode.
-- **Tier 2**: Codex CLI, GitHub Copilot CLI, and supported IDE surfaces.
+- **Tier 1**: Claude Code, Codex local, and OpenCode.
+- **Tier 2**: GitHub Copilot CLI and supported IDE surfaces.
 - **Tier 3**: cloud-agent surfaces, GitHub Copilot cloud, Devin Local, and legacy
   Windsurf/Cascade, where their lifecycle and authentication limits are understood.
 
@@ -526,7 +513,7 @@ the skeleton each Phase 3 adapter section fills in with tested values.
 | MCP server config | supported | runtime-specific config file and schema |
 | Project vs user vs managed scope | supported | which scopes actually exist for the runtime |
 | OAuth credential storage | varies | the runtime's secret store or reference syntax |
-| Instruction and skill discovery | supported | the paths the runtime reads |
+| Skill and hook/plugin discovery | supported | the paths the runtime reads |
 | Hooks (local) | varies | events, payloads, timeout, fail-open behavior |
 | Hooks (cloud) | varies | documented separately from local |
 | Plugin packaging | varies | where packaging is available |
@@ -540,7 +527,7 @@ Each Phase 3 adapter section MUST document:
 - The MCP config location and schema.
 - The environment and secret-reference syntax.
 - OAuth support and credential storage behavior.
-- The instruction and skill discovery paths.
+- The behavior-skill and hook/plugin discovery paths.
 - Hook events, payloads, output semantics, timeout, and fail-open or fail-closed behavior.
 - Plugin packaging where available.
 - Permission and workspace-trust behavior.
@@ -575,7 +562,7 @@ Each supported runtime MUST be tested against at least these scenarios before it
 at its tier. This matrix is the acceptance basis for Phase 3.
 
 - A clean repository with no existing agent configuration.
-- Existing unrelated MCP servers and instruction files.
+- Existing unrelated MCP servers, skills, hooks, and plugins.
 - An equivalent existing VERA server definition (reused, not duplicated).
 - A conflicting VERA endpoint or scope (user selection required).
 - A repository with JSONC or TOML comments.
@@ -603,15 +590,14 @@ the EPIC when:
 - The public MCP documentation exactly matches the canonical tool surface and accurately
   labels every side effect. (Done in the [MCP reference](../mcp.md).)
 - The GUIDE is versioned, normative, agent-readable, and defines the setup protocol,
-  ownership model, state outcomes, and the context, save, system-prompt, privacy, and hook
+  ownership model, and the context, save, system-prompt, privacy, and hook
   contracts.
 - The runtime capability matrix and initial support tiers are defined.
 
 The MCP hardening acceptance items are delivered by #14, the public contract by #16,
 bootstrap/project discovery and proposal/context-pack lifecycle by #15, and the Tier-1
-reference adapters plus schema harness by #21. An installation reports `PASS` only after its
-runtime loads the config and completes bootstrap plus one bounded read; checked-in config
-validation alone is not a runtime success claim.
+reference adapters plus schema harness by #21. Setup completion means the endpoint smoke tests
+and runtime project-file validation succeed; bootstrap and retrieval are normal runtime actions.
 
 ## Non-goals
 
@@ -624,6 +610,8 @@ validation alone is not a runtime success claim.
 
 | Version | Change |
 |---|---|
+| `v1.4.0` | Added project-scoped Codex MCP, skill, trust, and SessionStart hook artifacts; added an OpenCode bootstrap plugin and exact write-capable tool permissions; split the setup skill into a thin orchestrator, shared references, and per-runtime specs; documented limits where hook-driven or auto-mode consent cannot be enforced. |
+| `v1.3.0` | Added the portable two-endpoint project setup skill, the tested coding lifecycle from the demo integration, and stateless Claude Code bootstrap/write-approval hook references adapted from Serena's hook pattern. |
 | `v1.2.0` | Added enforced coding/advanced/compatibility tool-visibility profiles, executable save-mode discovery, authenticated stateless HTTP contract coverage, hostile-content coverage, and the operational-record policy. |
 | `v1.1.0` | Integrated #15: bootstrap and token-derived capability discovery, canonical repository mapping, ephemeral context by default with explicit TTL/quota/deduplicated persistence, exact-attribution feedback, deduplicated bounded proposals, end-of-task reports, and personal self-retract. Updated the 28-tool annotation and authorization tables and removed the Stream B release gate. |
 | `v1.0.0` | Contract surface confirmed live against #14: filled the exact input bounds and quota limits, corrected the structured-error shape to the implemented JSON-RPC form (stable slug in `data.code`), and flipped authentication, authorization, errors, annotations, bounds, quotas, and server instructions to `Status: available`. Bootstrap/discovery and proposal-undo remain `Status: in progress (#15)`. |

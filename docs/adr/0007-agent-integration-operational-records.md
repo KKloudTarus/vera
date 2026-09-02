@@ -25,7 +25,7 @@ Each action has one authoritative operational record:
 | Proposal self-retract | Append-only assertion-withdrawn and fact-retracted `knowledge_events`. |
 | Exact-attribution feedback | The unique personal `retrieval_feedback` row. |
 | Source retraction or erasure | `audit_events`, because it is an administrative operation outside the agent proposal lifecycle. |
-| Setup, config update/uninstall, and hooks | Runtime-owned setup outcome and ownership record. VERA cannot claim or audit an action it did not observe. |
+| Setup, config update/uninstall, and hooks | Runtime-owned project configuration and local hook behavior. VERA cannot claim or audit an action it did not observe. |
 
 `audit_events` remains the operational security log for server-observed administrative
 actions that have no more specific append-only ledger. Knowledge lifecycle changes are not

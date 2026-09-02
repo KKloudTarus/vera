@@ -70,7 +70,7 @@ nav:
   - Integrations:
       - Agent integration GUIDE: integrations/GUIDE.md
       - "Adapter: Claude Code": integrations/adapters/claude-code.md
-      - "Adapter: Cursor": integrations/adapters/cursor.md
+      - "Adapter: Codex": integrations/adapters/codex.md
       - "Adapter: OpenCode": integrations/adapters/opencode.md
   - Deployment: deployment.md
   - Architecture & algorithms: architecture.md

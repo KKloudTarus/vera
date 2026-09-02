@@ -12,7 +12,7 @@ ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
 WORKDIR /workspace
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends libatomic1 \
+    && apt-get install -y --no-install-recommends git libatomic1 nodejs \
     && rm -rf /var/lib/apt/lists/*
 
 COPY pyproject.toml constraints.lock README.md LICENSE NOTICE ./
