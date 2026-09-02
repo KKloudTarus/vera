@@ -364,7 +364,7 @@ class ContextAssembler:
                     filters=filters,
                 )
             )
-            if self._content_availability is not None:
+            if self._content_availability is not None and not probe_exact_fact_first:
                 availability_task = group.create_task(
                     self._content_availability.get(group_id=group_id, snapshot_id=snapshot_id)
                 )
@@ -375,6 +375,11 @@ class ContextAssembler:
             elif probe_exact_fact_first:
                 fact_hits = await facts_task
                 exact_fact_match = any(hit.exact_match for hit in fact_hits)
+                if self._content_availability is not None and not exact_fact_match:
+                    availability_task = group.create_task(
+                        self._content_availability.get(group_id=group_id, snapshot_id=snapshot_id)
+                    )
+                    available = await availability_task
             if available.passages and not exact_fact_match:
                 passages_task = group.create_task(
                     self._passages.search(

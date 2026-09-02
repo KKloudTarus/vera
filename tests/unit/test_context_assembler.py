@@ -129,8 +129,10 @@ class _FakePassages:
 class _FakeContentAvailability:
     def __init__(self, *, passages: bool, code: bool) -> None:
         self._available = ContentAvailability(passages=passages, code=code)
+        self.calls = 0
 
     async def get(self, *, group_id: str, snapshot_id: str | None = None) -> ContentAvailability:
+        self.calls += 1
         return self._available
 
 
@@ -203,15 +205,17 @@ async def test_assemble_uses_one_result_identity_per_chunk() -> None:
 async def test_assemble_exact_fact_omits_passage_and_code_candidates() -> None:
     passages = _FakePassages([_passage("passage", "ver-1", 1.0)])
     code = _FakePassages([_passage("code", "ver-1", 1.0)])
+    availability = _FakeContentAvailability(passages=True, code=True)
 
     result = await ContextAssembler(
         facts=_FakeFacts([_fact("exact", "eks", exact_match=True)]),
         passages=passages,
         code=code,
+        content_availability=availability,
     ).assemble(query="paymentapi RUNS_ON eks", group_id="p:x")
 
     assert [(candidate.kind, candidate.ref) for candidate in result.results] == [("fact", "exact")]
-    assert passages.calls == code.calls == 0
+    assert passages.calls == code.calls == availability.calls == 0
 
 
 @pytest.mark.asyncio
@@ -234,15 +238,16 @@ async def test_valid_time_does_not_imply_a_transaction_boundary() -> None:
 async def test_assemble_skips_indexes_for_unavailable_content() -> None:
     passages = _FakePassages([_passage("passage", "version", 1.0)])
     code = _FakePassages([_passage("code", "version", 1.0)])
+    availability = _FakeContentAvailability(passages=False, code=False)
     assembler = ContextAssembler(
         facts=_FakeFacts([_fact("fact", "eks")]),
         passages=passages,
         code=code,
-        content_availability=_FakeContentAvailability(passages=False, code=False),
+        content_availability=availability,
     )
 
-    result = await assembler.assemble(query="payment", group_id="p:x")
+    result = await assembler.assemble(query="payment RUNS_ON unknown", group_id="p:x")
 
     assert [candidate.kind for candidate in result.results] == ["fact"]
-    assert passages.calls == 0
-    assert code.calls == 0
+    assert passages.calls == code.calls == 0
+    assert availability.calls == 1

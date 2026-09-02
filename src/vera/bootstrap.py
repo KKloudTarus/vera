@@ -238,7 +238,9 @@ def build_container(settings: Settings) -> Container:
         embedder=embedder,
         reranker=reranker,
         fact_candidate_semaphore=asyncio.Semaphore(8),
-        exact_fact_candidate_semaphore=asyncio.Semaphore(20),
+        exact_fact_candidate_semaphore=asyncio.Semaphore(
+            min(32, settings.db.pool_size + settings.db.max_overflow)
+        ),
         rerank_weights=build_rerank_weights(settings),
         read_sessionmaker=read_sessionmaker,
         worker_sessionmaker=worker_sessionmaker,
