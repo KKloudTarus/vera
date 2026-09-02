@@ -674,6 +674,39 @@ def test_mcp_call_reports_category_without_exception_text(
     assert "sensitive transport detail" not in str(raised.value)
 
 
+def test_mcp_call_preserves_out_of_scope_denial(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    @asynccontextmanager
+    async def denied_transport(_url: str, *, http_client: Any) -> Any:
+        del http_client
+        raise ExceptionGroup(
+            "MCP transport cleanup",
+            [
+                adapter.MCPError(
+                    code=-32005,
+                    message="project is out of scope",
+                    data={"code": "project_out_of_scope"},
+                )
+            ],
+        )
+        yield
+
+    monkeypatch.setenv("VERA_EVAL_MCP_URL", "https://mcp.test/mcp")
+    monkeypatch.setenv("VERA_EVAL_MCP_JWT_SECRET", "mcp-secret-for-tests-at-least-32-bytes")
+    monkeypatch.setattr(adapter, "streamable_http_client", denied_transport)
+
+    with pytest.raises(adapter._McpProjectOutOfScope):
+        asyncio.run(
+            adapter._call_mcp_tool(
+                _settings(),
+                principal_id="00000000-0000-0000-0000-000000000123",
+                name="knowledge_search",
+                arguments={"query": "owner", "limit": 5, "project": "p:other"},
+            )
+        )
+
+
 def test_adapter_source_has_no_repository_search_or_deterministic_extractor() -> None:
     source = Path(adapter.__file__).read_text(encoding="utf-8")
 
@@ -1170,6 +1203,94 @@ def test_matching_search_equivalence_ignores_unrelated_ranked_results() -> None:
         "citation": {**seeded["citation"], "evidence_id": "evidence-changed"},
     }
     assert adapter._matching_search_equivalence_keys(after_probe, expected) != baseline
+
+
+def test_security_scope_probe_accepts_only_mcp_out_of_scope_denial(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def denied(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        raise adapter._McpProjectOutOfScope("out of scope")
+
+    monkeypatch.setattr(adapter, "_search_mcp", denied)
+    current: dict[str, Any] = {
+        "principals": {
+            "a": {
+                "api_key": "case-key-a",
+                "group_id": "p:a",
+                "principal_id": "00000000-0000-0000-0000-000000000123",
+            },
+            "b": {
+                "api_key": "case-key-b",
+                "group_id": "p:b",
+                "principal_id": "00000000-0000-0000-0000-000000000456",
+            },
+        },
+        "searches": {},
+    }
+
+    outcome = asyncio.run(
+        adapter._handle_search(
+            SimpleNamespace(settings=_settings()),  # type: ignore[arg-type]
+            {
+                "case_id": "SEC-001",
+                "action": "search.mcp",
+                "inputs": {"principal": "a", "attempted_scope": "b", "query": "canary"},
+                "observe": ["a.mcp"],
+            },
+            current,
+        )
+    )
+
+    assert outcome.status == "PASS"
+    assert outcome.observations["a"]["mcp"] == {
+        "results": [],
+        "facts": [],
+        "answerable_result_count": 0,
+        "bounded_outcome": "authorization_error",
+        "error": "_McpProjectOutOfScope",
+    }
+
+
+def test_security_scope_probe_does_not_accept_other_mcp_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def malformed(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        raise adapter.AdapterFailed("malformed MCP response")
+
+    monkeypatch.setattr(adapter, "_search_mcp", malformed)
+    current: dict[str, Any] = {
+        "principals": {
+            "a": {
+                "api_key": "case-key-a",
+                "group_id": "p:a",
+                "principal_id": "00000000-0000-0000-0000-000000000123",
+            },
+            "b": {
+                "api_key": "case-key-b",
+                "group_id": "p:b",
+                "principal_id": "00000000-0000-0000-0000-000000000456",
+            },
+        },
+        "searches": {},
+    }
+
+    with pytest.raises(adapter.AdapterFailed, match="malformed MCP response"):
+        asyncio.run(
+            adapter._handle_search(
+                SimpleNamespace(settings=_settings()),  # type: ignore[arg-type]
+                {
+                    "case_id": "SEC-001",
+                    "action": "search.mcp",
+                    "inputs": {
+                        "principal": "a",
+                        "attempted_scope": "b",
+                        "query": "canary",
+                    },
+                    "observe": ["a.mcp"],
+                },
+                current,
+            )
+        )
 
 
 def test_labeled_search_joins_product_fact_keys_to_fixture_ids(

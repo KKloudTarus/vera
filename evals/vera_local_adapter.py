@@ -120,6 +120,10 @@ class AdapterFailed(RuntimeError):
     """A boundary responded, but the observed product behavior failed."""
 
 
+class _McpProjectOutOfScope(AdapterFailed):
+    """The MCP server rejected a project outside the authenticated principal's scope."""
+
+
 def _exception_type_summary(exc: BaseException) -> str:
     pending = [exc]
     leaves: set[str] = set()
@@ -177,6 +181,17 @@ def _mcp_failure_category(exc: BaseException) -> str:
     if any(isinstance(value, (MCPError, json.JSONDecodeError)) for value in leaves):
         return "protocol"
     return "unknown"
+
+
+def _is_mcp_project_out_of_scope(exc: BaseException) -> bool:
+    leaves = _causal_exception_leaves(exc)
+    if not leaves or not all(isinstance(value, MCPError) for value in leaves):
+        return False
+    return all(
+        isinstance(value.error.data, dict)
+        and value.error.data.get("code") == "project_out_of_scope"
+        for value in leaves
+    )
 
 
 def _closed_failure_summary(exc: BaseException) -> str:
@@ -1631,6 +1646,8 @@ async def _call_mcp_tool(
     except AdapterFailed:
         raise
     except Exception as exc:
+        if _is_mcp_project_out_of_scope(exc):
+            raise _McpProjectOutOfScope("MCP rejected an out-of-scope project") from None
         category = _mcp_failure_category(exc)
         raise AdapterBlocked(f"MCP {name} {category} boundary is unavailable") from exc
     return _mcp_payload(result), round((time.perf_counter() - started) * 1000, 3)
@@ -3340,7 +3357,7 @@ async def _handle_search(
     query = str(inputs.get("query", ""))
     try:
         status, result = await run_one(query)
-    except AdapterFailed as exc:
+    except _McpProjectOutOfScope as exc:
         if attempted is None:
             raise
         result = {
