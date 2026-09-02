@@ -400,19 +400,17 @@ def test_opencode_plugin_is_local_bootstrap_only() -> None:
     assert "http://" not in plugin and "https://" not in plugin
 
 
-def test_three_runtime_demo_uses_one_shared_setup_prompt() -> None:
-    demo = (_ROOT / "docs" / "video-demo-coding-lifecycle-scenario.md").read_text()
-    assert demo.count("## Prompt duy nhất") == 1
-    assert demo.count("```text") == 1
-    prompt = demo.split("```text", 1)[1].split("```", 1)[0]
+def test_coding_tool_guide_starts_with_one_shared_setup_prompt() -> None:
+    guide = (_ROOT / "docs" / "integrations" / "coding-tools.md").read_text()
+    assert guide.index("## Fast path") < guide.index("## Prerequisites")
+    assert guide.count("```text") == 1
+    prompt = guide.split("```text", 1)[1].split("```", 1)[0]
 
-    assert "docker compose --profile app up --build -d" in demo
     assert "VERA_API_URL=http://localhost:8000" in prompt
     assert "VERA_MCP_URL=http://localhost:8080/mcp" in prompt
-    assert ".vera-baseline/vera-project-setup/SKILL.md" in prompt
+    assert "examples/integrations/vera-project-setup/SKILL.md" in prompt
     assert "matching project-local runtime spec" in prompt
     assert "Smoke test the API and MCP URLs" in prompt
     assert re.search(r"restart the\s+coding tool", prompt)
     assert "tools are visible" in prompt
-    assert all(runtime in demo for runtime in ("OpenCode", "Codex", "Claude Code"))
-    assert "AGENTS.md" not in demo
+    assert all(runtime in guide for runtime in ("OpenCode", "Codex", "Claude Code"))

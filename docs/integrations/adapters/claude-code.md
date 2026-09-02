@@ -1,5 +1,8 @@
 # Claude Code (Tier 1)
 
+See [Integrate VERA with coding tools](../coding-tools.md) for the shared fast-path prompt and
+setup flow.
+
 Wire VERA into Claude Code as a remote (streamable-HTTP) MCP server. This page fills the
 [adapter template](../GUIDE.md#adapter-section-template) with values from the official
 Claude Code MCP docs. It is the configuration contract; the MCP config, project hook settings,

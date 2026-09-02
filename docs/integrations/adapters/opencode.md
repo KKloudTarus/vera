@@ -1,5 +1,8 @@
 # OpenCode (Tier 1)
 
+See [Integrate VERA with coding tools](../coding-tools.md) for the shared fast-path prompt and
+setup flow.
+
 Wire VERA into OpenCode as a remote MCP server with a behavior skill,
 exact tool permissions, and a local bootstrap plugin. The config and plugin invariants in
 `examples/integrations/opencode/` are validated on every test run. Its compact setup input is

@@ -1,5 +1,8 @@
 # Codex (Tier 1)
 
+See [Integrate VERA with coding tools](../coding-tools.md) for the shared fast-path prompt and
+setup flow.
+
 Wire VERA into Codex as a project-scoped streamable-HTTP MCP server. The reference
 `config.toml`, project hook settings, and dependency-free hook in
 `examples/integrations/codex/` are validated on every test run. Its compact setup input is

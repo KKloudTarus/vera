@@ -21,6 +21,7 @@ The documentation site is at **https://kkloudtarus.github.io/vera/**. Source liv
 [`docs/`](docs/index.md): [getting started](docs/getting-started.md),
 [loading knowledge](docs/loading-knowledge.md) (repositories, Markdown, Confluence),
 [using the API](docs/usage.md), [connecting an AI agent over MCP](docs/mcp.md), the
+[coding-tool integration guide](docs/integrations/coding-tools.md), and the
 [agent integration GUIDE](docs/integrations/GUIDE.md) with tested
 [Claude Code](docs/integrations/adapters/claude-code.md),
 [Codex](docs/integrations/adapters/codex.md), and
