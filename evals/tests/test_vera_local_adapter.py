@@ -2973,9 +2973,16 @@ def test_agent_repetitions_use_bounded_concurrency(monkeypatch: pytest.MonkeyPat
     maximum_active = 0
     answer_count = 0
 
-    async def answer(_settings: Any, *, principal: dict[str, Any], question: str) -> dict[str, Any]:
+    async def answer(
+        _settings: Any,
+        *,
+        principal: dict[str, Any],
+        question: str,
+        context_call_permit: Any,
+    ) -> dict[str, Any]:
         nonlocal active, answer_count, maximum_active
         assert principal["group_id"] == "group-case"
+        await context_call_permit()
         answer_count += 1
         usage_ref = f"run-{answer_count}"
         active += 1
@@ -3048,6 +3055,88 @@ def test_agent_repetitions_use_bounded_concurrency(monkeypatch: pytest.MonkeyPat
     assert maximum_active == 2
     assert result["mcp_token_usage"] == {"total_tokens": 60, "source": "llm_usage"}
     assert all(run["token_usage"]["total_tokens"] == 15 for run in result["runs"])
+
+
+def test_agent_repetitions_pace_context_calls_to_product_quota(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = 0.0
+    call_times: list[float] = []
+    sleeps: list[float] = []
+    answer_count = 0
+
+    async def answer(
+        _settings: Any,
+        *,
+        principal: dict[str, Any],
+        question: str,
+        context_call_permit: Any,
+    ) -> dict[str, Any]:
+        nonlocal answer_count
+        assert principal["group_id"] == "group-case"
+        for _ in range(2):
+            await context_call_permit()
+            call_times.append(clock)
+        answer_count += 1
+        return {
+            "answer": question,
+            "tool_calls": [],
+            "used_result_ids": [],
+            "citations": [],
+            "latency_ms": 1.0,
+            "abstained": False,
+            "unsupported_claim_count": 0,
+            "usage_ref": f"run-{answer_count}",
+            "token_usage": {"total_tokens": 10},
+        }
+
+    async def usage_by_ref(
+        _container: Any, *, group_id: str, request_kind: str, refs: list[str]
+    ) -> dict[str, int]:
+        assert group_id == "group-case"
+        assert request_kind == "search"
+        return dict.fromkeys(refs, 5)
+
+    async def sleep(delay: float) -> None:
+        nonlocal clock
+        sleeps.append(delay)
+        clock += delay
+
+    monkeypatch.setenv("VERA_EVAL_AGENT_CONCURRENCY", "2")
+    monkeypatch.setattr(adapter, "_agent_answer", answer)
+    monkeypatch.setattr(adapter, "_usage_tokens_by_ref", usage_by_ref)
+    monkeypatch.setattr(adapter.asyncio, "sleep", sleep)
+    monkeypatch.setattr(adapter.time, "monotonic", lambda: clock)
+
+    result = asyncio.run(
+        adapter._agent(
+            SimpleNamespace(
+                settings=SimpleNamespace(
+                    mcp=SimpleNamespace(quota_enabled=True, quota_context_per_minute=2)
+                )
+            ),  # type: ignore[arg-type]
+            {
+                "case_id": "PERF-003",
+                "inputs": {
+                    "questions_ref": [{"text": "one"}, {"text": "two"}],
+                    "repetitions": 2,
+                },
+            },
+            {
+                "principals": {
+                    "default": {
+                        "api_key": "key",
+                        "principal_id": "principal",
+                        "group_id": "group-case",
+                    }
+                }
+            },
+        )
+    )
+
+    assert len(result["runs"]) == 4
+    assert call_times == pytest.approx([0.0, 0.0, 60.25, 60.25, 120.5, 120.5, 180.75, 180.75])
+    assert sleeps == pytest.approx([60.25, 60.25, 60.25])
 
 
 def test_evidence_references_large_observations_by_digest() -> None:

@@ -15,6 +15,7 @@ import sys
 import tempfile
 import time
 from collections import Counter
+from collections.abc import Awaitable, Callable
 from contextlib import redirect_stdout
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -1878,6 +1879,7 @@ async def _agent_answer(
     question: str,
     retrieval_limit: int = 10,
     token_budget: int = 4000,
+    context_call_permit: Callable[[], Awaitable[None]] | None = None,
 ) -> dict[str, Any]:
     started = time.perf_counter()
     usage_ref = f"eval-agent:{uuid4()}"
@@ -1899,6 +1901,8 @@ async def _agent_answer(
 
     async def retrieve(query: str) -> None:
         nonlocal mcp_latency
+        if context_call_permit is not None:
+            await context_call_permit()
         arguments = {"query": query, **base_arguments}
         context, latency = await _call_mcp_tool(
             settings,
@@ -2055,6 +2059,29 @@ async def _agent(
         repetitions = request["inputs"].get("repetitions", 1)
         if isinstance(repetitions, bool) or not isinstance(repetitions, int) or repetitions < 1:
             raise AdapterBlocked("agent.run repetitions must be a positive integer")
+        mcp_settings = getattr(settings, "mcp", None)
+        context_quota = int(getattr(mcp_settings, "quota_context_per_minute", 0))
+        if not bool(getattr(mcp_settings, "quota_enabled", False)):
+            context_quota = 0
+        context_call_times: list[float] = []
+        context_quota_lock = asyncio.Lock()
+
+        async def acquire_context_permit() -> None:
+            if context_quota <= 0:
+                return
+            async with context_quota_lock:
+                now = time.monotonic()
+                context_call_times[:] = [
+                    started for started in context_call_times if now - started < 60
+                ]
+                if len(context_call_times) >= context_quota:
+                    await asyncio.sleep(max(0.0, context_call_times[0] + 60.25 - now))
+                    now = time.monotonic()
+                    context_call_times[:] = [
+                        started for started in context_call_times if now - started < 60
+                    ]
+                context_call_times.append(now)
+
         work = [
             (question_index, repetition_index, question)
             for repetition_index in range(repetitions)
@@ -2068,6 +2095,7 @@ async def _agent(
                 settings,
                 principal=principal,
                 question=_question_text(question),
+                context_call_permit=acquire_context_permit,
             )
             run["question_index"] = question_index
             run["repetition_index"] = repetition_index
