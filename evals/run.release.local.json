@@ -1,9 +1,9 @@
 {
   "profile": "release",
   "environment": "local-production-like",
-  "service_version": "0.1.0",
-  "git_sha": "44da8cffd92d5dba7f39c37579a45d2e7eb51fb9",
-  "git_dirty": true,
+  "service_version": "0.2.1",
+  "git_sha": "0000000000000000000000000000000000000000",
+  "git_dirty": false,
   "graph_backend": "graphiti/neo4j",
   "hardware_profile": "docker-linux-containerized",
   "cache_state": "cold",
@@ -24,12 +24,19 @@
   },
   "ontology_version": "2",
   "quality_config": {
-    "fabric_write_mode": "fabric"
+    "fabric_write_mode": "fabric",
+    "agent_context_runtime": {
+      "concurrency": 4,
+      "quota_enabled": true,
+      "context_per_minute": 20,
+      "window_seconds": 60,
+      "backend": "valkey"
+    }
   },
   "run_context": {
     "principal": "http-registered-evaluator",
     "evaluation_scope": {
-      "id": "eval-functional-11",
+      "id": "release-template",
       "kind": "ephemeral_stack",
       "run_owned": true,
       "production_writable": false

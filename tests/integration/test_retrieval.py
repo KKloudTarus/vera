@@ -216,7 +216,16 @@ async def _chunk(
         return stored.id
 
 
-async def _fact(sessionmaker, group, subject_id, obj, *, valid_from=None, valid_to=None):
+async def _fact(
+    sessionmaker,
+    group,
+    subject_id,
+    obj,
+    *,
+    valid_from=None,
+    valid_to=None,
+    lifecycle=FactLifecycle.ACTIVE,
+):
     fk = fabric.fact_key(
         scope=group, subject_entity_id=subject_id, predicate="RUNS_ON", object_scalar=obj
     )
@@ -233,7 +242,7 @@ async def _fact(sessionmaker, group, subject_id, obj, *, valid_from=None, valid_
                 object_type=ObjectType.SCALAR,
                 normalized_object=fabric.normalize_object(object_scalar=obj),
                 object_scalar=obj,
-                lifecycle_state=FactLifecycle.ACTIVE,
+                lifecycle_state=lifecycle,
                 authority=1.0,
                 confidence=0.9,
                 valid_from=valid_from,
@@ -430,12 +439,14 @@ async def test_fact_candidate_source_matches_subject_and_object(
     )
 
 
+@pytest.mark.parametrize("lifecycle", [FactLifecycle.ACTIVE, FactLifecycle.DISPUTED])
 async def test_exact_fact_query_bypasses_semantic_providers(
     sessionmaker: async_sessionmaker[AsyncSession],
+    lifecycle: FactLifecycle,
 ) -> None:
     group = f"p:r-{uuid7().hex[:12]}"
     _, subject = await _setup(sessionmaker, group)
-    await _fact(sessionmaker, group, subject, "Payment API")
+    await _fact(sessionmaker, group, subject, "Payment API", lifecycle=lifecycle)
     source = PgVectorHybridFactCandidateSource(
         sessionmaker,
         _FailingEmbedder(),

@@ -1,7 +1,7 @@
 {
   "profile": "nightly",
   "environment": "local-production-like",
-  "service_version": "0.1.0",
+  "service_version": "0.2.1",
   "git_sha": "44da8cffd92d5dba7f39c37579a45d2e7eb51fb9",
   "git_dirty": true,
   "graph_backend": "graphiti/neo4j",

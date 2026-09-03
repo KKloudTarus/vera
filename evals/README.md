@@ -66,6 +66,7 @@ selected profile. An explicit adapter timeout must also exceed that deadline.
 Start the disposable full-stack evaluator with:
 
 ```bash
+export VERA_EVALUATOR_USER="$(id -u):$(id -g)"
 docker compose \
   -f docker-compose.yml \
   -f evals/docker-compose.eval.yml \
@@ -76,6 +77,31 @@ docker compose \
 
 `evals/docker-compose.eval.yml` is an override for the root topology, not a standalone Compose
 file. The evaluator image is defined in `evals/Dockerfile.eval`.
+
+For a release run, set a unique Compose project and scope, then use the release wrapper:
+
+```bash
+export COMPOSE_PROJECT_NAME=vera-release-<unique-id>
+export VERA_EVAL_SCOPE_ID=release-<unique-id>
+# Optional; defaults to the checkout's ignored .env file.
+export VERA_RELEASE_ENV_FILE=/absolute/path/to/release.env
+./evals/release_stack.sh build
+./evals/release_stack.sh up -d
+./evals/release_stack.sh exec -T evaluator \
+  python -m evals.prepare_release \
+  evals/run.release.local.json \
+  /output/release-configs/${VERA_EVAL_SCOPE_ID}.json
+```
+
+`release_stack.sh` refuses a dirty Git worktree and builds every project image from a Git archive
+of the exact clean `HEAD`. Every application process uses the same tagged image. Later Compose
+commands also read their definitions from a fresh archive and cannot rebuild from the checkout.
+The wrapper passes the external runtime env file into the archived Compose project, force-recreates
+the complete stack, and records the verified image IDs for every release service.
+`prepare_release` reads the immutable evaluator image metadata, rejects dirty metadata, and writes
+a new run config with the matching revision and configured scope. Run `evals.runner` with the
+generated config path. Generated configs are local artifacts under `evals/runs/` and cannot
+overwrite an existing file.
 
 ## Safety And Cleanup
 

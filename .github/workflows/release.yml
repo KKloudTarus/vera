@@ -1,12 +1,6 @@
 name: Release image
 
 on:
-  workflow_dispatch:
-    inputs:
-      tag:
-        description: "Image tag to publish (e.g. 0.1.0)"
-        required: true
-        default: "0.1.0"
   push:
     tags: ["v*"]
 
@@ -31,22 +25,27 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Resolve tag
-        id: tag
+      - name: Resolve and verify version
+        id: version
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "value=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
-          else
-            echo "value=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          project_version="$(python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
+          if [ "${GITHUB_REF_NAME#v}" != "$project_version" ]; then
+            echo "release tag ${GITHUB_REF_NAME} does not match project version ${project_version}" >&2
+            exit 1
           fi
+          echo "value=${project_version}" >> "$GITHUB_OUTPUT"
       - name: Build and push
         uses: docker/build-push-action@v6
         with:
           context: .
           push: true
           tags: |
-            ghcr.io/kkloudtarus/vera:${{ steps.tag.outputs.value }}
+            ghcr.io/kkloudtarus/vera:${{ steps.version.outputs.value }}
             ghcr.io/kkloudtarus/vera:latest
           labels: |
             org.opencontainers.image.source=https://github.com/KKloudTarus/vera
-            org.opencontainers.image.version=${{ steps.tag.outputs.value }}
+            org.opencontainers.image.version=${{ steps.version.outputs.value }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          build-args: |
+            VERA_BUILD_GIT_SHA=${{ github.sha }}
+            VERA_BUILD_GIT_DIRTY=false

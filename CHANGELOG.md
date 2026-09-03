@@ -4,6 +4,14 @@ All notable changes to VERA are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project aims to
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] - 2026-09-02
+
+### Changed
+
+- Release evaluation binds reports to clean, immutable application and evaluator image builds.
+- Agent evaluation freezes context-call quota behavior and source-relative temporal context.
+- Exact disputed facts retain the supporting context needed to explain conflicts.
+
 ## [0.2.0] - 2026-09-01
 
 Multilingual knowledge: VERA now ingests and retrieves non-English content (for example

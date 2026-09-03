@@ -14,6 +14,7 @@ from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.responses import Response
 
+from vera import __version__
 from vera.config.settings import get_settings
 from vera.entrypoints.api.lifespan import lifespan
 from vera.entrypoints.api.routers import health, identity, knowledge, memory
@@ -81,7 +82,7 @@ def create_app() -> FastAPI:
     settings = get_settings()
     app = FastAPI(
         title="VERA",
-        version="0.1.0",
+        version=__version__,
         summary="Verified Episodic Recall for Agents",
         lifespan=lifespan,
     )

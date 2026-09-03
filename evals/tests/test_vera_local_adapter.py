@@ -38,7 +38,7 @@ def _settings() -> Settings:
                 "cross_encoder_enabled": True,
                 "cross_encoder_provider": "voyage",
             },
-        }
+        },
     )
 
 
@@ -778,7 +778,7 @@ def test_cleanup_reconciles_requested_resource_ids_only_after_empty_store_verifi
 
     monkeypatch.setenv("VERA_EVAL_SCOPE_ID", "scope-1")
     monkeypatch.delenv("VERA_EVAL_DEPENDENCY_CONTROL_URL", raising=False)
-    monkeypatch.setattr(adapter, "_settings_fingerprint", lambda _settings: "fingerprint")
+    monkeypatch.setattr(adapter, "_settings_fingerprint", lambda *_args: "fingerprint")
     monkeypatch.setattr(adapter, "_assert_disposable_endpoints", lambda _settings: None)
     monkeypatch.setattr(adapter, "_mcp_readiness", mcp_ready)
     monkeypatch.setattr(adapter, "_database_inventory", inventory)
@@ -1777,6 +1777,7 @@ def test_agent_uses_only_mcp_product_ids_and_citations(
                 "group_id": "p:case",
             },
             question="Who owns Payment API?",
+            evaluation_time="2026-08-28T17:05:00Z",
         )
     )
 
@@ -1793,6 +1794,9 @@ def test_agent_uses_only_mcp_product_ids_and_citations(
     assert result["unsupported_claim_count"] == 0
     assert "cost_usd" not in result
     assert "later evidence may qualify or supersede earlier evidence" in answer_system_prompt
+    assert "Treat relative time expressions as source-relative" in answer_system_prompt
+    assert "source collection cutoff is 2026-08-28T17:05:00Z" in answer_system_prompt
+    assert result["evaluation_time"] == "2026-08-28T17:05:00Z"
 
 
 def test_agent_uses_task_specific_retrieval_coverage(
@@ -1807,7 +1811,13 @@ def test_agent_uses_task_specific_retrieval_coverage(
         question: str,
         retrieval_limit: int = 10,
         token_budget: int = 4000,
+        context_call_pacer: Any = None,
+        as_of: str | None = None,
+        evaluation_time: str | None = None,
     ) -> dict[str, Any]:
+        assert context_call_pacer is not None
+        assert as_of is None
+        assert evaluation_time == "2026-08-28T17:05:00Z"
         arguments_seen.append(
             {
                 "principal": principal,
@@ -1823,20 +1833,25 @@ def test_agent_uses_task_specific_retrieval_coverage(
     request = {
         "inputs": {
             "question_ref": {
-                "prompt": "Review all documents.",
+                "prompt": (
+                    "Compare the changes at 2026-08-28T08:05:00Z and "
+                    "2026-08-28T17:05:00Z, then summarize the current state."
+                ),
+                "expected": "summary",
                 "retrieval_limit": 25,
                 "token_budget": 8000,
             }
         }
     }
     current = {
+        "source_reference_times": ["2026-08-28T08:05:00Z", "2026-08-28T17:05:00Z"],
         "principals": {
             "default": {
                 "principal_id": "00000000-0000-0000-0000-000000000123",
                 "group_id": "p:case",
                 "api_key": "test-key",
-            }
-        }
+            },
+        },
     }
 
     result = asyncio.run(adapter._agent(container, request, current))  # type: ignore[arg-type]
@@ -1845,7 +1860,10 @@ def test_agent_uses_task_specific_retrieval_coverage(
     assert arguments_seen == [
         {
             "principal": current["principals"]["default"],
-            "question": "Review all documents.",
+            "question": (
+                "Compare the changes at 2026-08-28T08:05:00Z and "
+                "2026-08-28T17:05:00Z, then summarize the current state."
+            ),
             "retrieval_limit": 25,
             "token_budget": 8000,
         }
@@ -1934,7 +1952,7 @@ def test_weekly_drift_metrics_must_match_bound_source_records(tmp_path: Path) ->
         )
 
 
-def test_agent_passes_explicit_question_time_to_mcp(
+def test_agent_passes_explicit_as_of_to_mcp(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     seen: list[dict[str, Any]] = []
@@ -1979,11 +1997,51 @@ def test_agent_passes_explicit_question_time_to_mcp(
                 "group_id": "p:case",
             },
             question="Where did it run at 2026-04-01T12:00:00Z?",
+            as_of="2026-04-01T12:00:00Z",
         )
     )
 
     assert len(seen) == 2
     assert all(call["as_of"] == "2026-04-01T12:00:00Z" for call in seen)
+
+
+def test_agent_does_not_infer_as_of_from_event_time_text(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[dict[str, Any]] = []
+    model_calls = 0
+
+    async def fake_mcp(*_args: Any, **kwargs: Any) -> tuple[dict[str, Any], float]:
+        seen.append(kwargs["arguments"])
+        return {"pack_id": "pack-1", "result_references": [], "results": []}, 1.0
+
+    async def fake_model(*_args: Any, **_kwargs: Any) -> adapter._ModelResult:
+        nonlocal model_calls
+        model_calls += 1
+        payload = (
+            {"queries": []}
+            if model_calls == 1
+            else {"answer": "Unknown.", "used_result_ids": [], "citations": [], "abstained": True}
+        )
+        return adapter._ModelResult(
+            payload=payload,
+            model_id="actual-model",
+            latency_ms=1.0,
+            usage={"total_tokens": 1},
+            cost_usd=None,
+        )
+
+    monkeypatch.setattr(adapter, "_call_mcp_tool", fake_mcp)
+    monkeypatch.setattr(adapter, "_call_model", fake_model)
+
+    asyncio.run(
+        adapter._agent_answer(
+            _settings(),
+            principal={"principal_id": "principal", "group_id": "p:case"},
+            question="Given the deployment at 2026-04-01T12:00:00Z, where does it run now?",
+        )
+    )
+
+    assert len(seen) == 1
+    assert "as_of" not in seen[0]
 
 
 def test_agent_fails_closed_when_mcp_is_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2179,7 +2237,9 @@ def test_decision_includes_review_attached_to_the_conflicting_slot() -> None:
     assert decision["review_ids"] == ["review-1"]
 
 
-def test_runtime_manifest_covers_every_active_model_and_embedding_setting() -> None:
+def test_runtime_manifest_covers_active_models_runtime_and_build(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     settings = _settings()
     settings = settings.model_copy(
         update={
@@ -2205,10 +2265,31 @@ def test_runtime_manifest_covers_every_active_model_and_embedding_setting() -> N
         "embedding_dimension": "1536",
         "reranker": "rerank-2.5",
     }
+    git_sha = "a" * 40
+    metadata = tmp_path / "build-metadata.json"
+    metadata.write_text(json.dumps({"git_sha": git_sha, "git_dirty": False}), encoding="utf-8")
+    monkeypatch.setattr(adapter, "_EVALUATOR_BUILD_METADATA_PATH", metadata)
+    agent_runtime = {
+        "concurrency": 4,
+        "quota_enabled": True,
+        "context_per_minute": 20,
+        "window_seconds": 60,
+        "backend": "valkey",
+    }
     request = {
         "run_context": {
-            "manifest": {"graph_backend": "graphiti/neo4j", "models": models},
-            "quality_config": {"fabric_write_mode": "fabric"},
+            "profile": "release",
+            "manifest": {
+                "git_sha": git_sha,
+                "git_dirty": False,
+                "service_version": adapter.__version__,
+                "graph_backend": "graphiti/neo4j",
+                "models": models,
+            },
+            "quality_config": {
+                "fabric_write_mode": "fabric",
+                "agent_context_runtime": agent_runtime,
+            },
         }
     }
 
@@ -2220,6 +2301,81 @@ def test_runtime_manifest_covers_every_active_model_and_embedding_setting() -> N
     request["run_context"]["manifest"]["models"]["embedding_dimension"] = "3072"
     errors, _actual = adapter._runtime_manifest_errors(container, request)  # type: ignore[arg-type]
     assert errors == ["manifest model 'embedding_dimension' does not match the active runtime"]
+
+    request["run_context"]["manifest"]["models"]["embedding_dimension"] = "1536"
+    request["run_context"]["manifest"]["git_sha"] = "b" * 40
+    errors, _actual = adapter._runtime_manifest_errors(container, request)  # type: ignore[arg-type]
+    assert errors == ["evaluator image git_sha does not match the release manifest"]
+
+    request["run_context"]["manifest"]["git_sha"] = git_sha
+    request["run_context"]["manifest"]["service_version"] = "0.0.0"
+    errors, _actual = adapter._runtime_manifest_errors(container, request)  # type: ignore[arg-type]
+    assert errors == ["manifest service_version does not match the evaluator runtime"]
+
+
+def test_stack_image_attestation_covers_every_release_service(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    git_sha = "a" * 40
+    image_id = "sha256:" + "b" * 64
+    attestation = tmp_path / "stack-attestation.json"
+    attestation.write_text(
+        json.dumps(
+            {
+                "schema_version": "1.0",
+                "git_sha": git_sha,
+                "app_image_id": image_id,
+                "database_provision_image_id": image_id,
+                "prometheus_image_id": image_id,
+                "recovery_image_id": image_id,
+                "evaluator_image_id": image_id,
+                "verified_services": [
+                    "migrate",
+                    "api",
+                    "worker",
+                    "mcp",
+                    "database-provision",
+                    "prometheus",
+                    "recovery-harness",
+                    "rollout-state-init",
+                    "rollout-controller",
+                    "evaluator-state-init",
+                    "evaluator",
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(adapter, "_STACK_ATTESTATION_PATH", attestation)
+
+    result = adapter._stack_image_attestation({"git_sha": git_sha})
+
+    assert result["app_image_id"] == image_id
+
+
+def test_stack_image_attestation_rejects_incomplete_services(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    attestation = tmp_path / "stack-attestation.json"
+    attestation.write_text(
+        json.dumps(
+            {
+                "schema_version": "1.0",
+                "git_sha": "a" * 40,
+                "app_image_id": "sha256:" + "b" * 64,
+                "database_provision_image_id": "sha256:" + "b" * 64,
+                "prometheus_image_id": "sha256:" + "b" * 64,
+                "recovery_image_id": "sha256:" + "b" * 64,
+                "evaluator_image_id": "sha256:" + "b" * 64,
+                "verified_services": ["api"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(adapter, "_STACK_ATTESTATION_PATH", attestation)
+
+    with pytest.raises(adapter.AdapterBlocked, match="attestation is invalid"):
+        adapter._stack_image_attestation({"git_sha": "a" * 40})
 
 
 def test_provider_preflight_rejects_non_model_extraction() -> None:
@@ -2978,11 +3134,16 @@ def test_agent_repetitions_use_bounded_concurrency(monkeypatch: pytest.MonkeyPat
         *,
         principal: dict[str, Any],
         question: str,
-        context_call_permit: Any,
+        context_call_pacer: Any,
+        as_of: str | None,
+        evaluation_time: str | None,
     ) -> dict[str, Any]:
         nonlocal active, answer_count, maximum_active
         assert principal["group_id"] == "group-case"
-        await context_call_permit()
+        assert as_of is None
+        assert evaluation_time is None
+        async with context_call_pacer.permit():
+            pass
         answer_count += 1
         usage_ref = f"run-{answer_count}"
         active += 1
@@ -3008,7 +3169,6 @@ def test_agent_repetitions_use_bounded_concurrency(monkeypatch: pytest.MonkeyPat
         assert request_kind == "search"
         return dict.fromkeys(refs, 5)
 
-    monkeypatch.setenv("VERA_EVAL_AGENT_CONCURRENCY", "2")
     monkeypatch.setattr(adapter, "_agent_answer", answer)
     monkeypatch.setattr(adapter, "_usage_tokens_by_ref", usage_by_ref)
     questions = [{"text": "one"}, {"text": "two"}, {"text": "three"}]
@@ -3018,6 +3178,7 @@ def test_agent_repetitions_use_bounded_concurrency(monkeypatch: pytest.MonkeyPat
             {
                 "case_id": "PERF-003",
                 "inputs": {"questions_ref": questions, "repetitions": 4},
+                "run_context": {"quality_config": {"agent_context_runtime": {"concurrency": 2}}},
             },
             {
                 "principals": {
@@ -3070,13 +3231,17 @@ def test_agent_repetitions_pace_context_calls_to_product_quota(
         *,
         principal: dict[str, Any],
         question: str,
-        context_call_permit: Any,
+        context_call_pacer: Any,
+        as_of: str | None,
+        evaluation_time: str | None,
     ) -> dict[str, Any]:
         nonlocal answer_count
         assert principal["group_id"] == "group-case"
+        assert as_of is None
+        assert evaluation_time is None
         for _ in range(2):
-            await context_call_permit()
-            call_times.append(clock)
+            async with context_call_pacer.permit():
+                call_times.append(clock)
         answer_count += 1
         return {
             "answer": question,
@@ -3102,7 +3267,6 @@ def test_agent_repetitions_pace_context_calls_to_product_quota(
         sleeps.append(delay)
         clock += delay
 
-    monkeypatch.setenv("VERA_EVAL_AGENT_CONCURRENCY", "2")
     monkeypatch.setattr(adapter, "_agent_answer", answer)
     monkeypatch.setattr(adapter, "_usage_tokens_by_ref", usage_by_ref)
     monkeypatch.setattr(adapter.asyncio, "sleep", sleep)
@@ -3121,6 +3285,7 @@ def test_agent_repetitions_pace_context_calls_to_product_quota(
                     "questions_ref": [{"text": "one"}, {"text": "two"}],
                     "repetitions": 2,
                 },
+                "run_context": {"quality_config": {"agent_context_runtime": {"concurrency": 2}}},
             },
             {
                 "principals": {
@@ -3137,6 +3302,36 @@ def test_agent_repetitions_pace_context_calls_to_product_quota(
     assert len(result["runs"]) == 4
     assert call_times == pytest.approx([0.0, 0.0, 60.25, 60.25, 120.5, 120.5, 180.75, 180.75])
     assert sleeps == pytest.approx([60.25, 60.25, 60.25])
+
+
+def test_context_quota_pacer_anchors_reuse_after_call_completion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = 0.0
+    starts: list[float] = []
+    sleeps: list[float] = []
+
+    async def sleep(delay: float) -> None:
+        nonlocal clock
+        sleeps.append(delay)
+        clock += delay
+
+    async def run() -> None:
+        nonlocal clock
+        pacer = adapter._ContextQuotaPacer(limit=1, window_seconds=60)
+        async with pacer.permit():
+            starts.append(clock)
+            clock += 0.75
+        async with pacer.permit():
+            starts.append(clock)
+
+    monkeypatch.setattr(adapter.asyncio, "sleep", sleep)
+    monkeypatch.setattr(adapter.time, "monotonic", lambda: clock)
+
+    asyncio.run(run())
+
+    assert starts == pytest.approx([0.0, 61.0])
+    assert sleeps == pytest.approx([60.25])
 
 
 def test_evidence_references_large_observations_by_digest() -> None:

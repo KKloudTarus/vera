@@ -30,7 +30,7 @@ from evals.runner import (
     _resolve_inputs,
     _strip_gold_labels,
 )
-from evals.validate import load_json, validate_report
+from evals.validate import load_json, source_tree_sha256, validate_report
 
 EVAL_ROOT = Path(__file__).resolve().parents[1]
 _PART = re.compile(r"([^\[\]]+)(?:\[(\d+)\])?")
@@ -43,6 +43,26 @@ _ALL_EFFECTS = [
     "load",
     "cleanup",
 ]
+
+
+def test_source_tree_digest_covers_release_assets(tmp_path: Path) -> None:
+    eval_root = tmp_path / "evals"
+    deploy_file = tmp_path / "deploy" / "alerts.yaml"
+    docs_file = tmp_path / "docs" / "runbook.md"
+    eval_root.mkdir()
+    deploy_file.parent.mkdir()
+    docs_file.parent.mkdir()
+    deploy_file.write_text("alert: one\n", encoding="utf-8")
+    docs_file.write_text("recover one\n", encoding="utf-8")
+    initial = source_tree_sha256(eval_root)
+
+    deploy_file.write_text("alert: two\n", encoding="utf-8")
+    after_deploy = source_tree_sha256(eval_root)
+    docs_file.write_text("recover two\n", encoding="utf-8")
+    after_docs = source_tree_sha256(eval_root)
+
+    assert initial != after_deploy
+    assert after_deploy != after_docs
 
 
 def _set_path(root: dict[str, Any], path: str, value: Any) -> None:

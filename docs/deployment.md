@@ -10,7 +10,7 @@ The release workflow publishes the image to GHCR as a public package, so most de
 just pull it:
 
 ```bash
-docker pull ghcr.io/kkloudtarus/vera:latest   # or a version tag, e.g. :0.2.0
+docker pull ghcr.io/kkloudtarus/vera:latest   # or a version tag, e.g. :0.2.1
 docker build -t vera:local .                  # or build locally
 ```
 

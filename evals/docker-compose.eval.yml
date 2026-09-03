@@ -1,5 +1,13 @@
 # Disposable full-stack topology for evaluation. Always use a unique Compose project name
 # and remove its volumes after exporting the immutable report.
+x-eval-app-build: &eval-app-build
+  context: .
+  args:
+    VERA_BUILD_GIT_SHA: ${VERA_BUILD_GIT_SHA:-unknown}
+    VERA_BUILD_GIT_DIRTY: ${VERA_BUILD_GIT_DIRTY:-true}
+
+x-eval-app-image: &eval-app-image "${VERA_APP_IMAGE:-vera-app:local}"
+
 x-eval-app-env: &eval-app-env
   VERA_ENVIRONMENT: dev
   VERA_DB__DSN: postgresql+asyncpg://vera_runtime:${VERA_EVAL_DB_RUNTIME_PASSWORD_URLENCODED:-${VERA_EVAL_DB_RUNTIME_PASSWORD:?set a run-specific database runtime password}}@neo4j-proxy:5432/vera
@@ -40,7 +48,8 @@ x-eval-app-env: &eval-app-env
 
 services:
   rollout-state-init:
-    build: .
+    image: *eval-app-image
+    build: *eval-app-build
     profiles: ["eval"]
     user: "0:0"
     command:
@@ -338,6 +347,7 @@ services:
         condition: service_healthy
 
   prometheus:
+    image: "${VERA_PROMETHEUS_IMAGE:-vera-prometheus:local}"
     build:
       context: .
       dockerfile: deploy/observability/Dockerfile
@@ -354,6 +364,7 @@ services:
     ports: !reset []
 
   recovery-harness:
+    image: "${VERA_RECOVERY_IMAGE:-vera-recovery:local}"
     build:
       context: .
       dockerfile: deploy/recovery/Dockerfile
@@ -370,7 +381,8 @@ services:
         condition: service_completed_successfully
 
   rollout-controller:
-    build: .
+    image: *eval-app-image
+    build: *eval-app-build
     profiles: ["eval"]
     user: "10001:10001"
     command:
@@ -417,13 +429,38 @@ services:
       worker:
         condition: service_started
 
-  evaluator:
+  evaluator-state-init:
+    image: "${VERA_EVALUATOR_IMAGE:-vera-evaluator:local}"
     build:
       context: .
       dockerfile: evals/Dockerfile.eval
+      args:
+        VERA_BUILD_GIT_SHA: ${VERA_BUILD_GIT_SHA:-unknown}
+        VERA_BUILD_GIT_DIRTY: ${VERA_BUILD_GIT_DIRTY:-true}
     profiles: ["eval"]
+    user: "0:0"
+    command:
+      [
+        "sh",
+        "-c",
+        "chown ${VERA_EVALUATOR_USER:-evaluator} /output /state && chmod 0750 /output /state",
+      ]
+    volumes:
+      - ${VERA_EVAL_OUTPUT_ROOT:-./evals/runs}:/output
+      - eval-state:/state
+
+  evaluator:
+    image: "${VERA_EVALUATOR_IMAGE:-vera-evaluator:local}"
+    build:
+      context: .
+      dockerfile: evals/Dockerfile.eval
+      args:
+        VERA_BUILD_GIT_SHA: ${VERA_BUILD_GIT_SHA:-unknown}
+        VERA_BUILD_GIT_DIRTY: ${VERA_BUILD_GIT_DIRTY:-true}
+    profiles: ["eval"]
+    user: "${VERA_EVALUATOR_USER:-evaluator}"
     env_file:
-      - path: .env
+      - path: ${VERA_RUNTIME_ENV_FILE:-.env}
         required: false
     environment:
       <<: *eval-app-env
@@ -450,10 +487,12 @@ services:
       VERA_EVAL_STATE_ROOT: /state
     extra_hosts: ["host.docker.internal:host-gateway"]
     volumes:
-      - ./evals/runs:/output
+      - ${VERA_EVAL_OUTPUT_ROOT:-./evals/runs}:/output
       - eval-state:/state
     command: ["sleep", "infinity"]
     depends_on:
+      evaluator-state-init:
+        condition: service_completed_successfully
       api:
         condition: service_healthy
       mcp:

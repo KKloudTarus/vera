@@ -111,7 +111,13 @@ def source_tree_sha256(root: Path | None = None) -> str:
         "tests",
     }
     paths: set[Path] = set()
-    for directory in (workspace / "src", workspace / "migrations", root):
+    for directory in (
+        workspace / "src",
+        workspace / "migrations",
+        workspace / "deploy",
+        workspace / "docs",
+        root,
+    ):
         if not directory.is_dir():
             continue
         paths.update(
@@ -123,8 +129,15 @@ def source_tree_sha256(root: Path | None = None) -> str:
         path
         for path in (
             workspace / "alembic.ini",
+            workspace / "CHANGELOG.md",
             workspace / "constraints.lock",
+            workspace / ".dockerignore",
+            workspace / "Dockerfile",
+            workspace / "docker-compose.yml",
+            workspace / "LICENSE",
+            workspace / "NOTICE",
             workspace / "pyproject.toml",
+            workspace / "README.md",
         )
         if path.is_file()
     )

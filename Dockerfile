@@ -30,9 +30,13 @@ RUN --mount=type=cache,id=vera-pip,target=/root/.cache/pip \
 
 FROM python:3.11-slim-bookworm@sha256:0bee7276f83efd4a1ee05bbbf4281d95ed28e079220a9457f25a93e3f1e3c31b AS runtime
 
+ARG VERA_BUILD_GIT_SHA=unknown
+ARG VERA_BUILD_GIT_DIRTY=true
+
 LABEL org.opencontainers.image.title="vera" \
       org.opencontainers.image.description="Verified Episodic Recall for Agents" \
-      org.opencontainers.image.source="https://github.com/KKloudTarus/vera"
+      org.opencontainers.image.source="https://github.com/KKloudTarus/vera" \
+      org.opencontainers.image.revision="${VERA_BUILD_GIT_SHA}"
 
 ENV PATH="/opt/venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \
@@ -46,6 +50,8 @@ COPY --from=builder /opt/venv /opt/venv
 COPY src ./src
 COPY migrations ./migrations
 COPY alembic.ini ./
+RUN printf '{"git_sha":"%s","git_dirty":%s}\n' \
+      "$VERA_BUILD_GIT_SHA" "$VERA_BUILD_GIT_DIRTY" > /app/build-metadata.json
 
 USER vera
 EXPOSE 8000

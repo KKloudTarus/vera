@@ -219,6 +219,23 @@ async def test_assemble_exact_fact_omits_passage_and_code_candidates() -> None:
 
 
 @pytest.mark.asyncio
+async def test_assemble_disputed_exact_fact_keeps_supporting_context() -> None:
+    passages = _FakePassages([_passage("passage", "ver-1", 1.0)])
+    code = _FakePassages([_passage("code", "ver-1", 1.0)])
+    availability = _FakeContentAvailability(passages=True, code=True)
+
+    result = await ContextAssembler(
+        facts=_FakeFacts([_fact("exact", "eks", lifecycle="disputed", exact_match=True)]),
+        passages=passages,
+        code=code,
+        content_availability=availability,
+    ).assemble(query="paymentapi RUNS_ON eks", group_id="p:x")
+
+    assert {candidate.kind for candidate in result.results} == {"fact", "passage", "code"}
+    assert passages.calls == code.calls == availability.calls == 1
+
+
+@pytest.mark.asyncio
 async def test_valid_time_does_not_imply_a_transaction_boundary() -> None:
     boundary = utc_now()
     facts = _FakeFacts([])

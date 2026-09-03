@@ -20,15 +20,15 @@ unauthenticated local MCP principal. Add an LLM key and turn on auth for real us
 ## 1. The image
 
 The image is published to GHCR by the release workflow as a public package, so the cluster
-pulls `ghcr.io/kkloudtarus/vera:0.1.0` with no registry secret. Nothing to do here for a normal
+pulls `ghcr.io/kkloudtarus/vera:0.2.1` with no registry secret. Nothing to do here for a normal
 cluster.
 
 For an air-gapped single-node k3s cluster, build it locally and import it into containerd,
 then point the chart at the local tag:
 
 ```bash
-docker build -t vera:0.1.0 .
-docker save vera:0.1.0 | sudo k3s ctr images import -
+docker build -t vera:0.2.1 .
+docker save vera:0.2.1 | sudo k3s ctr images import -
 # then add: --set image.repository=vera
 ```
 

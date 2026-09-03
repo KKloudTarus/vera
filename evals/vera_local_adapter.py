@@ -15,8 +15,8 @@ import sys
 import tempfile
 import time
 from collections import Counter
-from collections.abc import Awaitable, Callable
-from contextlib import redirect_stdout
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager, redirect_stdout
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from functools import cache
@@ -52,6 +52,7 @@ from evals.generate_load_fixture import (
 )
 from evals.generate_load_fixture import fact as load_fact
 from evals.validate import fixture_data, load_cases
+from vera import __version__
 from vera.adapters.persistence.repositories import (
     SqlAlchemyFactExpiryRepository,
     SqlAlchemyKnowledgeEventLog,
@@ -68,6 +69,12 @@ from vera.bootstrap import (
     build_container,
     build_rerank_weights,
     dispose_container,
+)
+from vera.build_metadata import (
+    BuildMetadata,
+    BuildMetadataError,
+    load_build_metadata,
+    parse_build_metadata,
 )
 from vera.config.settings import Settings, active_embedding, get_settings
 from vera.domain.knowledge.models import SourceKind
@@ -90,8 +97,9 @@ _STATE_ROOT = Path(
 _CASES = {case["case_id"]: case for case in load_cases()}
 _SAFE_DATABASE_TABLES = frozenset({"alembic_version", "ontology_versions"})
 _DEFAULT_TIMEOUT_S = 60.0
+_EVALUATOR_BUILD_METADATA_PATH = Path("/workspace/build-metadata.json")
+_STACK_ATTESTATION_PATH = Path("/output/stack-attestation.json")
 _HTTP_SSL_CONTEXT = ssl.create_default_context()
-_ISO_INSTANT = re.compile(r"\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})\b")
 _SEARCH_MATRIX = {
     "entrypoints": ["http", "mcp"],
     "cache_states": ["cold", "warm"],
@@ -785,6 +793,11 @@ def _record_payload(inputs: dict[str, Any], current: dict[str, Any]) -> dict[str
     if external_id is None and isinstance(triple, dict):
         identity = json.dumps(triple, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
         external_id = f"triple-{hashlib.sha256(identity.encode()).hexdigest()[:20]}"
+    reference_time = _parse_time(
+        source.get("source_event_time") or source.get("valid_at") or source.get("created_at")
+    )
+    if reference_time is not None:
+        current.setdefault("source_reference_times", []).append(_format_time(reference_time))
     return {
         "external_id": str(external_id or f"record-{current['ingest_count']}"),
         "body": str(source.get("body") or source.get("content") or source.get("text") or ""),
@@ -792,9 +805,7 @@ def _record_payload(inputs: dict[str, Any], current: dict[str, Any]) -> dict[str
             source.get("knowledge_type") or ("fact_triple" if metadata.get("triples") else "text")
         ),
         "metadata": metadata,
-        "reference_time": _parse_time(
-            source.get("source_event_time") or source.get("valid_at") or source.get("created_at")
-        ),
+        "reference_time": reference_time,
         "source_revision": source.get("source_revision"),
         "source_updated_at": _parse_time(source.get("source_updated_at")),
         "source_version_id": source.get("source_version_id"),
@@ -1872,6 +1883,45 @@ def _context_references(context: dict[str, Any]) -> tuple[set[str], dict[str, di
     return references, citations
 
 
+class _ContextQuotaPacer:
+    def __init__(self, *, limit: int, window_seconds: float, cushion_seconds: float = 0.25) -> None:
+        self._limit = limit
+        self._window_seconds = window_seconds
+        self._cushion_seconds = cushion_seconds
+        self._lock = asyncio.Lock()
+        self._slots: dict[int, float | None] = {}
+        self._next_slot = 0
+
+    @asynccontextmanager
+    async def permit(self) -> AsyncIterator[None]:
+        if self._limit <= 0:
+            yield
+            return
+        slot = -1
+        while slot < 0:
+            async with self._lock:
+                now = time.monotonic()
+                reusable_after = self._window_seconds + self._cushion_seconds
+                self._slots = {
+                    key: completed_at
+                    for key, completed_at in self._slots.items()
+                    if completed_at is None or now - completed_at < reusable_after
+                }
+                if len(self._slots) < self._limit:
+                    slot = self._next_slot
+                    self._next_slot += 1
+                    self._slots[slot] = None
+                    continue
+                completed = [value for value in self._slots.values() if value is not None]
+                delay = max(0.0, min(completed) + reusable_after - now) if completed else 0.05
+            await asyncio.sleep(delay)
+        try:
+            yield
+        finally:
+            async with self._lock:
+                self._slots[slot] = time.monotonic()
+
+
 async def _agent_answer(
     settings: Settings,
     *,
@@ -1879,7 +1929,9 @@ async def _agent_answer(
     question: str,
     retrieval_limit: int = 10,
     token_budget: int = 4000,
-    context_call_permit: Callable[[], Awaitable[None]] | None = None,
+    context_call_pacer: _ContextQuotaPacer | None = None,
+    as_of: str | None = None,
+    evaluation_time: str | None = None,
 ) -> dict[str, Any]:
     started = time.perf_counter()
     usage_ref = f"eval-agent:{uuid4()}"
@@ -1889,9 +1941,9 @@ async def _agent_answer(
         "token_budget": token_budget,
         "usage_ref": usage_ref,
     }
-    instant = _ISO_INSTANT.search(question)
-    if instant is not None:
-        base_arguments["as_of"] = instant.group(0)
+    retrieval_time = as_of or evaluation_time
+    if retrieval_time is not None:
+        base_arguments["as_of"] = retrieval_time
 
     contexts: list[dict[str, Any]] = []
     tool_calls: list[dict[str, Any]] = []
@@ -1901,15 +1953,22 @@ async def _agent_answer(
 
     async def retrieve(query: str) -> None:
         nonlocal mcp_latency
-        if context_call_permit is not None:
-            await context_call_permit()
         arguments = {"query": query, **base_arguments}
-        context, latency = await _call_mcp_tool(
-            settings,
-            principal_id=str(principal["principal_id"]),
-            name="knowledge_get_context",
-            arguments=arguments,
-        )
+        if context_call_pacer is None:
+            context, latency = await _call_mcp_tool(
+                settings,
+                principal_id=str(principal["principal_id"]),
+                name="knowledge_get_context",
+                arguments=arguments,
+            )
+        else:
+            async with context_call_pacer.permit():
+                context, latency = await _call_mcp_tool(
+                    settings,
+                    principal_id=str(principal["principal_id"]),
+                    name="knowledge_get_context",
+                    arguments=arguments,
+                )
         current_references, current_citations = _context_references(context)
         references.update(current_references)
         product_citations.update(current_citations)
@@ -1956,13 +2015,24 @@ async def _agent_answer(
         "contexts": contexts,
         "result_references": sorted(references),
     }
+    temporal_context = (
+        f"The source collection cutoff is {evaluation_time}. Interpret task-relative terms such "
+        "as today, current, and this week at that cutoff, never at model execution time. Do not "
+        "claim a post-cutoff status. "
+        if evaluation_time is not None
+        else ""
+    )
     prompt = (
         "Answer the user only from the VERA context below. Return JSON with keys answer "
         "(string), used_result_ids (array of exact context result IDs), citations (array of "
         "objects with result_id), and abstained (boolean). If the context is insufficient, "
         "abstain. Never create a result ID. Reconcile claims by event time before describing "
         "current state: later evidence may qualify or supersede earlier evidence. Preserve "
-        "material unresolved conflicts.\n\nVERA context:\n"
+        "material unresolved conflicts. Treat relative time expressions as source-relative. "
+        "Only present them as current when their date is established; otherwise preserve the "
+        "source date or request a freshness check. "
+        + temporal_context
+        + "\n\nVERA context:\n"
         + json.dumps(context, ensure_ascii=True, separators=(",", ":"), default=str)
     )
     model = await _call_model(
@@ -2009,7 +2079,7 @@ async def _agent_answer(
         "used_result_ids": used_ids,
         "citations": actual_citations,
         "model_id": model.model_id,
-        "prompt_version": "external-agent-v2",
+        "prompt_version": "external-agent-v3",
         "latency_ms": round((time.perf_counter() - started) * 1000, 3),
         "mcp_latency_ms": round(mcp_latency, 3),
         "model_latency_ms": round(plan.latency_ms + model.latency_ms, 3),
@@ -2019,6 +2089,8 @@ async def _agent_answer(
     }
     if usage:
         result["token_usage"] = usage
+    if evaluation_time is not None:
+        result["evaluation_time"] = evaluation_time
     if plan.cost_usd is not None and model.cost_usd is not None:
         result["cost_usd"] = plan.cost_usd + model.cost_usd
     return result
@@ -2048,40 +2120,76 @@ def _question_positive_int(value: Any, key: str, default: int, maximum: int) -> 
     return selected
 
 
+def _question_instant(value: Any, key: str) -> str | None:
+    if not isinstance(value, dict) or key not in value:
+        return None
+    try:
+        parsed = _parse_time(value[key])
+    except ValueError as exc:
+        raise AdapterBlocked(f"agent.run {key} must be an ISO 8601 timestamp") from exc
+    if parsed is None:
+        raise AdapterBlocked(f"agent.run {key} must be an ISO 8601 timestamp")
+    return _format_time(parsed)
+
+
+def _source_evaluation_time(current: dict[str, Any]) -> str | None:
+    values = current.get("source_reference_times")
+    if not isinstance(values, list):
+        return None
+    instants = [_parse_time(value) for value in values if isinstance(value, str)]
+    parsed = [value for value in instants if value is not None]
+    return _format_time(max(parsed)) if parsed else None
+
+
+def _agent_runtime_config(settings: Settings, request: dict[str, Any]) -> dict[str, Any]:
+    run_context = request.get("run_context")
+    quality = run_context.get("quality_config") if isinstance(run_context, dict) else None
+    declared = quality.get("agent_context_runtime") if isinstance(quality, dict) else None
+    if declared is None:
+        concurrency = _bounded_concurrency("VERA_EVAL_AGENT_CONCURRENCY", 4)
+    elif isinstance(declared, dict):
+        concurrency_value = declared.get("concurrency")
+        if (
+            isinstance(concurrency_value, bool)
+            or not isinstance(concurrency_value, int)
+            or concurrency_value < 1
+            or concurrency_value > 128
+        ):
+            raise AdapterBlocked("agent_context_runtime concurrency must be between 1 and 128")
+        concurrency = concurrency_value
+    else:
+        raise AdapterBlocked("agent_context_runtime must be an object")
+    mcp_settings = getattr(settings, "mcp", None)
+    resilience = getattr(settings, "resilience", None)
+    return {
+        "concurrency": concurrency,
+        "quota_enabled": bool(getattr(mcp_settings, "quota_enabled", False)),
+        "context_per_minute": int(getattr(mcp_settings, "quota_context_per_minute", 0)),
+        "window_seconds": 60,
+        "backend": "valkey" if getattr(resilience, "valkey_url", None) else "in_process",
+    }
+
+
 async def _agent(
     container: Container, request: dict[str, Any], current: dict[str, Any]
 ) -> dict[str, Any]:
     settings = container.settings
     principal = _principal(current, str(request["inputs"].get("principal", "default")))
+    agent_runtime = _agent_runtime_config(settings, request)
+    context_quota = (
+        int(agent_runtime["context_per_minute"]) if agent_runtime["quota_enabled"] else 0
+    )
+    context_call_pacer = _ContextQuotaPacer(
+        limit=context_quota,
+        window_seconds=float(agent_runtime["window_seconds"]),
+    )
+    source_evaluation_time = _source_evaluation_time(current)
     questions = request["inputs"].get("questions_ref")
     if isinstance(questions, list):
         measure_mcp_tokens = request.get("case_id") == "PERF-003"
         repetitions = request["inputs"].get("repetitions", 1)
         if isinstance(repetitions, bool) or not isinstance(repetitions, int) or repetitions < 1:
             raise AdapterBlocked("agent.run repetitions must be a positive integer")
-        mcp_settings = getattr(settings, "mcp", None)
-        context_quota = int(getattr(mcp_settings, "quota_context_per_minute", 0))
-        if not bool(getattr(mcp_settings, "quota_enabled", False)):
-            context_quota = 0
-        context_call_times: list[float] = []
-        context_quota_lock = asyncio.Lock()
-
-        async def acquire_context_permit() -> None:
-            if context_quota <= 0:
-                return
-            async with context_quota_lock:
-                now = time.monotonic()
-                context_call_times[:] = [
-                    started for started in context_call_times if now - started < 60
-                ]
-                if len(context_call_times) >= context_quota:
-                    await asyncio.sleep(max(0.0, context_call_times[0] + 60.25 - now))
-                    now = time.monotonic()
-                    context_call_times[:] = [
-                        started for started in context_call_times if now - started < 60
-                    ]
-                context_call_times.append(now)
-
         work = [
             (question_index, repetition_index, question)
             for repetition_index in range(repetitions)
@@ -2095,7 +2203,10 @@ async def _agent(
                 settings,
                 principal=principal,
                 question=_question_text(question),
-                context_call_permit=acquire_context_permit,
+                context_call_pacer=context_call_pacer,
+                as_of=_question_instant(question, "as_of"),
+                evaluation_time=_question_instant(question, "evaluation_time")
+                or source_evaluation_time,
             )
             run["question_index"] = question_index
             run["repetition_index"] = repetition_index
@@ -2110,7 +2221,7 @@ async def _agent(
             ]
         else:
             runs_by_index: list[dict[str, Any] | None] = [None] * len(work)
-            semaphore = asyncio.Semaphore(_bounded_concurrency("VERA_EVAL_AGENT_CONCURRENCY", 4))
+            semaphore = asyncio.Semaphore(int(agent_runtime["concurrency"]))
 
             async def run_one(
                 index: int, question_index: int, repetition_index: int, question: Any
@@ -2178,6 +2289,10 @@ async def _agent(
             question=_question_text(question_value),
             retrieval_limit=_question_positive_int(question_value, "retrieval_limit", 10, 50),
             token_budget=_question_positive_int(question_value, "token_budget", 4000, 16000),
+            context_call_pacer=context_call_pacer,
+            as_of=_question_instant(question_value, "as_of"),
+            evaluation_time=_question_instant(question_value, "evaluation_time")
+            or source_evaluation_time,
         )
     }
 
@@ -2372,6 +2487,72 @@ async def _api_readiness() -> dict[str, Any]:
     return cast(dict[str, Any], payload)
 
 
+async def _api_build_metadata() -> tuple[BuildMetadata, str]:
+    async with _http_client(timeout_s=10.0) as client:
+        try:
+            response = await client.get(f"{_required_url('VERA_EVAL_API_URL')}/health/build")
+        except httpx.HTTPError as exc:
+            raise AdapterBlocked("VERA API build provenance is unavailable") from exc
+    try:
+        payload = response.json()
+        metadata = parse_build_metadata(payload)
+    except (json.JSONDecodeError, BuildMetadataError) as exc:
+        raise AdapterBlocked("VERA API build provenance is invalid") from exc
+    service_version = payload.get("service_version")
+    if (
+        response.status_code != 200
+        or payload.get("status") != "ok"
+        or not isinstance(service_version, str)
+    ):
+        raise AdapterBlocked("VERA API build provenance is unavailable")
+    return metadata, service_version
+
+
+def _stack_image_attestation(manifest: dict[str, Any]) -> dict[str, Any]:
+    try:
+        payload = json.loads(_STACK_ATTESTATION_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise AdapterBlocked("release stack image attestation is unavailable") from exc
+    if not isinstance(payload, dict):
+        raise AdapterBlocked("release stack image attestation is invalid")
+    required_services = {
+        "migrate",
+        "api",
+        "worker",
+        "mcp",
+        "database-provision",
+        "prometheus",
+        "recovery-harness",
+        "rollout-state-init",
+        "rollout-controller",
+        "evaluator-state-init",
+        "evaluator",
+    }
+    image_keys = {
+        "app_image_id",
+        "database_provision_image_id",
+        "prometheus_image_id",
+        "recovery_image_id",
+        "evaluator_image_id",
+    }
+    image_id = re.compile(r"sha256:[0-9a-f]{64}")
+    services = payload.get("verified_services")
+    if (
+        payload.get("schema_version") != "1.0"
+        or payload.get("git_sha") != manifest.get("git_sha")
+        or not isinstance(services, list)
+        or not all(isinstance(service, str) for service in services)
+        or set(services) != required_services
+        or any(
+            not isinstance(payload.get(key), str)
+            or image_id.fullmatch(cast(str, payload.get(key))) is None
+            for key in image_keys
+        )
+    ):
+        raise AdapterBlocked("release stack image attestation is invalid")
+    return cast(dict[str, Any], payload)
+
+
 async def _register_mcp_readiness_principal() -> str:
     _, registered = await _api_json(
         "POST",
@@ -2416,9 +2597,24 @@ def _runtime_manifest_errors(
         return ["preflight requires manifest and quality_config"], {}
     settings = container.settings
     errors: list[str] = []
+    profile = request["run_context"].get("profile")
+    expected_runtime = quality.get("agent_context_runtime")
+    try:
+        actual_runtime = _agent_runtime_config(settings, request)
+    except AdapterBlocked as exc:
+        errors.append(str(exc))
+        actual_runtime = {}
+    if profile == "release" and not isinstance(expected_runtime, dict):
+        errors.append("release manifest must freeze agent_context_runtime")
+    elif isinstance(expected_runtime, dict):
+        for key, value in actual_runtime.items():
+            if expected_runtime.get(key) != value:
+                errors.append(f"agent_context_runtime {key!r} does not match the active runtime")
     expected_backend = f"{settings.memory.provider}/{settings.memory.graph_backend}"
     if manifest.get("graph_backend") != expected_backend:
         errors.append("manifest graph_backend does not match the active Graphiti backend")
+    if manifest.get("service_version") != __version__:
+        errors.append("manifest service_version does not match the evaluator runtime")
     if quality.get("fabric_write_mode") != settings.memory.effective_fabric_write_mode:
         errors.append("manifest fabric_write_mode does not match the active runtime")
     embedding_model, embedding_dimension = active_embedding(settings)
@@ -2452,6 +2648,13 @@ def _runtime_manifest_errors(
         errors.append("evaluation runtime must use Graphiti with Neo4j")
     if settings.memory.effective_fabric_write_mode not in {"dual", "fabric"}:
         errors.append("evaluation runtime must write the authoritative Fabric")
+    if profile == "release":
+        try:
+            evaluator_build = load_build_metadata(_EVALUATOR_BUILD_METADATA_PATH)
+        except BuildMetadataError:
+            errors.append("evaluator image build provenance is unavailable")
+        else:
+            errors.extend(_build_metadata_errors(manifest, evaluator_build, "evaluator image"))
     return errors, actual_models
 
 
@@ -2509,7 +2712,20 @@ async def _provider_preflight(container: Container) -> dict[str, str]:
     return resolved
 
 
-def _settings_fingerprint(settings: Settings) -> str:
+def _build_metadata_errors(
+    manifest: dict[str, Any], metadata: BuildMetadata, label: str
+) -> list[str]:
+    errors: list[str] = []
+    if metadata.git_sha != manifest.get("git_sha"):
+        errors.append(f"{label} git_sha does not match the release manifest")
+    if metadata.git_dirty != manifest.get("git_dirty"):
+        errors.append(f"{label} git_dirty does not match the release manifest")
+    if metadata.git_dirty:
+        errors.append(f"{label} was built from a dirty source tree")
+    return errors
+
+
+def _settings_fingerprint(settings: Settings, agent_runtime: dict[str, Any]) -> str:
     model, dimension = active_embedding(settings)
     value = {
         "memory_provider": settings.memory.provider,
@@ -2520,6 +2736,7 @@ def _settings_fingerprint(settings: Settings) -> str:
         "embedder": settings.memory.embedder,
         "embedding_model": model,
         "embedding_dimension": dimension,
+        "agent_context_runtime": agent_runtime,
     }
     encoded = json.dumps(value, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
     return hashlib.sha256(encoded.encode()).hexdigest()
@@ -2615,11 +2832,29 @@ async def _preflight(
             f"valkey_keys={valkey}"
         )
     api = await _api_readiness()
+    api_build: BuildMetadata | None = None
+    api_service_version: str | None = None
+    evaluator_build: BuildMetadata | None = None
+    stack_attestation: dict[str, Any] | None = None
+    if request["run_context"].get("profile") == "release":
+        try:
+            evaluator_build = load_build_metadata(_EVALUATOR_BUILD_METADATA_PATH)
+        except BuildMetadataError as exc:
+            raise AdapterBlocked("evaluator image build provenance is unavailable") from exc
+        api_build, api_service_version = await _api_build_metadata()
+        manifest = cast(dict[str, Any], request["run_context"]["manifest"])
+        build_errors = _build_metadata_errors(manifest, api_build, "API image")
+        if api_service_version != manifest.get("service_version"):
+            build_errors.append("API service_version does not match the release manifest")
+        if build_errors:
+            raise AdapterBlocked("; ".join(build_errors))
+        stack_attestation = _stack_image_attestation(manifest)
+    agent_runtime = _agent_runtime_config(container.settings, request)
     mcp_principal_id = await _register_mcp_readiness_principal()
     state["preflight"] = {
         "run_id": request["run_id"],
         "scope_id": configured_scope,
-        "settings_fingerprint": _settings_fingerprint(container.settings),
+        "settings_fingerprint": _settings_fingerprint(container.settings, agent_runtime),
         "disposable_full_store": True,
         "mcp_principal_id": mcp_principal_id,
     }
@@ -2644,6 +2879,22 @@ async def _preflight(
                 "valkey_pristine": True,
                 "active_models": actual_models,
                 "provider_models": provider_models,
+                "agent_context_runtime": agent_runtime,
+                "build_provenance": (
+                    {
+                        "api": {
+                            **api_build.as_dict(),
+                            "service_version": api_service_version,
+                        },
+                        "evaluator": {
+                            **evaluator_build.as_dict(),
+                            "service_version": __version__,
+                        },
+                    }
+                    if api_build is not None and evaluator_build is not None
+                    else {}
+                ),
+                "stack_image_attestation": stack_attestation or {},
             }
         },
         "message": "dedicated disposable stack and active providers verified",
@@ -2656,6 +2907,7 @@ async def _cleanup(
     scope = request["run_context"].get("evaluation_scope")
     attestation = state.get("preflight")
     configured_scope = os.environ.get("VERA_EVAL_SCOPE_ID")
+    agent_runtime = _agent_runtime_config(container.settings, request)
     safe = (
         isinstance(scope, dict)
         and scope.get("kind") == "ephemeral_stack"
@@ -2666,7 +2918,8 @@ async def _cleanup(
         and attestation.get("run_id") == request["run_id"]
         and attestation.get("scope_id") == configured_scope
         and attestation.get("disposable_full_store") is True
-        and attestation.get("settings_fingerprint") == _settings_fingerprint(container.settings)
+        and attestation.get("settings_fingerprint")
+        == _settings_fingerprint(container.settings, agent_runtime)
     )
     if not safe:
         raise AdapterBlocked("full-store cleanup lacks a matching disposable-stack preflight")

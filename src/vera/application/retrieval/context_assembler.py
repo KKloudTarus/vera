@@ -371,10 +371,14 @@ class ContextAssembler:
                 available = await availability_task
             if facts_task.done():
                 fact_hits = facts_task.result()
-                exact_fact_match = any(hit.exact_match for hit in fact_hits)
+                exact_fact_match = any(
+                    hit.exact_match and hit.lifecycle_state == "active" for hit in fact_hits
+                )
             elif probe_exact_fact_first:
                 fact_hits = await facts_task
-                exact_fact_match = any(hit.exact_match for hit in fact_hits)
+                exact_fact_match = any(
+                    hit.exact_match and hit.lifecycle_state == "active" for hit in fact_hits
+                )
                 if self._content_availability is not None and not exact_fact_match:
                     availability_task = group.create_task(
                         self._content_availability.get(group_id=group_id, snapshot_id=snapshot_id)
@@ -404,7 +408,9 @@ class ContextAssembler:
                 )
             if fact_hits is None:
                 fact_hits = await facts_task
-                exact_fact_match = any(hit.exact_match for hit in fact_hits)
+                exact_fact_match = any(
+                    hit.exact_match and hit.lifecycle_state == "active" for hit in fact_hits
+                )
                 if exact_fact_match:
                     if passages_task is not None:
                         passages_task.cancel()
