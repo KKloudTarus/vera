@@ -402,7 +402,7 @@ def test_opencode_plugin_is_local_bootstrap_only() -> None:
 
 def test_coding_tool_guide_starts_with_one_shared_setup_prompt() -> None:
     guide = (_ROOT / "docs" / "integrations" / "coding-tools.md").read_text()
-    assert guide.index("## Fast path") < guide.index("## Prerequisites")
+    assert guide.index("## Fast Path") < guide.index("## Prerequisites")
     assert guide.count("```text") == 1
     prompt = guide.split("```text", 1)[1].split("```", 1)[0]
 
