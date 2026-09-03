@@ -4,7 +4,7 @@ VERA is one container image that runs three processes, differing only by command
 the MCP server, and the ingestion worker. PostgreSQL and S3 are authoritative; Neo4j is a
 rebuildable projection; Valkey is cache and rate limiter.
 
-## The image
+## The Image
 
 The release workflow publishes the image to GHCR as a public package, so most deployments
 just pull it:
@@ -69,7 +69,7 @@ installed. Per-group serialization is enforced in-process, so worker replicas ar
 The `deploy/k8s/` manifests are the app tier only and assume PostgreSQL, the graph, Valkey,
 and the object store are provided externally (managed services or your own).
 
-## Helm (full stack in one namespace)
+## Helm (full Stack in One namespace)
 
 For a single-cluster install of the whole stack, including the datastores, use the chart in
 `deploy/helm/vera` (see its README for the full walkthrough). It installs the API, MCP, and
@@ -83,17 +83,47 @@ helm install vera deploy/helm/vera -n vera --create-namespace --set graph.backen
 ```
 
 The defaults boot with no external credentials (a deterministic embedder and an unauthenticated
-local MCP principal). For real use, set an embedder key and turn on auth:
+local MCP principal). For real use, set an embedder key, turn on auth, close self-service
+signup, and seed an init admin:
 
 ```bash
 helm upgrade vera deploy/helm/vera -n vera \
-  --set memory.embedder=openai --set memory.openaiApiKey=sk-... \
-  --set environment=prod --set api.authRequired=true --set mcp.jwtSecret=<secret>
+  --set memory.embedder=voyage --set voyage.apiKey=pa-... \
+  --set rerank.crossEncoderEnabled=true --set rerank.crossEncoderProvider=voyage \
+  --set environment=prod --set api.authRequired=true --set mcp.jwtSecret=<secret> \
+  --set api.registrationOpen=false \
+  --set bootstrap.enabled=true --set bootstrap.adminApiKey=vera_<prefix>.<secret>
+```
+
+With `api.registrationOpen=false`, `POST /identity/register` returns `403`. The post-install
+`bootstrap` Job (`python -m vera.entrypoints.bootstrap_admin`) then seeds one init admin from
+`VERA_BOOTSTRAP__*`, idempotently, so a closed deployment still has a first principal; that
+admin provisions everyone else through `POST /identity/users`. For GitOps, keep the admin key
+out of git: leave `secrets.create=false` and put `VERA_BOOTSTRAP__ADMIN_API_KEY` in the
+externally created `vera-secrets` Secret instead of passing it on the command line.
+
+```mermaid
+flowchart TB
+  ING[Ingress nginx + TLS] --> SA[vera-api Service] & SM[vera-mcp Service]
+  SA --> DA[api Deployment]
+  SM --> DM[mcp Deployment]
+  DW[worker Deployment: KEDA-scaled]
+  JM[[migrate Job]] --> JB[[bootstrap Job: seeds init admin]]
+  CC[[calibrate CronJob]]
+  subgraph Data[cluster-internal datastores]
+    PG[(PostgreSQL)]
+    GR[(Neo4j / FalkorDB)]
+    VK[(Valkey)]
+    MO[(MinIO / S3)]
+  end
+  DA & DM & DW --> PG & GR & VK & MO
+  SEC[(vera-secrets)] -. envFrom .-> DA & DM & DW & JB
 ```
 
 Two services are meant to be exposed through an ingress: `vera-api` (:8000) and `vera-mcp`
-(:8080). The MCP public host must match `mcp.jwtSecret`'s audience and the `mcp.allowedHosts`
-list. The datastores stay cluster-internal.
+(:8080). The chart can render the ingress and cert-manager TLS directly (`ingress.enabled`,
+`ingress.apiHost`, `ingress.mcpHost`). The MCP public host must match `mcp.authAudience` and
+the `mcp.allowedHosts` list. The datastores stay cluster-internal.
 
 ## Configuration
 
@@ -104,7 +134,7 @@ Every setting is an environment variable `VERA_<SECTION>__<FIELD>` (see
 |----------|---------|
 | `VERA_DB__DSN` | PostgreSQL DSN (source of truth) |
 | `VERA_MEMORY__PROVIDER` | `graphiti` to enable the graph |
-| `VERA_MEMORY__GRAPH_BACKEND` | graph backend: `neo4j` (default) or `falkordb` (experimental) |
+| `VERA_MEMORY__GRAPH_BACKEND` | graph backend: `neo4j` (default) or `falkordb` (driver shipped in the image since 0.2.0) |
 | `VERA_NEO4J__URI` / `USER` / `PASSWORD` | Neo4j graph backend |
 | `VERA_FALKOR__HOST` / `PORT` / `PASSWORD` | FalkorDB graph backend (when selected) |
 | `VERA_MEMORY__OPENAI_API_KEY`, `VERA_MEMORY__EMBEDDER` | LLM extraction and embeddings |
@@ -113,31 +143,36 @@ Every setting is an environment variable `VERA_<SECTION>__<FIELD>` (see
 | `VERA_OBJECTSTORE__*` | S3-compatible object store |
 | `VERA_RESILIENCE__VALKEY_URL` | shared cache and rate limiter |
 | `VERA_MCP__JWT_SECRET`, `VERA_MCP__AUTH_ISSUER`, `VERA_MCP__AUTH_AUDIENCE` | MCP auth |
+| `VERA_API__AUTH_REQUIRED`, `VERA_API__REGISTRATION_OPEN` | require a principal on the API; open or close self-service signup |
+| `VERA_BOOTSTRAP__ENABLED`, `VERA_BOOTSTRAP__ADMIN_API_KEY`, `VERA_BOOTSTRAP__ADMIN_EMAIL` | seed the init admin on a closed deployment (the key is a secret) |
 | `VERA_CONNECTORS__SPECS` | scheduled connectors (JSON) |
 
 Keep secrets out of the ConfigMap and out of `VERA_CONNECTORS__SPECS`; connectors read their
 tokens from environment variables named by `token_env`.
 
-## Operational commands
+## Operational Commands
 
 Run these as one-off Jobs (same image) or locally against the same config:
 
 ```bash
+python -m vera.entrypoints.bootstrap_admin       # idempotently seed the init admin (VERA_BOOTSTRAP__*)
 python -m vera.entrypoints.create_source ...     # create a knowledge source
 python -m vera.entrypoints.reprocess <group>     # rebuild a group's graph from Postgres, then verify
-python -m vera.entrypoints.backfill_embeddings <group>  # embed canonical names for existing entities
+python -m vera.entrypoints.backfill_embeddings <group>       # embed canonical entity names
+python -m vera.entrypoints.backfill_chunk_embeddings <group> # embed passage/code chunks (dense retrieval)
+python -m vera.entrypoints.backfill_fact_embeddings <group>  # embed facts (dense retrieval)
 python -m vera.entrypoints.calibrate --apply     # calibrate rerank weights from feedback
 python -m vera.entrypoints.retrieval_eval golden.json   # score retrieval quality (CI gate)
 python -m vera.entrypoints.dedup_eval pairs.json # measure the dedup threshold and judge
 ```
 
-## Disaster recovery
+## Disaster Recovery
 
 PostgreSQL and S3 are backed up; Neo4j is rebuilt from them. See
 [../docs/dr-runbook.md](dr-runbook.md) for the full procedure, including the automated
 post-rebuild verification and the embedding-model change process.
 
-## Health and observability
+## Health and Observability
 
 - Liveness `GET /health/live`, readiness `GET /health/ready` (checks db, graph, object
   store). The API exposes `/metrics`; the worker uses `:9100/metrics`; and MCP uses a

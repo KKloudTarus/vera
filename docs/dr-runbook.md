@@ -1,10 +1,10 @@
-# Disaster recovery runbook
+# Disaster Recovery Runbook
 
 PostgreSQL and the S3-compatible object store are authoritative. Neo4j is a projection
 that VERA can rebuild from them. This runbook covers rebuilding the graph after data
 loss or corruption, and the routine backups that make it possible.
 
-## What is authoritative
+## What Is Authoritative
 
 - **PostgreSQL**: tenancy, identity, curated claims, published episodes (with their
   ontology and pipeline versions), canonical entities, and the graph maps. This is the
@@ -21,7 +21,7 @@ loss or corruption, and the routine backups that make it possible.
 - Neo4j: no backup required for recovery (it is rebuilt), but a periodic dump shortens
   RTO for large graphs.
 
-## Rebuild the graph for one group
+## Rebuild the Graph for One Group
 
 Used after a graph wipe, an ontology change, or corruption in a single tenant.
 
@@ -40,7 +40,7 @@ episodes against the rebuilt node and edge maps and fails (non-zero exit, a
 projection. On success it logs `reprocess.verified` with the counts. Still spot-check a
 search for a known fact.
 
-### Changing the embedding model
+### Changing the Embedding Model
 
 A group's vectors must share one embedding dimension. Ingestion records the model and
 dimension a group was first built with and refuses a later write under a different one
@@ -50,7 +50,7 @@ dimension a group was first built with and refuses a later write under a differe
 each affected group: the rebuild drops the old fingerprint and re-embeds every episode
 under the new model.
 
-## Full Neo4j loss
+## Full Neo4j Loss
 
 1. Stand up a fresh Neo4j and point `VERA_NEO4J__URI` at it.
 2. Start one API pod so `ensure_schema` creates indexes and constraints (or run it once).
@@ -59,7 +59,7 @@ under the new model.
    worker's provider rate limits.
 4. Spot-check retrieval on a sample of groups.
 
-## Full PostgreSQL loss
+## Full PostgreSQL Loss
 
 Restore from PITR (base backup + WAL). Because Postgres is authoritative, this restores
 identity, tenancy, and all published knowledge. Then rebuild Neo4j as above. Raw artifact

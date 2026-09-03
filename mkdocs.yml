@@ -63,28 +63,28 @@ plugins:
 
 nav:
   - Home: index.md
-  - Getting started: getting-started.md
-  - Loading knowledge: loading-knowledge.md
+  - Getting Started: getting-started.md
+  - Loading Knowledge: loading-knowledge.md
   - Using the API: usage.md
-  - MCP (AI agents): mcp.md
+  - MCP (AI Agents): mcp.md
   - Integrations:
-      - Coding tools:
+      - Coding Tools:
           - Overview: integrations/coding-tools.md
           - Claude Code: integrations/adapters/claude-code.md
           - Codex: integrations/adapters/codex.md
           - OpenCode: integrations/adapters/opencode.md
-      - Agent integration GUIDE: integrations/GUIDE.md
+      - Agent Integration GUIDE: integrations/GUIDE.md
   - Deployment: deployment.md
-  - Architecture & algorithms: architecture.md
-  - Disaster recovery: dr-runbook.md
+  - Architecture & Algorithms: architecture.md
+  - Disaster Recovery: dr-runbook.md
   - Knowledge Fabric:
-      - Design & plan: design/knowledge-fabric.md
+      - Design & Plan: design/knowledge-fabric.md
       - Runbooks: runbooks.md
-      - Remaining risks: remaining-risks.md
-      - "ADR-0001 Fact/Assertion/Evidence": adr/0001-fact-assertion-evidence-separation.md
+      - Remaining Risks: remaining-risks.md
+      - "ADR-0001 Fact / Assertion / Evidence": adr/0001-fact-assertion-evidence-separation.md
       - "ADR-0002 fact_key and slot_key": adr/0002-fact-key-and-slot-key.md
-      - "ADR-0003 Non-authoritative projections": adr/0003-projections-stay-non-authoritative.md
-      - "ADR-0004 Append-only ledger": adr/0004-append-only-knowledge-event-ledger.md
+      - "ADR-0003 Non-Authoritative Projections": adr/0003-projections-stay-non-authoritative.md
+      - "ADR-0004 Append-Only Ledger": adr/0004-append-only-knowledge-event-ledger.md
       - "ADR-0005 Chunking in VERA": adr/0005-structure-aware-chunking-in-vera.md
-      - "ADR-0006 Incremental migration": adr/0006-incremental-backward-compatible-migration.md
-      - "ADR-0007 Agent integration records": adr/0007-agent-integration-operational-records.md
+      - "ADR-0006 Incremental Migration": adr/0006-incremental-backward-compatible-migration.md
+      - "ADR-0007 Agent Integration Records": adr/0007-agent-integration-operational-records.md

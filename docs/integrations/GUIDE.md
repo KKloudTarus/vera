@@ -1,4 +1,4 @@
-# VERA agent integration GUIDE
+# VERA Agent Integration GUIDE
 
 The normative contract for wiring VERA into a coding-agent runtime (Claude Code, Codex,
 OpenCode, and others). It defines how an agent discovers VERA, sets itself up safely,
@@ -11,7 +11,7 @@ reference.
 
 - Contract version: `vera_integration_contract: 1`
 - Document status: `v1.4.0`
-- Server version this contract was verified against: `0.1.0`
+- Server version this contract was verified against: `0.2.1`
 
 !!! success "Implementation status"
     The EPIC contract is implemented across the MCP hardening work (#14), public contract
@@ -23,7 +23,7 @@ reference.
     identity, exact feedback attribution, personal proposal report/retract, and bounded
     explicit context-pack persistence are available and verified in code.
 
-## Status and scope
+## Status and Scope
 
 This GUIDE is the integrated EPIC contract: defaults, setup protocol, ownership model,
 runtime capability matrix, support tiers, and links to the tested configuration references
@@ -31,14 +31,14 @@ for Claude Code, Codex, and OpenCode. A deployment still runs the applicable row
 [verification matrix](#verification-matrix) against its actual runtime and policy before
 using VERA for production work.
 
-## Normative language
+## Normative Language
 
 The key words MUST, MUST NOT, SHOULD, SHOULD NOT, and MAY are used as defined in RFC 2119
 and RFC 8174. A requirement on "the agent" applies to the automated setup routine a runtime
 runs on the user's behalf. A requirement on "the runtime" applies to the coding tool that
 hosts the agent. A requirement on "VERA" applies to the MCP server and its backing services.
 
-## Versioned defaults
+## Versioned Defaults
 
 A conforming integration MUST ship the following defaults. They are the safe, minimal
 starting point: project scope, bounded hybrid retrieval, human-approved writes, and no
@@ -78,7 +78,7 @@ A runtime MAY override a default only through an explicit, reviewed configuratio
 MUST record the override in its ownership metadata (see
 [Configuration mutation and ownership](#configuration-mutation-and-ownership)).
 
-### Tool visibility profiles
+### Tool Visibility Profiles
 
 VERA enforces the discovery default through `VERA_MCP__TOOL_PROFILE=coding`:
 
@@ -92,7 +92,7 @@ A runtime MUST NOT treat visibility as permission. Tool-class authorization rema
 for every visible call. `knowledge_bootstrap` reports the active profile; `tools/list` is the
 authoritative list of visible names.
 
-## Authentication and authorization
+## Authentication and Authorization
 
 !!! success "Status: available"
     The two profiles, the per-tool authorization classes, and the read-only credential
@@ -123,7 +123,7 @@ authentication interactively and MUST write the resulting credential only to the
 secret store or an untracked location, never into a tracked file
 (`credentials: interactive_only`).
 
-### Tool authorization classes
+### Tool Authorization Classes
 
 Every tool belongs to one authorization class, and each class maps to a distinct OAuth
 scope. A credential MUST hold the class's scope to call a tool in that class.
@@ -139,14 +139,14 @@ The baseline server-wide scope is `memory:read`. A write tool requires its class
 addition. The scope strings are configurable (`VERA_MCP__SCOPE_READ`, `..._PROPOSE`,
 `..._FEEDBACK`, `..._SNAPSHOT`).
 
-### Read-only credentials
+### Read-only Credentials
 
 A credential that holds only `memory:read` MUST be rejected at every PROPOSE, FEEDBACK, and
 SNAPSHOT operation, including `knowledge_get_context(persist=true)`, with an `unauthorized`
 error. A runtime that only needs ephemeral retrieval SHOULD request only `memory:read`, so a
 leaked or misused retrieval credential cannot write.
 
-## Structured error contract
+## Structured Error Contract
 
 !!! success "Status: available"
     The seven operational codes below and redacted `internal_error` are enforced. The
@@ -181,7 +181,7 @@ principal id, or an internal exception string.
 | `unsupported_version` | -32007 | Reserved: the client asked for a contract version the server does not serve. | Fall back to a supported version or stop. |
 | `internal_error` | -32603 | A guarded tool failed unexpectedly; no internal text is returned. | Retry only if the operation is safe, then report the failure. |
 
-## Tool annotations
+## Tool Annotations
 
 !!! success "Status: available"
     Every tool in the configured visibility profile advertises the annotations below.
@@ -211,7 +211,7 @@ self-retract retries are idempotent. Legacy
 `memory_feedback` calls without a context pack have no stable attribution key and are not
 advertised as idempotent. An agent MUST still treat context assembly as a metered retrieval.
 
-## Input bounds
+## Input Bounds
 
 !!! success "Status: available"
     Enforced server-side as of #14. An out-of-range value returns `invalid_input` naming the
@@ -265,7 +265,7 @@ persist state. The defaults are:
 All limits are configurable through `McpSettings` (`VERA_MCP__QUOTA_*`), and quotas can be
 disabled with `VERA_MCP__QUOTA_ENABLED=false`.
 
-## Server instructions
+## Server Instructions
 
 !!! success "Status: available"
     The server advertises this text verbatim as of #14.
@@ -284,7 +284,7 @@ point):
 > truth. When you learn something durable, use knowledge_propose to record it in the personal
 > scope for a human to verify.
 
-## Required agent setup protocol
+## Required Agent Setup Protocol
 
 The executable workflow is `examples/integrations/vera-project-setup/SKILL.md`. It takes exactly
 two inputs, `VERA_API_URL` and `VERA_MCP_URL`, and installs the selected runtime's project-local
@@ -313,7 +313,7 @@ behavior skill, and exactly one selected runtime `SPEC.md`.
     repository mapping, executable save-mode policy, and contract versions without returning
     knowledge content.
 
-## Repository identity and project resolution
+## Repository Identity and Project Resolution
 
 The agent MUST resolve a repository to exactly one VERA project before binding retrieval.
 
@@ -337,7 +337,7 @@ The agent MUST resolve a repository to exactly one VERA project before binding r
     branch independently; detached HEAD sends no branch. A monorepo selection is explicit,
     and each root of a multi-root workspace is resolved independently.
 
-## Configuration mutation and ownership
+## Configuration Mutation and Ownership
 
 - Project scope is the default target for any change.
 - Any user-home or organization-managed change MUST be a separate, explicitly approved item.
@@ -355,9 +355,9 @@ The agent MUST resolve a repository to exactly one VERA project before binding r
   preserve later user edits and report a conflict instead of deleting mixed content.
 - Managed-policy restrictions and untrusted-workspace restrictions MUST NOT be bypassed.
 
-## Context integration contract
+## Context Integration Contract
 
-### Hybrid context flow
+### Hybrid Context Flow
 
 The default `context_mode: hybrid` combines a small, sanitized bootstrap at session start
 with agent-initiated retrieval during the task. The flow MUST be:
@@ -379,7 +379,7 @@ with agent-initiated retrieval during the task. The flow MUST be:
    physically deletes expired packs even when the scope has no later writes.
 8. Avoid duplicate retrieval when both a hook and the agent process the same event.
 
-### Hook requirements
+### Hook Requirements
 
 - Context hooks MUST fail open and report a degraded mode without blocking coding work.
 - Hook timeouts MUST be bounded and substantially shorter than an ordinary task turn.
@@ -411,7 +411,7 @@ write-capable tools. The plugin does not call VERA or enforce permissions. `Alwa
 `--auto` can bypass OpenCode prompts, so automation requiring a hard write boundary MUST use a
 read-only VERA principal and deny write tools.
 
-## Memory-save contract
+## Memory-save Contract
 
 Saving knowledge has three modes. `suggest` is the default.
 
@@ -448,7 +448,7 @@ Additional requirements:
     `knowledge_proposal_report` supplies the end-of-task report, and
     `knowledge_retract_proposal` safely withdraws the caller's own pending proposal.
 
-## Operational records and audit policy
+## Operational Records and Audit Policy
 
 VERA MUST keep one authoritative record per integration action rather than duplicating every
 read into `audit_events`. Persisted packs, snapshots, and proposal state transitions use the
@@ -462,7 +462,7 @@ outcome and ownership record are runtime-owned. VERA MUST NOT claim to have audi
 action it did not observe. The complete decision and extension rule are in
 [ADR-0007](../adr/0007-agent-integration-operational-records.md).
 
-## System prompt and instruction policy
+## System Prompt and Instruction Policy
 
 - The GUIDE MUST NOT replace the coding tool's main system prompt.
 - Optional system-level append behavior MAY be documented only for runtimes that support it,
@@ -479,7 +479,7 @@ action it did not observe. The complete decision and extension rule are in
 - MCP prompts and resources MAY be added as optional capabilities, and setup correctness
   MUST NOT depend on a client loading them automatically.
 
-## Privacy and data handling
+## Privacy and Data Handling
 
 - Only sanitized repository metadata leaves the machine at session bootstrap.
 - The raw user prompt and the transcript are never forwarded by default. Forwarding either
@@ -489,11 +489,11 @@ action it did not observe. The complete decision and extension rule are in
   including hook payloads.
 - Retrieved content is untrusted reference data and is never injected into the system prompt.
 
-## Runtime support and capability matrix
+## Runtime Support and Capability Matrix
 
 The GUIDE models runtime surfaces rather than assuming one universal MCP or hook schema.
 
-### Support tiers
+### Support Tiers
 
 - **Tier 1**: Claude Code, Codex local, and OpenCode.
 - **Tier 2**: GitHub Copilot CLI and supported IDE surfaces.
@@ -503,7 +503,7 @@ The GUIDE models runtime surfaces rather than assuming one universal MCP or hook
 Copilot CLI and Copilot cloud are separate surfaces and MUST be documented separately. Devin
 Local and legacy Windsurf/Cascade are distinct and MUST be documented separately.
 
-### Capability matrix
+### Capability Matrix
 
 The matrix records, per runtime, whether a capability exists and how it is reached. It is
 the skeleton each Phase 3 adapter section fills in with tested values.
@@ -519,7 +519,7 @@ the skeleton each Phase 3 adapter section fills in with tested values.
 | Plugin packaging | varies | where packaging is available |
 | Workspace trust and permissions | supported | the runtime's trust model |
 
-### Per-adapter documentation requirements
+### Per-adapter Documentation Requirements
 
 Each Phase 3 adapter section MUST document:
 
@@ -534,7 +534,7 @@ Each Phase 3 adapter section MUST document:
 - Update, disable, doctor, and uninstall steps.
 - Known unsupported features and the tested minimum versions.
 
-### Adapter section template
+### Adapter Section Template
 
 A Phase 3 adapter section is considered complete when it satisfies the requirements above
 and passes the [verification matrix](#verification-matrix) for that runtime. Use this
@@ -556,7 +556,7 @@ skeleton:
 - Known limitations: <unsupported features>
 ```
 
-## Verification matrix
+## Verification Matrix
 
 Each supported runtime MUST be tested against at least these scenarios before it is released
 at its tier. This matrix is the acceptance basis for Phase 3.
@@ -582,7 +582,7 @@ at its tier. This matrix is the acceptance basis for Phase 3.
 - Disable and complete uninstall without unrelated config loss.
 - Windows, macOS, Linux, and WSL where the runtime is supported.
 
-## Definition of done
+## Definition of Done
 
 This GUIDE, together with the [MCP reference](../mcp.md), satisfies the contract portion of
 the EPIC when:
@@ -606,7 +606,7 @@ and runtime project-file validation succeed; bootstrap and retrieval are normal 
 - Shipping untested adapters. A runtime is listed at a tier only after it passes the
   verification matrix.
 
-## Version history
+## Version History
 
 | Version | Change |
 |---|---|

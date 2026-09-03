@@ -1,4 +1,4 @@
-# ADR-0006: Incremental, backward-compatible migration (no big-bang rewrite)
+# ADR-0006: Incremental, Backward-Compatible Migration (no Big-Bang rewrite)
 
 Status: accepted
 

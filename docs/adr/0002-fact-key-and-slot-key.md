@@ -1,4 +1,4 @@
-# ADR-0002: Derive logical fact identity from content, not random ids
+# ADR-0002: Derive Logical Fact Identity from Content, Not Random Ids
 
 Status: accepted (Phase 1)
 

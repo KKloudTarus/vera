@@ -1,4 +1,4 @@
-# Getting started
+# Getting Started
 
 Run the whole stack locally and confirm it works. About 10 minutes.
 
@@ -30,7 +30,7 @@ docker run --rm -v "$PWD/.data/postgres:/source:ro" -v vera_postgres-data:/targe
 docker compose start postgres
 ```
 
-## 3. Start the infrastructure
+## 3. Start the Infrastructure
 
 ```bash
 make up               # postgres, neo4j, valkey, minio (Docker)
@@ -71,7 +71,7 @@ endpoint, set `VERA_MEMORY__OPENAI_API_KEY=local`; key presence enables LLM feat
 Every setting is namespaced `VERA_<SECTION>__<FIELD>`; see `src/vera/config/settings.py`
 for the full list. Secrets load from the environment as `SecretStr`; never commit `.env`.
 
-## 5. Run the processes
+## 5. Run the Processes
 
 In separate terminals:
 
@@ -86,32 +86,61 @@ The MCP server is optional at this point:
 python -m vera.entrypoints.mcp.main   # http://localhost:8080/mcp
 ```
 
-## 6. Smoke test
+## 6. Smoke Test
 
 ```bash
 curl -s localhost:8000/health/live     # {"status":"ok"}
 curl -s localhost:8000/health/ready    # checks db, graph, object store
 ```
 
-Create an account and get an API key (registration is open):
+### Get a Credential
+
+How you get an API key depends on whether self-service signup is open. It is on by default
+locally (`VERA_API__REGISTRATION_OPEN=true`) and a shared or production deployment closes it,
+so an admin provisions accounts instead. Every request then carries the key (or an OIDC JWT)
+as a bearer token, and VERA resolves the caller's tenant scopes server-side.
+
+```mermaid
+flowchart TB
+  subgraph Open[Local / open deployment]
+    REG[POST /identity/register] --> K1[api_key vera_... shown once]
+  end
+  subgraph Closed[Shared / prod deployment: signup closed]
+    BJ[Helm bootstrap Job seeds the init admin] --> AK[admin key in the vera-secrets Secret]
+    AK --> PU[admin calls POST /identity/users<br/>workspace_id + role] --> K2[member api_key shown once]
+  end
+  OIDC[OIDC login] --> JWT[IdP JWT]
+  K1 & K2 & JWT --> AUTH[Authorization: Bearer]
+  AUTH --> API[API resolves principal and tenant scopes]
+```
+
+On an open deployment, register and use the key:
 
 ```bash
 curl -s -X POST localhost:8000/identity/register \
   -H 'content-type: application/json' \
   -d '{"display_name":"Alice","email":"alice@example.com"}'
-```
+# the response contains an api_key, shown once
 
-The response contains an `api_key` (shown once). Use it as a bearer token:
-
-```bash
 KEY=vera_...   # from the register response
 curl -s localhost:8000/identity/me -H "authorization: Bearer $KEY"
 ```
 
+On a closed deployment, `/identity/register` returns `403`. An admin provisions you in a
+workspace and hands you the key:
+
+```bash
+# run by an admin holding an admin key
+curl -s -X POST https://api.example/identity/users \
+  -H "authorization: Bearer $ADMIN_KEY" -H 'content-type: application/json' \
+  -d '{"workspace_id":"<uuid>","display_name":"Alice","email":"alice@example.com","role":"member"}'
+```
+
+The init admin itself is seeded once by the Helm bootstrap Job; see [deployment](deployment.md).
 You now have a running VERA with an account but no memory yet. Next:
 [load knowledge](loading-knowledge.md).
 
-## Run the tests (optional)
+## Run the Tests (optional)
 
 ```bash
 make check            # ruff, pyright, import-linter, unit tests (the CI gate)

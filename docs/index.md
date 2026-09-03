@@ -1,4 +1,4 @@
-# VERA documentation
+# VERA Documentation
 
 Step-by-step guides for running VERA, loading knowledge into it, and using it from an
 application or an AI agent.
@@ -25,7 +25,7 @@ application or an AI agent.
 8. [Architecture and algorithms](architecture.md) - how VERA is built and the methods it
    uses: scoring, ranking, embeddings, the temporal model, and more.
 
-## The mental model in one minute
+## The Mental Model in One Minute
 
 - Knowledge does not go straight into the graph. A **connector** pulls records from a
   **source** (a repo, a Markdown folder, Confluence), an **extractor** turns them into
@@ -47,6 +47,7 @@ For the architecture, algorithms (ranking, embeddings, scoring), and design rati
 
 - Docker (for the local infrastructure: Postgres, Neo4j, Valkey, MinIO).
 - The conda env `vera` (Python 3.11+) for the CLI commands.
-- An OpenAI API key **if** you want to extract knowledge from free text (Markdown,
-  Confluence, Git commits). Structured sources (CMDB triples) work without one. See
+- An LLM/embedding key **if** you want to extract knowledge from free text (Markdown,
+  Confluence, Git commits): OpenAI, or Voyage for embeddings and reranking. Structured sources
+  (CMDB triples) work without one. See
   [loading-knowledge.md](loading-knowledge.md#do-i-need-an-llm).

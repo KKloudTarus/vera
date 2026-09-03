@@ -1,10 +1,10 @@
-# Integrate VERA with coding tools
+# Integrate VERA with Coding Tools
 
 This is the common setup entry point for Claude Code, Codex, and OpenCode. Each
 tool has a child page with its project files, authentication flow, permissions,
 restart checks, and uninstall steps.
 
-## Fast path
+## Fast Path
 
 Open the target project in your coding tool and paste this one prompt. Replace
 `<ABSOLUTE_VERA_REPO>` with the local VERA checkout path.
@@ -46,7 +46,7 @@ curl --fail --silent http://localhost:8000/health/live
 curl --fail --silent http://localhost:8000/health/ready
 ```
 
-## Common setup flow
+## Common Setup Flow
 
 The setup skill:
 
@@ -63,7 +63,7 @@ An MCP response such as `401` or `403` proves that the endpoint is reachable and
 still needs authentication. A local FastMCP endpoint commonly returns `405` to
 `OPTIONS`; that also proves reachability.
 
-## Choose your coding tool
+## Choose Your Coding Tool
 
 - [Claude Code](adapters/claude-code.md): `.mcp.json`, project hooks, workspace
   trust, static-token and OAuth setup.

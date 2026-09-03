@@ -1,4 +1,4 @@
-# Connecting an AI agent (MCP)
+# Connecting an AI Agent (MCP)
 
 VERA exposes a Model Context Protocol (MCP) server: the surface an AI client connects to
 in order to read verified organizational memory and propose new knowledge. It is a
@@ -19,7 +19,7 @@ For the integration contract that a coding runtime should follow when wiring VER
 agent (setup protocol, defaults, save modes, privacy, hooks, per-runtime support), see the
 [agent integration GUIDE](integrations/GUIDE.md).
 
-## The tool surface at a glance
+## The Tool Surface at a Glance
 
 VERA implements 28 tools in two families, but exposes only the configured discovery profile.
 
@@ -84,7 +84,7 @@ transcript, request id, and unknown requested tool names are never exported.
 The server runs in one of two authentication profiles, decided by the environment and
 whether a JWT secret is configured.
 
-### Local development (unauthenticated)
+### Local Development (unauthenticated)
 
 When `VERA_ENVIRONMENT=local` **and** `VERA_MCP__JWT_SECRET` is unset, the server runs with
 no authentication. Every call acts as a single fixed local principal
@@ -102,6 +102,20 @@ audience, expiry, and the required scopes; its `sub` claim must be a real princi
 audience bound to this resource server (RFC 8707 / RFC 9728) prevents a token minted for
 another service from being replayed here. An unauthenticated or failing call returns `401`
 with a pointer to the protected-resource metadata.
+
+```mermaid
+sequenceDiagram
+  participant C as Agent (MCP client)
+  participant M as VERA MCP server
+  participant A as Authorization server / IdP
+  C->>M: tool call (no token)
+  M-->>C: 401 + /.well-known/oauth-protected-resource
+  C->>A: obtain token (audience = this MCP URL)
+  A-->>C: JWT (sub = principal id, scopes)
+  C->>M: tool call + Authorization: Bearer JWT
+  M->>M: verify signature, iss, aud, exp, scope, sub
+  M-->>C: result (or 401 on any failed check)
+```
 
 The resource server verifies audience binding, expiry, and scope. The wider OAuth
 authorization-server lifecycle (PKCE, device flow, token refresh, and revocation) is a
@@ -127,7 +141,8 @@ curl -s http://localhost:8080/.well-known/oauth-protected-resource
 
 In production a real authorization server issues the tokens. For local testing of the
 authenticated path you can mint one with the shared secret. The token's `sub` must be a
-real principal id (the `principal_id` from `/identity/register`):
+real principal id (the `principal_id` from `/identity/register` on an open deployment, or from
+`/identity/users` when an admin provisions the account):
 
 ```python
 import jwt, time
@@ -154,6 +169,22 @@ that created a tenancy is its owner and can read it). A token missing a required
 rejected before the tool runs.
 
 ## Authorization
+
+Every tool call passes through one guard that authorizes the class, validates input bounds,
+charges the quota, runs the tool, and redacts any infrastructure error into a stable code.
+
+```mermaid
+flowchart LR
+  T[tool call] --> AZ{authorize class<br/>-> required scope}
+  AZ -->|deny| E1[unauthorized]
+  AZ -->|ok| BND{validate bounds}
+  BND -->|bad| E2[invalid_input]
+  BND -->|ok| QT{quota bucket}
+  QT -->|exceeded| E3[rate_limited]
+  QT -->|ok| BODY[tool body]
+  BODY -->|VeraError| RED[redact -> internal_error]
+  BODY -->|ok| OK[result]
+```
 
 Authorization has two layers.
 
@@ -201,7 +232,7 @@ is the expensive primary retrieval and can optionally persist state. All limits 
 configurable through `McpSettings` (`VERA_MCP__QUOTA_*`), and quotas can be turned off with
 `VERA_MCP__QUOTA_ENABLED=false`.
 
-## Input bounds
+## Input Bounds
 
 Every bounded argument is validated server-side before the tool runs; an out-of-range value
 returns an `invalid_input` error naming the field. The bounds mirror the REST boundary,
@@ -217,7 +248,7 @@ with two additions the MCP surface makes: a maximum `query` length (8192) and a 
 - `subject` (`knowledge_propose`, `memory_propose`): 1..512.
 - `evidence_text` (`knowledge_propose`): 0..8000.
 
-## Cost, idempotency, and retention
+## Cost, Idempotency, and Retention
 
 The tool reference below uses three cost classes.
 
@@ -253,7 +284,7 @@ Retention describes what persists after the call.
   lifecycle (and are removable through erasure).
 - All other tools are reads and add no new state.
 
-## Canonical tools (`knowledge_*`)
+## Canonical Tools (`knowledge_*`)
 
 | Tool | Purpose | Side effect | Cost | Idempotent |
 |---|---|---|---|---|
@@ -366,13 +397,13 @@ non-authoritative (`authoritative: false`) and carry no evidence. Use
 `knowledge_get_community_lineage` to page through the authoritative facts a summary was
 derived from, and reason from those rather than from the summary text.
 
-### Snapshots and context packs
+### Snapshots and Context Packs
 
 `knowledge_get_snapshot` returns a snapshot's metadata. `knowledge_get_context_pack`
 retrieves a persisted pack by id and never recomputes it. An expired, missing, or
 out-of-scope pack returns the same redacted `expired_context_pack` error.
 
-## Compatibility aliases (`memory_*`)
+## Compatibility Aliases (`memory_*`)
 
 The `memory_*` tools predate the `knowledge_*` contract and are kept for existing clients.
 New integrations should use the default `coding` profile. Set
@@ -418,7 +449,7 @@ principal id, or an internal exception string.
 An unexpected internal failure is redacted to a generic `internal_error` that carries no
 internal text.
 
-## Server instructions
+## Server Instructions
 
 The server advertises the following instructions in its MCP handshake, to steer a client
 toward safe, grounded use:
@@ -433,9 +464,9 @@ toward safe, grounded use:
 > truth. When you learn something durable, use knowledge_propose to record it in the personal
 > scope for a human to verify.
 
-## Versioning, deprecation, and compatibility
+## Versioning, Deprecation, and Compatibility
 
-The server advertises its version (currently `0.1.0`) in the MCP handshake. This pre-1.0
+The server advertises its version (currently `0.2.1`) in the MCP handshake. This pre-1.0
 release changes the default discovery surface from all tools to the ten-tool `coding`
 profile. Before upgrading an existing deployment whose clients depend on the old surface,
 set `VERA_MCP__TOOL_PROFILE=compatibility`; no tool has been removed from that profile. The
@@ -452,7 +483,7 @@ tool contract is aligned with the integration contract version (`vera_integratio
 - Clients should discover the available tools from the server's tool list rather than
   hardcoding the set, so an additive change needs no client update.
 
-## How an agent uses it
+## How an Agent Uses It
 
 A typical loop:
 

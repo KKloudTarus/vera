@@ -13,7 +13,7 @@ Wire VERA into Codex as a project-scoped streamable-HTTP MCP server. The referen
     reachability, validates the installed files, then confirms the `vera` MCP server after
     Codex restarts.
 
-## At a glance
+## At a Glance
 
 - Surfaces: Codex CLI and IDE sessions that load project configuration. Hooks are experimental;
   use a current release and verify the effective schema with `codex --version` and `/hooks`.
@@ -28,7 +28,7 @@ Wire VERA into Codex as a project-scoped streamable-HTTP MCP server. The referen
 - Hooks: a trusted project `SessionStart` hook supplies sanitized bootstrap metadata. MCP
   write approval uses `default_tools_approval_mode = "writes"`, not a hook.
 
-## MCP config
+## MCP Config
 
 Write `.codex/config.toml` at the repository root:
 
@@ -62,14 +62,14 @@ Request only `memory:read` when the integration does not need writes. VERA is th
 resource server; authorization-server discovery, registration, PKCE, refresh, and revocation
 remain deployment concerns.
 
-## Behavior skill
+## Behavior Skill
 
 - Copy `examples/integrations/vera-skill/SKILL.md` to
   `.agents/skills/vera-memory/SKILL.md`.
 - For onboarding or repair, run the two-endpoint project setup workflow in
   `examples/integrations/vera-project-setup/SKILL.md`.
 
-## Permissions and trust
+## Permissions and Trust
 
 Project configuration and hooks load only after Codex trusts the repository. Keep
 `approval_policy = "on-request"`, route review to the user, and use the server-level `writes`
@@ -126,7 +126,7 @@ Confirm that `vera` is connected and its tools are visible.
   hook, and skill content, then restart and verify VERA is absent. Do not use
   `codex mcp remove vera` for the project entry because the CLI command targets user config.
 
-## Known limitations
+## Known Limitations
 
 - Project configuration and hooks are unavailable until repository trust is granted.
 - Managed policy may allow only managed hooks or reject the VERA MCP identity.

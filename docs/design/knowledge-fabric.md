@@ -1,4 +1,4 @@
-# Knowledge Fabric evolution: gap analysis, model, and plan
+# Knowledge Fabric Evolution: Gap Analysis, Model, and Plan
 
 This document is the Phase 0 deliverable for evolving VERA from a verified agent-memory
 service into a governed, temporal Knowledge Fabric. It records where the current code
@@ -6,7 +6,7 @@ stands against the target architecture, the authoritative model being introduced
 phased plan. It is descriptive of decisions; the rationale for each major choice is an ADR
 under `docs/adr/`.
 
-## 1. Gap analysis (current vs target)
+## 1. Gap Analysis (current vs target)
 
 The current repository already satisfies most structural invariants. The gaps are in the
 knowledge model's granularity, not in the architecture.
@@ -34,13 +34,13 @@ Nothing in the current code has to be discarded. `published_episodes`, `graph_ed
 `graph_node_map`, and `candidate_claims` remain and are bridged to the new model by the
 Phase 8 migration (ADR-0006).
 
-## 2. Authoritative domain model (Phase 1 scope)
+## 2. Authoritative Domain Model (Phase 1 scope)
 
 Phase 1 introduces six persisted concepts and their pure-domain counterparts. All are
 tenant-scoped by `group_id` and protected by the same `tenant_isolation` RLS policy as the
 existing knowledge tables.
 
-### Identity derivation (pure, deterministic)
+### Identity Derivation (pure, deterministic)
 
 ```
 fact_key = sha256(scope | subject_entity_id | predicate | normalized_object | canonical_qualifiers)
@@ -85,7 +85,7 @@ never changes the key. See ADR-0002.
 See ADR-0001 (Fact/Assertion/Evidence separation), ADR-0004 (append-only ledger and
 immutable revisions), ADR-0005 (chunking in VERA).
 
-## 3. Phased plan, dependencies, and risks
+## 3. Phased Plan, Dependencies, and Risks
 
 Phases are sequential where they share schema; independent within a phase.
 
@@ -150,7 +150,7 @@ truth is prevented by keeping `knowledge_propose` proposal-only in personal scop
 (invariant 5); (c) generated summaries masquerading as facts is prevented by `derived=true`,
 `authority=0` marking (invariant 11).
 
-## 4. Backward compatibility
+## 4. Backward Compatibility
 
 Phase 1 is strictly additive: no existing table, column, API, or MCP tool changes. The new
 tables coexist with `published_episodes` and the graph maps. The ingestion pipeline is not

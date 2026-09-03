@@ -1,9 +1,9 @@
-# Knowledge Fabric runbooks
+# Knowledge Fabric Runbooks
 
 Operational procedures for the Phase 8 cutover: migrating existing knowledge, the production
 database roles, benchmarking, and rollback. These cover only implemented features.
 
-## Migrating existing knowledge into the fact model
+## Migrating Existing Knowledge into the Fact Model
 
 The backfill converts `published_episodes` into Facts, Assertions, and Evidence. It is
 additive and idempotent: it never alters or deletes the legacy tables or the graph maps, and
@@ -40,7 +40,7 @@ Because the backfill is additive, rollback is simply not cutting over: keep read
 (`alembic downgrade <rev>`); every fabric migration has a tested `downgrade`. No legacy data
 is touched by the backfill, so there is nothing to restore.
 
-## Production database roles
+## Production Database Roles
 
 Migrations run as the schema owner (or a superuser). The application never needs a superuser
 at runtime (invariant 12). Three non-superuser roles, created by migration `c9e2f3a4b5d6`:
@@ -69,7 +69,7 @@ python -m vera.entrypoints.benchmark_fabric --facts 10000 --queries 500
 It logs `benchmark.context_pack_latency_ms` with p50/p95/p99. Run it against a
 production-shaped database (data volume, hardware, concurrency) before quoting any figure.
 
-## Disaster recovery
+## Disaster Recovery
 
 PostgreSQL and S3 are authoritative; the graph and all indexes are rebuildable projections
 (ADR-0003). Recovery restores Postgres and S3 from backups, then rebuilds the projections

@@ -1,4 +1,4 @@
-# ADR-0001: Separate logical Fact from source Assertion and Evidence
+# ADR-0001: Separate Logical Fact from Source Assertion and Evidence
 
 Status: accepted (Phase 1)
 

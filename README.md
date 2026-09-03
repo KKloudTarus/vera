@@ -15,6 +15,11 @@ guess, no tenancy isolation, and no way to correct or forget a fact later. VERA 
 verification and trust layer on top of a temporal knowledge graph, so a retrieved fact
 carries where it came from, how trusted it is, when it was true, and who may see it.
 
+**Status: v0.2.1.** PostgreSQL and S3 are authoritative and the graph (Neo4j or FalkorDB) is
+a rebuildable projection. Embeddings and reranking run on Voyage, OpenAI, or an offline
+provider, and non-English content (for example Vietnamese) is a first-class case. Production
+hardening is tracked in the [remaining-risk register](docs/remaining-risks.md).
+
 ## Documentation
 
 The documentation site is at **https://kkloudtarus.github.io/vera/**. Source lives in
@@ -31,21 +36,21 @@ The documentation site is at **https://kkloudtarus.github.io/vera/**. Source liv
 ## Contents
 
 - [Architecture](#architecture)
-- [Core concepts](#core-concepts)
-- [Ingestion and curation](#ingestion-and-curation-how-data-becomes-memory)
-- [Scoring methodology](#scoring-methodology-how-data-is-graded)
-- [Retrieval and ranking](#retrieval-and-ranking)
-- [Embeddings and entity resolution](#embeddings-and-entity-resolution)
-- [Multilingual knowledge](#multilingual-knowledge)
-- [Temporal model](#temporal-model-bi-temporal-truth)
-- [Retraction and erasure](#retraction-and-erasure)
-- [Feedback calibration](#feedback-calibration)
-- [Retrieval quality evaluation](#retrieval-quality-evaluation)
-- [Security and tenancy](#security-and-tenancy)
-- [Reliability and observability](#reliability-and-observability)
+- [Core Concepts](#core-concepts)
+- [Ingestion and Curation](#ingestion-and-curation-how-data-becomes-memory)
+- [Scoring Methodology](#scoring-methodology-how-data-is-graded)
+- [Retrieval and Ranking](#retrieval-and-ranking)
+- [Embeddings and Entity Resolution](#embeddings-and-entity-resolution)
+- [Multilingual Knowledge](#multilingual-knowledge)
+- [Temporal Model](#temporal-model-bi-temporal-truth)
+- [Retraction and Erasure](#retraction-and-erasure)
+- [Feedback Calibration](#feedback-calibration)
+- [Retrieval Quality Evaluation](#retrieval-quality-evaluation)
+- [Security and Tenancy](#security-and-tenancy)
+- [Reliability and Observability](#reliability-and-observability)
 - [Interfaces](#interfaces)
 - [Operations](#operations)
-- [Getting started](#getting-started)
+- [Getting Started](#getting-started)
 
 ## Architecture
 
@@ -84,15 +89,15 @@ migrations/        alembic (async)
 tests/             unit + integration + llm (testcontainers)
 ```
 
-## Core concepts
+## Core Concepts
 
 **No vendor lock-in.** Every dependency is open-source and cloud-portable, reached through
 a port. The queue is Postgres-native, the object store speaks the S3-compatible API, the
-cache and rate limiter use Valkey, and the graph is Neo4j (or any backend behind the
-`MemoryEngine` port).
+cache and rate limiter use Valkey, and the graph is Neo4j or FalkorDB (both behind the
+`MemoryEngine` port; pick one by cost, scale, and license, not capability).
 
-**Source of truth.** PostgreSQL and S3 are authoritative. Neo4j is a projection that can
-be rebuilt from them at any time. Writes commit to Postgres first; graph updates flow
+**Source of truth.** PostgreSQL and S3 are authoritative. Neo4j (or FalkorDB) is a projection
+that can be rebuilt from them at any time. Writes commit to Postgres first; graph updates flow
 through an outbox, so the graph is always reconstructable and never the system of record.
 
 **Scopes and tenancy.** Every scope has an opaque `group_id`: `o:` organization, `w:`
@@ -104,7 +109,7 @@ another tenant's memory even through a bug in application code.
 authority, confidence, the ontology and pipeline versions that produced it, and its
 valid-time window. Nothing is anonymous.
 
-## Ingestion and curation: how data becomes memory
+## Ingestion and Curation: How Data Becomes Memory
 
 Data never lands in the graph directly. It flows through a curation pipeline that decides
 whether it is trustworthy enough to publish.
@@ -133,7 +138,7 @@ whether it is trustworthy enough to publish.
    makes retraction and rebuild possible). Per-group serialization (a hash-routed lane pool
    plus a Postgres advisory lock) keeps one group's writes ordered and exactly-once.
 
-## Scoring methodology: how data is graded
+## Scoring Methodology: How Data Is Graded
 
 Every fact is graded along independent axes, set at publish time and carried through
 retrieval.
@@ -162,11 +167,11 @@ and blended into ranking so a shakier extraction ranks lower, all else equal.
 disputed claim cannot be published into a workspace or organization scope, so one agent's
 guess cannot silently become another agent's "fact".
 
-## Retrieval and ranking
+## Retrieval and Ranking
 
 Retrieval is a three-stage pipeline. Stages 1 and 2 always run; stage 3 is optional.
 
-### Stage 1: candidate generation (graph hybrid search)
+### Stage 1: Candidate Generation (graph Hybrid search)
 
 The `MemoryEngine` runs Graphiti's edge hybrid search with reciprocal rank fusion (RRF).
 RRF merges the semantic (vector) and lexical (full-text) rankings without needing their
@@ -175,7 +180,7 @@ scores to be comparable: an item at rank `r` contributes `1 / (k + r)` from each
 full-text filter is order-dependent; per-group search is order-independent and correct. A
 valid-time filter is applied here (see the temporal model).
 
-### Stage 2: weighted blend (VERA's rerank)
+### Stage 2: Weighted Blend (VERA's rerank)
 
 VERA re-ranks the candidates by blending signals that RRF does not know about. For each
 candidate the blended score is a weighted sum of six normalized signals in [0, 1]:
@@ -197,20 +202,23 @@ smoothing so a single downvote does not zero a fact and an unvoted fact sits at 
 0.5. The exact signal vector shown for each hit is returned with the result, so it can be
 logged with any feedback for later calibration.
 
-### Stage 3: cross-encoder (optional)
+### Stage 3: Cross-Encoder (optional)
 
 When enabled, a cross-encoder reads the query and each candidate fact together and scores
 their direct relevance in [0, 1]. It runs only on the top `cross_encoder_top_n` candidates
 (bounded cost) and its score is blended with the stage-2 score:
 `final = (1 - w) * normalized_blend + w * cross_encoder`. This catches head cases the
-bag-of-signals blend cannot. Off by default, since it adds a model call per search.
+bag-of-signals blend cannot. Off by default, since it adds a model call per search. The
+provider is selectable through the `Reranker` port (`VERA_RERANK__CROSS_ENCODER_PROVIDER`):
+`llm` scores with an LLM, or `voyage` uses a purpose-built reranker (`rerank-2.5`) that is
+cheaper and faster.
 
-## Embeddings and entity resolution
+## Embeddings and Entity Resolution
 
 **Embedding provider.** Embeddings come from a pluggable provider chosen by configuration,
 reached through the `Embedder` port so no vendor is baked in: a deterministic offline
 embedder (tests and air-gapped runs), OpenAI (`text-embedding-3-small`), or Voyage AI
-(`voyage-3.5`, `voyage-code-4`, ...). Adding another provider is one adapter. Embeddings are
+(`voyage-3.5`, `voyage-4-lite`, `voyage-code-4`, ...). Adding another provider is one adapter. Embeddings are
 cached in-process (LRU with TTL) and optionally in Valkey (L2), keyed by `model:dim` plus a
 content hash, so a repeated text never pays for a second call. Every provider call is metered
 and priced for cost, inside the cache, so cache hits cost nothing.
@@ -240,7 +248,7 @@ Each resolution is counted by `vera_entity_resolution_total` (created / linked b
 linked by judge), so precision can be watched on real data. Use `dedup_eval` to measure a
 threshold sweep and the judge's agreement on a labeled set before trusting it.
 
-## Multilingual knowledge
+## Multilingual Knowledge
 
 VERA ingests and retrieves content in many languages (for example Vietnamese) alongside
 English, so a mixed-language corpus works without per-language configuration.
@@ -261,7 +269,7 @@ English, so a mixed-language corpus works without per-language configuration.
   embedder: OpenAI `text-embedding-3-small` or Voyage `voyage-3.5`. The default deterministic
   embedder is a non-semantic hash for offline runs.
 
-## Temporal model
+## Temporal Model
 
 Facts carry a valid-time window (`valid_from`, `valid_to`). A search defaults to "as of now",
 so a superseded or retracted fact is hidden from the current view. An explicit `as_of` filters
@@ -281,7 +289,7 @@ so contradiction handling is uniform:
 The graph adapter never decides contradictions on its own for curated writes; it only
 closes the edges the policy names.
 
-## Retraction and erasure
+## Retraction and Erasure
 
 A published source can be withdrawn end to end: its edges leave the graph, its graph maps
 are cleared, and the episode is marked retracted (hidden from search and skipped by a
@@ -290,7 +298,7 @@ raw artifact bytes from the object store. Every retraction writes an audit event
 commits first (the source of truth); the graph and object store are updated after.
 Exposed as `DELETE /memory/sources/{source_id}` with an `erase` flag.
 
-## Feedback calibration
+## Feedback Calibration
 
 The rerank weights are not guesses that stay fixed. Each returned hit's signal vector is
 logged with the thumbs up/down a caller later gives it (the learning-to-rank feature-logging
@@ -304,7 +312,7 @@ a few votes cannot swing ranking), which the API and MCP ranker load at startup 
 the configured defaults. A nightly CronJob runs the calibration, closing the loop from
 feedback to the weights the ranker uses.
 
-## Retrieval quality evaluation
+## Retrieval Quality Evaluation
 
 A golden set (queries plus the substrings a correct answer must contain) is scored with the
 standard metrics: hit@k (was a correct fact in the top k) and MRR (mean reciprocal rank).
@@ -313,7 +321,7 @@ falls below a threshold, so a regression in ranking, dedup, or the model is caug
 rather than in production. Run it with `python -m vera.entrypoints.retrieval_eval
 golden.json`.
 
-## Security and tenancy
+## Security and Tenancy
 
 - **Row-level security.** The six knowledge tables enable and force RLS by `group_id`. The
   application connects as a non-superuser role and sets the tenant per unit of work, so
@@ -327,10 +335,14 @@ golden.json`.
   is one comparison. A workspace admin can issue, rotate, and revoke API keys for principals
   in a workspace it administers; revocation authorizes the caller (self or admin on a shared
   workspace).
+- **Provisioning.** Self-service signup (`POST /identity/register`) is gated by
+  `VERA_API__REGISTRATION_OPEN`. A shared or production deployment closes it and seeds one
+  init admin through the Helm `bootstrap` Job; that admin provisions users with
+  `POST /identity/users` (create principal, add membership, return a one-time key).
 - **Service accounts** are principals of kind `service_account`, so authentication and scope
   resolution are uniform across humans and machines.
 
-## Reliability and observability
+## Reliability and Observability
 
 - **Resilience.** A per-provider chain of circuit breaker, token-bucket rate limiter
   (in-process or Valkey-backed with an atomic Lua script), full-jitter retry, and per-call
@@ -382,6 +394,9 @@ Operational commands, each a module under `vera.entrypoints`:
 python -m vera.entrypoints.create_source ...               # create a knowledge source for a connector to ingest into
 python -m vera.entrypoints.reprocess <group_id>            # rebuild a group's graph from Postgres, then verify
 python -m vera.entrypoints.backfill_embeddings <group_id>  # embed canonical names for pre-existing entities
+python -m vera.entrypoints.backfill_chunk_embeddings <group_id> # embed passage/code chunks for dense retrieval
+python -m vera.entrypoints.backfill_fact_embeddings <group_id>  # embed facts for dense retrieval
+python -m vera.entrypoints.bootstrap_admin                 # idempotently seed the init admin (VERA_BOOTSTRAP__*)
 python -m vera.entrypoints.calibrate [--apply] [groups...] # calibrate rerank weights from feedback
 python -m vera.entrypoints.dedup_eval <pairs.json>         # measure dedup threshold and judge on labeled pairs
 python -m vera.entrypoints.retrieval_eval <golden.json>    # score retrieval quality (CI gate)
@@ -399,7 +414,7 @@ it pulls the published image `ghcr.io/kkloudtarus/vera`, so no local build is ne
 helm install vera deploy/helm/vera -n vera --create-namespace --set graph.backend=falkordb
 ```
 
-## Getting started
+## Getting Started
 
 Requires the conda env `vera` (Python 3.11+) and Docker for local infrastructure.
 
@@ -413,7 +428,7 @@ make run-api          # http://localhost:8000  (docs at /docs)
 make run-worker       # ingestion worker
 ```
 
-### Container images
+### Container Images
 
 One image runs all three processes; they differ only by the command. Pull the published
 image, or build it locally.

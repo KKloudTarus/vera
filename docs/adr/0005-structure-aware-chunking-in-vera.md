@@ -1,4 +1,4 @@
-# ADR-0005: Structure-aware chunking lives in VERA, not Graphiti
+# ADR-0005: Structure-aware Chunking Lives in VERA, Not Graphiti
 
 Status: accepted (Phase 1 schema, Phase 2 algorithm)
 

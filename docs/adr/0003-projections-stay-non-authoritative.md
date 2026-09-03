@@ -1,4 +1,4 @@
-# ADR-0003: Graphiti and every index remain non-authoritative, rebuildable projections
+# ADR-0003: Graphiti and Every Index Remain Non-Authoritative, Rebuildable Projections
 
 Status: accepted (reaffirms an existing invariant)
 
