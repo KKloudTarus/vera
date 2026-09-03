@@ -6,7 +6,7 @@
 #
 # Image and dependency digests are deliberate release inputs. Bump them explicitly.
 
-FROM python:3.11-slim-bookworm@sha256:0bee7276f83efd4a1ee05bbbf4281d95ed28e079220a9457f25a93e3f1e3c31b AS builder
+FROM python:3.14-slim-bookworm@sha256:9ab8d9c8514b44f90cf0029dd42fdd7e9e211e639c8b995304cc04568dee900f AS builder
 
 ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_DEFAULT_TIMEOUT=30 \
@@ -28,7 +28,7 @@ RUN --mount=type=cache,id=vera-pip,target=/root/.cache/pip \
     pip install --constraint constraints.lock ".[memory,objectstore,observability,resilience,security,falkordb]"
 
 
-FROM python:3.11-slim-bookworm@sha256:0bee7276f83efd4a1ee05bbbf4281d95ed28e079220a9457f25a93e3f1e3c31b AS runtime
+FROM python:3.14-slim-bookworm@sha256:9ab8d9c8514b44f90cf0029dd42fdd7e9e211e639c8b995304cc04568dee900f AS runtime
 
 LABEL org.opencontainers.image.title="vera" \
       org.opencontainers.image.description="Verified Episodic Recall for Agents" \
