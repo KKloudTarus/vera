@@ -768,6 +768,67 @@ def _structured(response: JsonDict) -> JsonDict:
     return cast("JsonDict", result["structuredContent"])
 
 
+async def test_external_oauth_http_token_jit_maps_to_a_vera_principal(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    make_container: Callable[[object], Container],
+    graphiti_engine: GraphitiMemoryEngine,
+) -> None:
+    email = f"oauth-{uuid7()}@example.com"
+    token = jwt.encode(
+        {
+            "iss": _HTTP_ISSUER,
+            "aud": _HTTP_AUDIENCE,
+            "sub": f"external-{uuid7()}",
+            "email": email,
+            "email_verified": True,
+            "scope": "memory:read",
+            "exp": int(time.time()) + 300,
+        },
+        _HTTP_SECRET,
+        algorithm="HS256",
+    )
+    container = make_container(graphiti_engine)
+    settings = container.settings.model_copy(
+        update={
+            "mcp": McpSettings(
+                oauth_issuer=_HTTP_ISSUER,
+                oauth_signing_key=_HTTP_SECRET,  # type: ignore[arg-type]
+                oauth_algorithms=["HS256"],
+                auth_audience=_HTTP_AUDIENCE,
+                required_scopes=["memory:read"],
+                quota_enabled=False,
+            )
+        }
+    )
+    container.settings = settings
+    app = build_server(container, settings).streamable_http_app(
+        json_response=True,
+        stateless_http=True,
+        host="127.0.0.1",
+    )
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:8000"
+        ) as client,
+    ):
+        response = await _http_tool(
+            client,
+            token,
+            "knowledge_bootstrap",
+            {},
+            request_id=1,
+        )
+
+    principal = cast("JsonDict", _structured(response)["principal"])
+    principal_id = UUID(str(principal["id"]))
+    async with sessionmaker() as session:
+        stored_id = await session.scalar(
+            text("SELECT id FROM principals WHERE email=:email"), {"email": email}
+        )
+    assert stored_id == principal_id
+
+
 async def test_authenticated_http_transport_isolates_cross_principal_reads(
     sessionmaker: async_sessionmaker[AsyncSession],
     make_container: Callable[[object], Container],

@@ -10,11 +10,14 @@ from __future__ import annotations
 
 import os
 from collections.abc import AsyncIterator, Callable
+from dataclasses import replace
 from uuid import UUID
 
+import jwt
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
+from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from vera.adapters.curation.extractor import StructuredClaimExtractor
@@ -28,6 +31,10 @@ from vera.entrypoints.worker.lane_pool import LanePool
 from vera.entrypoints.worker.main import run_until_empty
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
+
+_MCP_SECRET = "mcp-token-issuance-secret-long-enough"  # noqa: S105
+_MCP_ISSUER = "https://auth.vera.test"
+_MCP_AUDIENCE = "https://mcp.vera.test"
 
 
 @pytest_asyncio.fixture
@@ -125,6 +132,84 @@ async def test_registration_and_me_require_a_valid_credential(
         body = me.json()
         assert body["principal_id"] == registered.json()["principal_id"]
         assert body["group_ids"] == [body["personal_group_id"]]  # only personal scope yet
+
+
+async def test_regular_user_api_key_issues_own_short_lived_mcp_jwt(
+    make_container: Callable[[object], Container],
+    graphiti_engine: GraphitiMemoryEngine,
+) -> None:
+    base = make_container(graphiti_engine)
+    app = create_app()
+    app.state.container = base
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        registered = await client.post("/identity/register", json={"display_name": "Claude User"})
+        api_key = registered.json()["api_key"]
+
+        unavailable = await client.post("/identity/mcp-token", headers=_auth(api_key))
+        assert unavailable.status_code == 503
+
+        mcp = base.settings.mcp.model_copy(
+            update={
+                "jwt_secret": SecretStr(_MCP_SECRET),
+                "auth_issuer": _MCP_ISSUER,
+                "auth_audience": _MCP_AUDIENCE,
+                "token_ttl_seconds": 900,
+            }
+        )
+        app.state.container = replace(
+            base,
+            settings=base.settings.model_copy(update={"mcp": mcp}),
+        )
+        anonymous = await client.post("/identity/mcp-token")
+        assert anonymous.status_code == 401
+
+        read_only = await client.post("/identity/mcp-token", headers=_auth(api_key))
+        assert read_only.status_code == 200
+        assert read_only.json()["scope"] == "memory:read"
+
+        requested_scopes = [
+            "memory:read",
+            "memory:propose",
+            "memory:feedback",
+            "memory:snapshot",
+        ]
+        issued = await client.post(
+            "/identity/mcp-token",
+            headers=_auth(api_key),
+            json={"scopes": requested_scopes},
+        )
+
+        assert issued.status_code == 200
+        assert issued.headers["cache-control"] == "no-store"
+        assert issued.headers["pragma"] == "no-cache"
+        body = issued.json()
+        assert body["token_type"] == "Bearer"  # noqa: S105 - OAuth token type
+        assert body["expires_in"] == 900
+        assert body["scope"] == ("memory:read memory:propose memory:feedback memory:snapshot")
+        claims = jwt.decode(
+            body["access_token"],
+            _MCP_SECRET,
+            algorithms=["HS256"],
+            audience=_MCP_AUDIENCE,
+            issuer=_MCP_ISSUER,
+        )
+        assert claims["sub"] == registered.json()["principal_id"]
+        assert claims["exp"] - claims["iat"] == 900
+
+        unsupported = await client.post(
+            "/identity/mcp-token",
+            headers=_auth(api_key),
+            json={"scopes": ["memory:read", "memory:admin"]},
+        )
+        assert unsupported.status_code == 422
+
+        missing_required = await client.post(
+            "/identity/mcp-token",
+            headers=_auth(api_key),
+            json={"scopes": ["memory:propose"]},
+        )
+        assert missing_required.status_code == 422
 
 
 async def test_closed_registration_rejects_signup(

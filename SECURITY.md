@@ -34,8 +34,13 @@ prompt-injection review of the MCP surface.
   an unauthenticated call returns 401 with `WWW-Authenticate: Bearer`. API keys are
   `<prefix>.<secret>`; only the secret is hashed (SHA-256) and it is verified in constant
   time. OIDC tokens are validated for signature, issuer, audience, and expiry.
-- MCP: OAuth 2.1 Resource Server (RFC 9728). The JWT verifier checks signature, `iss`,
-  `aud`, `exp`, and required scopes; a token minted for another audience is rejected.
+- MCP: OAuth 2.1 Resource Server (RFC 9728). Built-in and external OIDC JWT verifiers check
+  signature, `iss`, `aud`, `exp`, and required scopes; a token minted for another audience is
+  rejected. External `iss|sub` identities are JIT-linked to personal-only VERA principals.
+- MCP token issuance: an API-authenticated principal can mint only a short-lived token whose
+  `sub` is its own principal id. The endpoint accepts no target principal id and returns
+  `Cache-Control: no-store`; the signing secret never leaves the server. Tokens are read-only
+  by default, and requested scopes are limited to the four MCP capability classes.
 - A service account authenticates as a principal of kind `service_account`, so it carries
   no ambient authority beyond its memberships.
 
@@ -113,6 +118,6 @@ reached through a port, so no single-cloud managed service is a dependency.
 
 ## Follow-ups (tracked, not blocking)
 
-- Fetch the OIDC issuer's JWKS instead of a configured signing key.
-- Publish protected-resource metadata and add an HTTP-level 401 flow test for MCP.
+- Exercise authorization-code + PKCE login, refresh, and revocation against each production
+  IdP and supported coding client before retiring the built-in JWT fallback.
 - Admin-managed key rotation for principals other than self.

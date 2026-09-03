@@ -1,8 +1,8 @@
 """VERA MCP server: the safe, minimal surface AI clients connect to.
 
 Stateless (MCP spec 2026-07-28), so it scales behind an ordinary load balancer. When
-a JWT secret is configured it runs as an OAuth 2.1 Resource Server (RFC 9728) and the
-SDK returns 401 with protected-resource metadata for unauthenticated calls. Most tools
+built-in JWT or external OIDC verification is configured it runs as an OAuth 2.1 Resource
+Server (RFC 9728), and the SDK returns 401 with protected-resource metadata. Most tools
 are reads; proposal, feedback, self-retract, snapshot, and explicitly persisted context
 operations can change state. No tool performs raw graph mutation
 and none publishes shared truth. Every tool resolves the caller's scopes server-side
@@ -24,14 +24,20 @@ from uuid import UUID
 
 from mcp.server._otel import OpenTelemetryMiddleware
 from mcp.server.auth.middleware.auth_context import get_access_token
+from mcp.server.auth.provider import TokenVerifier
+from mcp.server.auth.routes import create_protected_resource_routes
 from mcp.server.auth.settings import AuthSettings
 from mcp.server.context import CallNext, HandlerResult, ServerRequestContext
 from mcp.server.mcpserver import MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
-from pydantic import AnyHttpUrl
 
 from vera import __version__
-from vera.adapters.mcp.auth import JwtTokenVerifier
+from vera.adapters.identity.oidc import OidcAuthenticator, OidcTokenVerifier
+from vera.adapters.mcp.auth import (
+    CompositeTokenVerifier,
+    JwtTokenVerifier,
+    OidcMcpTokenVerifier,
+)
 from vera.adapters.persistence.repositories.scope import SqlAlchemyScopeResolver
 from vera.adapters.persistence.unit_of_work import SqlAlchemyUnitOfWork
 from vera.adapters.resilience.quota import build_quota_limiter
@@ -67,8 +73,60 @@ def _parse_instant(value: str | None, *, field: str = "as_of") -> datetime | Non
     return parsed
 
 
+def _uses_external_oauth(settings: Settings) -> bool:
+    return settings.mcp.oauth_signing_key is not None or settings.mcp.oauth_jwks_url is not None
+
+
+def _authorization_server_issuer(settings: Settings) -> str:
+    if _uses_external_oauth(settings):
+        if settings.mcp.oauth_issuer is None:
+            raise ValueError("external OAuth verification requires oauth_issuer")
+        return settings.mcp.oauth_issuer
+    return settings.mcp.auth_issuer
+
+
+def _supported_scopes(settings: Settings) -> list[str]:
+    return list(
+        dict.fromkeys(
+            [
+                settings.mcp.scope_read,
+                settings.mcp.scope_propose,
+                settings.mcp.scope_feedback,
+                settings.mcp.scope_snapshot,
+                *settings.mcp.required_scopes,
+            ]
+        )
+    )
+
+
+def _replace_protected_resource_metadata(app: Any, settings: Settings) -> None:
+    """Advertise every tool scope without making every scope transport-required."""
+    identifiers = AuthSettings.model_validate(
+        {
+            "issuer_url": _authorization_server_issuer(settings),
+            "resource_server_url": settings.mcp.auth_audience,
+        }
+    )
+    if identifiers.resource_server_url is None:  # pragma: no cover - validated above
+        raise ValueError("MCP resource-server URL is required")
+    metadata_routes = create_protected_resource_routes(
+        resource_url=identifiers.resource_server_url,
+        authorization_servers=[identifiers.issuer_url],
+        scopes_supported=_supported_scopes(settings),
+    )
+    metadata_paths = {route.path for route in metadata_routes}
+    app.routes[:] = [
+        *metadata_routes,
+        *(route for route in app.routes if getattr(route, "path", None) not in metadata_paths),
+    ]
+
+
 def _uses_local_principal(settings: Settings) -> bool:
-    return settings.environment == "local" and settings.mcp.jwt_secret is None
+    return (
+        settings.environment == "local"
+        and settings.mcp.jwt_secret is None
+        and not _uses_external_oauth(settings)
+    )
 
 
 def _transport_security(settings: Settings) -> TransportSecuritySettings:
@@ -186,7 +244,15 @@ def build_server(container: Container, settings: Settings) -> MCPServer:
                 )
             log.info(
                 "mcp.startup",
-                auth="jwt" if settings.mcp.jwt_secret is not None else "disabled",
+                auth=(
+                    "oauth+jwt"
+                    if _uses_external_oauth(settings) and settings.mcp.jwt_secret
+                    else "oauth"
+                    if _uses_external_oauth(settings)
+                    else "jwt"
+                    if settings.mcp.jwt_secret
+                    else "disabled"
+                ),
                 principal_id=(
                     str(settings.mcp.local_principal_id)
                     if _uses_local_principal(settings)
@@ -218,21 +284,54 @@ def build_server(container: Container, settings: Settings) -> MCPServer:
             raise RuntimeError("MCP knowledge service is not initialized")
         return knowledge
 
-    token_verifier = None
+    token_verifiers: list[TokenVerifier] = []
     auth = None
     if settings.mcp.jwt_secret is not None:
-        token_verifier = JwtTokenVerifier(
-            secret=settings.mcp.jwt_secret.get_secret_value(),
-            algorithm=settings.mcp.jwt_algorithm,
-            issuer=settings.mcp.auth_issuer,
-            audience=settings.mcp.auth_audience,
-            required_scopes=settings.mcp.required_scopes,
-            principal_exists=functools.partial(_principal_exists, container),
+        token_verifiers.append(
+            JwtTokenVerifier(
+                secret=settings.mcp.jwt_secret.get_secret_value(),
+                algorithm=settings.mcp.jwt_algorithm,
+                issuer=settings.mcp.auth_issuer,
+                audience=settings.mcp.auth_audience,
+                required_scopes=settings.mcp.required_scopes,
+                principal_exists=functools.partial(_principal_exists, container),
+            )
         )
-        auth = AuthSettings(
-            issuer_url=AnyHttpUrl(settings.mcp.auth_issuer),
-            resource_server_url=AnyHttpUrl(settings.mcp.auth_audience),
-            required_scopes=settings.mcp.required_scopes,
+    if _uses_external_oauth(settings):
+        signing_key = (
+            settings.mcp.oauth_signing_key.get_secret_value()
+            if settings.mcp.oauth_signing_key is not None
+            else None
+        )
+        oidc_verifier = OidcTokenVerifier(
+            signing_key=signing_key,
+            jwks_url=settings.mcp.oauth_jwks_url,
+            algorithms=settings.mcp.oauth_algorithms,
+            issuer=_authorization_server_issuer(settings),
+            audience=settings.mcp.auth_audience,
+        )
+        oidc_authenticator = OidcAuthenticator(container.sessionmaker, oidc_verifier)
+        token_verifiers.append(
+            OidcMcpTokenVerifier(
+                verifier=oidc_verifier,
+                authenticate_claims=oidc_authenticator.authenticate_claims,
+                audience=settings.mcp.auth_audience,
+                required_scopes=settings.mcp.required_scopes,
+            )
+        )
+    token_verifier = None
+    if token_verifiers:
+        token_verifier = (
+            token_verifiers[0]
+            if len(token_verifiers) == 1
+            else CompositeTokenVerifier(*token_verifiers)
+        )
+        auth = AuthSettings.model_validate(
+            {
+                "issuer_url": _authorization_server_issuer(settings),
+                "resource_server_url": settings.mcp.auth_audience,
+                "required_scopes": settings.mcp.required_scopes,
+            }
         )
 
     server: MCPServer = MCPServer(
@@ -599,12 +698,15 @@ def create_app() -> Any:
     configure_logging(json=settings.log_json, level=settings.log_level)
     configure_tracing(settings)
     container = build_container(settings)
-    return build_server(container, settings).streamable_http_app(
+    app = build_server(container, settings).streamable_http_app(
         json_response=True,
         stateless_http=True,
         transport_security=_transport_security(settings),
         host=settings.mcp.host,
     )
+    if settings.mcp.jwt_secret is not None or _uses_external_oauth(settings):
+        _replace_protected_resource_metadata(app, settings)
+    return app
 
 
 def main() -> None:

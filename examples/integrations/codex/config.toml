@@ -6,7 +6,7 @@ hooks = true
 
 [mcp_servers.vera]
 url = "https://mcp.vera.example/mcp"
-bearer_token_env_var = "VERA_MCP_TOKEN"
+http_headers = { Authorization = "Bearer <VERA_MCP_JWT>" }
 enabled = true
 required = false
 startup_timeout_sec = 10

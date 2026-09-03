@@ -46,12 +46,20 @@ data:
 {{- end }}
   VERA_MCP__ALLOWED_HOSTS: {{ toJson .Values.mcp.allowedHosts | quote }}
   VERA_MCP__ALLOWED_ORIGINS: {{ toJson .Values.mcp.allowedOrigins | quote }}
+  VERA_MCP__TOKEN_TTL_SECONDS: {{ .Values.mcp.tokenTtlSeconds | quote }}
 {{- if .Values.mcp.authAudience }}
   VERA_MCP__AUTH_AUDIENCE: {{ .Values.mcp.authAudience | quote }}
 {{- end }}
 {{- if .Values.mcp.authIssuer }}
   VERA_MCP__AUTH_ISSUER: {{ .Values.mcp.authIssuer | quote }}
 {{- end }}
+{{- if .Values.mcp.oauthIssuer }}
+  VERA_MCP__OAUTH_ISSUER: {{ .Values.mcp.oauthIssuer | quote }}
+{{- end }}
+{{- if .Values.mcp.oauthJwksUrl }}
+  VERA_MCP__OAUTH_JWKS_URL: {{ .Values.mcp.oauthJwksUrl | quote }}
+{{- end }}
+  VERA_MCP__OAUTH_ALGORITHMS: {{ toJson .Values.mcp.oauthAlgorithms | quote }}
   VERA_OBSERVABILITY__MCP_METRICS_HOST: "0.0.0.0"
   VERA_OBSERVABILITY__MCP_METRICS_PORT: "9101"
   VERA_OBSERVABILITY__WORKER_METRICS_PORT: "9100"

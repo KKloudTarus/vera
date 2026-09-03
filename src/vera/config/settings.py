@@ -13,9 +13,18 @@ from __future__ import annotations
 
 from functools import lru_cache
 from typing import Literal
+from urllib.parse import urlsplit, urlunsplit
 from uuid import UUID
 
-from pydantic import BaseModel, Field, PostgresDsn, SecretStr
+from pydantic import (
+    BaseModel,
+    Field,
+    PostgresDsn,
+    SecretStr,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from vera.shared.ids import deterministic_id
@@ -109,12 +118,55 @@ class McpSettings(BaseModel):
     # Auth-disabled local development uses one stable principal with only its personal
     # scope. Override this id to attach the local client to explicit memberships.
     local_principal_id: UUID = deterministic_id("mcp", "local-principal")
-    # OAuth 2.1 Resource Server. Auth is enabled when a JWT secret is set; without it
-    # the server runs unauthenticated for local development.
+    # OAuth 2.1 Resource Server. Built-in JWT and external OIDC verification can run
+    # together; without either, local development is unauthenticated.
     auth_issuer: str = "https://auth.vera.local"
     auth_audience: str = "https://mcp.vera.local"
     jwt_secret: SecretStr | None = None
     jwt_algorithm: str = "HS256"
+    token_ttl_seconds: int = Field(default=28800, ge=60, le=86400)
+    # Optional external OAuth/OIDC authorization server. Its access tokens are mapped
+    # to VERA principals by the stable (issuer, subject) identity link.
+    oauth_issuer: str | None = None
+    oauth_signing_key: SecretStr | None = None
+    oauth_jwks_url: str | None = None
+    oauth_algorithms: list[str] = Field(default_factory=lambda: ["RS256"])
+
+    @field_validator("auth_issuer", "auth_audience", "oauth_issuer", "oauth_jwks_url")
+    @classmethod
+    def secure_auth_url(cls, value: str | None, info: ValidationInfo) -> str | None:
+        if value is None:
+            return None
+        parsed = urlsplit(value)
+        loopback = parsed.hostname in {"localhost", "127.0.0.1", "::1"}
+        if not parsed.hostname or parsed.username or parsed.password or parsed.fragment:
+            raise ValueError("OAuth URLs must be absolute and contain no credentials or fragment")
+        if parsed.query and info.field_name != "oauth_jwks_url":
+            raise ValueError("OAuth issuer and resource identifiers cannot contain a query")
+        if parsed.scheme != "https" and not (parsed.scheme == "http" and loopback):
+            raise ValueError("authentication URLs must use HTTPS except on loopback")
+        host = parsed.hostname.lower()
+        if ":" in host:
+            host = f"[{host}]"
+        port = parsed.port
+        if port is not None and not (
+            (parsed.scheme == "https" and port == 443) or (parsed.scheme == "http" and port == 80)
+        ):
+            host = f"{host}:{port}"
+        canonical = urlunsplit((parsed.scheme.lower(), host, parsed.path, parsed.query, ""))
+        if value != canonical:
+            raise ValueError(f"{info.field_name} must use its canonical URL form: {canonical}")
+        return value
+
+    @model_validator(mode="after")
+    def complete_external_oauth(self) -> McpSettings:
+        verifier_configured = self.oauth_signing_key is not None or self.oauth_jwks_url is not None
+        if bool(self.oauth_issuer) != verifier_configured:
+            raise ValueError(
+                "oauth_issuer and an OAuth signing key or JWKS URL must be set together"
+            )
+        return self
+
     # Server-wide baseline scope, enforced by the SDK before any tool runs. Reads need
     # only this; writes additionally require their per-class scope below.
     required_scopes: list[str] = Field(default_factory=lambda: ["memory:read"])

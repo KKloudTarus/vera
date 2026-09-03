@@ -7,6 +7,7 @@ disjoint group_ids, so neither can read the other's memory.
 
 from __future__ import annotations
 
+import asyncio
 import time
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
@@ -197,6 +198,7 @@ async def test_oidc_login_provisions_then_resolves_the_same_principal(
             "iss": _OIDC_ISS,
             "aud": _OIDC_AUD,
             "email": f"user-{org_suffix()}@example.com",
+            "email_verified": True,
             "exp": int(time.time()) + 3600,
         },
         _OIDC_SECRET,
@@ -215,6 +217,67 @@ async def test_oidc_login_provisions_then_resolves_the_same_principal(
         algorithm="HS256",
     )
     assert await authenticator.authenticate(forged) is None
+
+
+async def test_unverified_oidc_email_cannot_link_an_existing_principal(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    email = f"existing-{org_suffix()}@example.com"
+    async with _identity(sessionmaker) as svc:
+        existing = await svc.create_principal(display_name="Existing", email=email)
+    verifier = OidcTokenVerifier(
+        signing_key=_OIDC_SECRET,
+        algorithms=["HS256"],
+        issuer=_OIDC_ISS,
+        audience=_OIDC_AUD,
+    )
+    token = jwt.encode(
+        {
+            "sub": f"unverified-{org_suffix()}",
+            "iss": _OIDC_ISS,
+            "aud": _OIDC_AUD,
+            "email": email,
+            "email_verified": False,
+            "exp": int(time.time()) + 3600,
+        },
+        _OIDC_SECRET,
+        algorithm="HS256",
+    )
+
+    resolved = await OidcAuthenticator(sessionmaker, verifier).authenticate(token)
+
+    assert resolved is not None
+    assert resolved.id != existing.id
+
+
+async def test_concurrent_first_oidc_login_resolves_one_principal(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    verifier = OidcTokenVerifier(
+        signing_key=_OIDC_SECRET,
+        algorithms=["HS256"],
+        issuer=_OIDC_ISS,
+        audience=_OIDC_AUD,
+    )
+    authenticator = OidcAuthenticator(sessionmaker, verifier)
+    token = jwt.encode(
+        {
+            "sub": f"concurrent-{org_suffix()}",
+            "iss": _OIDC_ISS,
+            "aud": _OIDC_AUD,
+            "exp": int(time.time()) + 3600,
+        },
+        _OIDC_SECRET,
+        algorithm="HS256",
+    )
+
+    first, second = await asyncio.gather(
+        authenticator.authenticate(token),
+        authenticator.authenticate(token),
+    )
+
+    assert first is not None and second is not None
+    assert first.id == second.id
 
 
 async def test_admin_manages_a_members_api_key(

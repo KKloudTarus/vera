@@ -61,14 +61,21 @@ api:
 
 mcp:
   replicas: 1
-  # Empty jwtSecret + environment=local means the MCP serves an unauthenticated local
-  # principal (pilot only). Set a long random secret for the OAuth 2.1 resource-server mode
+  # Empty jwtSecret and no external OAuth verifier + environment=local means MCP serves an
+  # unauthenticated local principal (pilot only). Set a long random secret for JWT fallback
   # (with secrets.create=false, provide VERA_MCP__JWT_SECRET in the external secret instead).
   jwtSecret: ""
-  # The resource-server audience and issuer. Set authAudience to the public MCP URL so a
-  # bearer token's `aud` binds to this server; empty keeps the app defaults.
+  # The resource-server audience and built-in JWT issuer. Set authAudience to the public MCP
+  # URL so a bearer token's `aud` binds to this server; empty keeps the app defaults.
   authAudience: ""          # e.g. https://mcp-vera.example.net
-  authIssuer: ""            # e.g. https://mcp-vera.example.net or your IdP
+  authIssuer: ""            # e.g. https://api-vera.example.net
+  tokenTtlSeconds: 28800     # API-key exchange lifetime; valid range 60..86400
+  # Optional external OAuth/OIDC authorization server. It must issue audience-bound JWT access
+  # tokens with VERA MCP scopes. oauthIssuer is advertised by RFC 9728 discovery; oauthJwksUrl
+  # lets VERA verify its rotating signing keys while coding clients own login and refresh.
+  oauthIssuer: ""            # e.g. https://login.example.net
+  oauthJwksUrl: ""           # e.g. https://login.example.net/.well-known/jwks.json
+  oauthAlgorithms: ["RS256"]
   allowedHosts:
     - "localhost:*"
     - "127.0.0.1:*"

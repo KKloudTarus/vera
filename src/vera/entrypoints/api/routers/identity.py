@@ -9,12 +9,13 @@ endpoint accepts one.
 
 from __future__ import annotations
 
-from typing import TypeVar
+from typing import Literal, TypeVar
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, Response, status
 from pydantic import BaseModel, Field
 
+from vera.adapters.mcp.auth import issue_mcp_jwt
 from vera.domain.identity.models import Role
 from vera.entrypoints.api.deps import (
     ContainerDep,
@@ -162,6 +163,17 @@ class MeOut(BaseModel):
     group_ids: list[str]
 
 
+class McpTokenOut(BaseModel):
+    access_token: str
+    token_type: Literal["Bearer"] = "Bearer"  # noqa: S105 - OAuth token type, not a secret
+    expires_in: int
+    scope: str
+
+
+class McpTokenRequest(BaseModel):
+    scopes: list[str] | None = Field(default=None, min_length=1, max_length=16)
+
+
 # ---------------------------------------------------------------------- routes ---
 
 
@@ -191,6 +203,60 @@ async def me(principal: PrincipalDep, scopes: ScopesDep) -> MeOut:
         display_name=principal.display_name,
         personal_group_id=principal.personal_group_id,
         group_ids=list(group_ids),
+    )
+
+
+@router.post(
+    "/mcp-token",
+    response_model=McpTokenOut,
+    summary="Issue a short-lived MCP JWT for the authenticated principal",
+)
+async def issue_mcp_token(
+    response: Response,
+    principal: PrincipalDep,
+    container: ContainerDep,
+    req: McpTokenRequest | None = None,
+) -> McpTokenOut:
+    settings = container.settings.mcp
+    if settings.jwt_secret is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="MCP token issuance is not configured",
+        )
+    supported_scopes = {
+        settings.scope_read,
+        settings.scope_propose,
+        settings.scope_feedback,
+        settings.scope_snapshot,
+        *settings.required_scopes,
+    }
+    scopes = list(
+        dict.fromkeys(
+            req.scopes if req and req.scopes else [settings.scope_read, *settings.required_scopes]
+        )
+    )
+    if not set(scopes).issubset(supported_scopes) or not set(settings.required_scopes).issubset(
+        scopes
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="requested MCP scopes are unsupported or omit a required scope",
+        )
+    token = issue_mcp_jwt(
+        principal_id=principal.id,
+        secret=settings.jwt_secret.get_secret_value(),
+        algorithm=settings.jwt_algorithm,
+        issuer=settings.auth_issuer,
+        audience=settings.auth_audience,
+        scopes=scopes,
+        ttl_seconds=settings.token_ttl_seconds,
+    )
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Pragma"] = "no-cache"
+    return McpTokenOut(
+        access_token=token,
+        expires_in=settings.token_ttl_seconds,
+        scope=" ".join(scopes),
     )
 
 

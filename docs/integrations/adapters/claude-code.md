@@ -18,59 +18,68 @@ by the setup skill.
 ## At a Glance
 
 - Surfaces: local CLI and IDE extension. Use a current Claude Code release that supports remote
-  HTTP MCP, `${VAR}` expansion in `.mcp.json`, and `/mcp` OAuth.
-- Scopes: `local` (`~/.claude.json`, this machine only), `project` (`.mcp.json`, shared in
-  the repo), `user` (`~/.claude.json`, all your projects). Managed-policy and cloud scopes
+  HTTP MCP and custom headers in `.mcp.json`.
+- Scopes: `local` (`~/.claude.json`, this machine only), `project` (`.mcp.json` at the repo
+  root), `user` (`~/.claude.json`, all your projects). Managed-policy and cloud scopes
   are out of scope for this adapter.
 - MCP config: `.mcp.json` at the repository root, top-level `mcpServers`.
-- Secrets: `${VAR}` / `${VAR:-default}` expansion in `url` and `headers`; tokens stay in the
-  environment.
-- OAuth: supported through `/mcp` -> Authenticate, or `claude mcp login <name>`.
+- Authentication: browser OAuth with client-managed storage and refresh; a
+  short-lived literal MCP JWT is the fallback when OAuth is unavailable.
 - Hooks: project-scoped `SessionStart` bootstrap metadata and `PreToolUse` write approval in
   `.claude/settings.json`; no prompt, transcript, source, or retrieved content is forwarded.
 
 ## MCP Config
 
-Project scope writes `.mcp.json` at the repo root. A remote server uses `type: "http"`:
+Project scope writes `.mcp.json` at the repo root. OAuth config contains no token:
 
 ```json
 {
   "mcpServers": {
     "vera": {
       "type": "http",
-      "url": "https://mcp.vera.example/mcp",
-      "headers": {
-        "Authorization": "Bearer ${VERA_MCP_TOKEN}"
-      }
+      "url": "https://mcp.vera.example/mcp"
     }
   }
 }
 ```
 
-The equivalent CLI writes the same entry:
+The equivalent CLI writes the same entry. When the authorization server does not
+support dynamic client registration, add its pre-registered client ID and fixed
+callback port:
 
 ```bash
-claude mcp add --transport http vera https://mcp.vera.example/mcp \
-  --header "Authorization: Bearer ${VERA_MCP_TOKEN}" \
-  --scope project
+claude mcp add --transport http vera https://mcp.vera.example/mcp --scope project
+# Optional for a pre-registered public client:
+#   --client-id <CLIENT_ID> --callback-port <PORT>
+claude mcp login vera
 ```
 
 `--scope project` is the only scope that writes `.mcp.json`; `local` and `user` write
 `~/.claude.json`.
 
-## Secrets
+Claude Code opens the authorization URL, stores the resulting tokens outside
+`.mcp.json`, and refreshes them. Complete `/mcp` login and confirm the tools before
+removing a previously working JWT header.
 
-Claude Code expands `${VAR}` and `${VAR:-default}` inside `.mcp.json` (`url`, `headers`,
-`env`, `command`, `args`). Reference the bearer token from the environment so it never enters
-the tracked file:
+## JWT Fallback
+
+An ordinary VERA user can exchange their REST API key for an MCP JWT without
+exposing either credential to the coding agent. First prepare the untracked
+`.mcp.json` with one `<VERA_MCP_JWT>` placeholder, then run:
 
 ```bash
-export VERA_MCP_TOKEN="<a token from your VERA auth flow>"
-claude
+python <VERA_REPO>/examples/integrations/vera-project-setup/install_jwt.py \
+  --api-url https://api.vera.example \
+  --mcp-url https://mcp.vera.example/mcp \
+  --config .mcp.json
 ```
 
-For OAuth-protected deployments, prefer the OAuth flow over a static token: it stores
-credentials in `~/.claude.json`, never in the repo.
+The helper prompts without echo, requests all four coding scopes, probes MCP, and atomically
+replaces the placeholder. Add `--existing-token` to enter an existing JWT or `--rotate` to
+replace the config's single expired JWT. The API key
+is not a valid MCP bearer token and must not be written into `.mcp.json`. The JWT is short-lived,
+so rerun the helper with `--rotate` after expiry. Keep this config untracked and do not run commands
+that print its static headers.
 
 ## Behavior Skill
 
@@ -84,7 +93,8 @@ credentials in `~/.claude.json`, never in the repo.
 A project-scoped `.mcp.json` server is gated by workspace trust: on first use in an
 interactive session Claude Code prompts to approve the project's MCP servers, and the server
 shows `Pending approval` until then. To pre-approve in automation, list the server under
-`enabledMcpjsonServers` in `.claude/settings.json` (or `enableAllProjectMcpServers: true`).
+`enabledMcpjsonServers` in an explicit settings input. Allow only `vera`; do not enable every
+project MCP server.
 `claude mcp reset-project-choices` clears stored approvals.
 
 ## Verify
@@ -94,11 +104,11 @@ from the shell:
 
 ```bash
 claude mcp list          # names, scopes, connection status
-claude mcp get vera      # full config, tool count, connection errors
 ```
 
-After installing the project files, restart Claude Code and return to the setup session.
-Confirm that `vera` is connected and its tools are visible.
+After installing the project files, restart Claude Code, trust the workspace, open `/mcp`, and
+approve only `vera`. Review the project hooks in `/hooks`, return to the same setup session, and
+confirm that `vera` is connected and its tools are visible.
 
 ## Hooks
 
@@ -122,10 +132,10 @@ matchers after restarting Claude Code.
 
 ## Lifecycle
 
-- Update: change the `.mcp.json` entry and only the VERA-owned entries in
-  `.claude/settings.json`, or re-run `claude mcp add` for the same name.
+- Update: OAuth refresh is runtime-managed. For JWT fallback, rerun setup to issue and replace
+  the token; change only VERA-owned entries in `.mcp.json` and `.claude/settings.json`.
 - Disable: toggle the server off in `/mcp`, or add it to `disabledMcpServers`.
-- Doctor: `claude mcp get vera` reports connection errors and tool count.
+- Doctor: use `/mcp`; avoid config-detail commands while a static header exists.
 - Uninstall: `claude mcp remove vera --scope project`, remove only VERA's two hook entries,
   and remove `.claude/hooks/vera-hook.cjs` and the VERA skill only when they have no later
   user edits. Leave other servers, hooks, and skills intact.

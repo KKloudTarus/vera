@@ -21,11 +21,13 @@ comments; if a TOML-aware merge cannot preserve them, stop with a manual patch.
 
 ## MCP and auth
 
-- Remote static token: use `bearer_token_env_var = "VERA_MCP_TOKEN"`; never add
-  a literal Authorization value to `http_headers`.
-- Remote OAuth: replace the bearer reference with `auth = "oauth"`, add only
-  the approved scopes, and run `codex mcp login vera`.
-- Loopback local-dev: replace the URL and omit bearer/OAuth keys.
+- Remote OAuth: configure only `url`, with no `http_headers`, then run
+  `codex mcp login vera --scopes memory:read,memory:propose,memory:feedback,memory:snapshot`.
+  Remove an existing JWT header only after OAuth login and connection succeed.
+- Remote JWT: replace `<VERA_MCP_JWT>` in `http_headers.Authorization` with the
+  JWT only through `install_jwt.py` after the config is excluded from Git. Never
+  ask for or put the REST API key in `.codex/config.toml`.
+- Loopback local-dev: replace the URL and omit `http_headers`.
 - Keep `required = false` for fail-open coding, `approval_policy = "on-request"`,
   `approvals_reviewer = "user"`, and
   `default_tools_approval_mode = "writes"` unless stricter managed policy wins.
@@ -50,11 +52,12 @@ bypass it.
 
 1. Parse `.codex/config.toml` and `.codex/hooks.json`, then run `node --check` on
    the hook helper.
-2. Restart Codex and run `codex mcp get vera --json`.
+2. Restart Codex and run `codex mcp list`; never use `codex mcp get` while a
+   static Authorization header is configured because it may expose the JWT.
 3. Confirm `vera` is connected and its tools are visible.
 
 ## Runtime uninstall
 
-Run `codex mcp logout vera` for OAuth, then remove only owned project config,
-hook, helper, and skill content. Do not use `codex mcp remove vera` for this entry
-because that command targets user config. Restart and verify VERA is absent.
+Remove only owned project config, hook, helper, and skill content. Do not use
+`codex mcp remove vera` for this entry because that command targets user config.
+Restart and verify VERA is absent.
