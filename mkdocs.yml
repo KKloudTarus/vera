@@ -68,10 +68,12 @@ nav:
   - Using the API: usage.md
   - MCP (AI agents): mcp.md
   - Integrations:
+      - Coding tools:
+          - Overview: integrations/coding-tools.md
+          - Claude Code: integrations/adapters/claude-code.md
+          - Codex: integrations/adapters/codex.md
+          - OpenCode: integrations/adapters/opencode.md
       - Agent integration GUIDE: integrations/GUIDE.md
-      - "Adapter: Claude Code": integrations/adapters/claude-code.md
-      - "Adapter: Cursor": integrations/adapters/cursor.md
-      - "Adapter: OpenCode": integrations/adapters/opencode.md
   - Deployment: deployment.md
   - Architecture & algorithms: architecture.md
   - Disaster recovery: dr-runbook.md

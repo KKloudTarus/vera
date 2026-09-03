@@ -9,5 +9,14 @@
         "Authorization": "Bearer {env:VERA_MCP_TOKEN}"
       }
     }
+  },
+  "permission": {
+    "vera_knowledge_get_context": "ask",
+    "vera_knowledge_propose": "ask",
+    "vera_knowledge_retract_proposal": "ask",
+    "vera_knowledge_feedback": "ask",
+    "vera_knowledge_create_snapshot": "ask",
+    "vera_memory_propose": "ask",
+    "vera_memory_feedback": "ask"
   }
 }

@@ -1,0 +1,20 @@
+{
+  "description": "Project-scoped VERA lifecycle integration.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$(git rev-parse --show-toplevel)/.codex/hooks/vera-hook.cjs\" session-start",
+            "commandWindows": "powershell.exe -NoProfile -NonInteractive -Command \"& node (Join-Path (& git rev-parse --show-toplevel) '.codex/hooks/vera-hook.cjs') 'session-start'\"",
+            "timeout": 5,
+            "statusMessage": "Preparing sanitized VERA bootstrap metadata",
+            "additionalContextLimit": 4096
+          }
+        ]
+      }
+    ]
+  }
+}

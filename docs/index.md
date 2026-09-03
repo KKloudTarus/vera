@@ -12,14 +12,17 @@ application or an AI agent.
    and retraction, with `curl` examples.
 4. [Connecting an AI agent (MCP)](mcp.md) - what the MCP server exposes and how a client
    connects to it.
-5. [Agent integration GUIDE](integrations/GUIDE.md) - the versioned, normative contract a
+5. [Integrate VERA with coding tools](integrations/coding-tools.md) - one fast-path prompt and
+   separate setup pages for Claude Code, Codex, and OpenCode.
+6. [Agent integration GUIDE](integrations/GUIDE.md) - the versioned, normative contract a
    coding runtime follows to wire VERA into an agent safely, with tested adapters for
    [Claude Code](integrations/adapters/claude-code.md),
-   [Cursor](integrations/adapters/cursor.md), and
-   [OpenCode](integrations/adapters/opencode.md).
-6. [Deployment](deployment.md) - Docker Compose, Kubernetes, and the Helm chart, plus the
+   [Codex](integrations/adapters/codex.md), and
+   [OpenCode](integrations/adapters/opencode.md), plus a portable project setup skill that
+   requires only the VERA API and MCP endpoint locations.
+7. [Deployment](deployment.md) - Docker Compose, Kubernetes, and the Helm chart, plus the
    operational commands.
-7. [Architecture and algorithms](architecture.md) - how VERA is built and the methods it
+8. [Architecture and algorithms](architecture.md) - how VERA is built and the methods it
    uses: scoring, ranking, embeddings, the temporal model, and more.
 
 ## The mental model in one minute

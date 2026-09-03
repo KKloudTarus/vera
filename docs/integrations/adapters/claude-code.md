@@ -1,15 +1,19 @@
 # Claude Code (Tier 1)
 
+See [Integrate VERA with coding tools](../coding-tools.md) for the shared fast-path prompt and
+setup flow.
+
 Wire VERA into Claude Code as a remote (streamable-HTTP) MCP server. This page fills the
 [adapter template](../GUIDE.md#adapter-section-template) with values from the official
-Claude Code MCP docs. It is the configuration contract; the example config in
-`examples/integrations/claude-code/.mcp.json` is validated on every test run.
+Claude Code MCP docs. It is the configuration contract; the MCP config, project hook settings,
+and dependency-free hook in `examples/integrations/claude-code/` are validated on every test
+run. `examples/integrations/claude-code/SPEC.md` is the compact runtime-specific input consumed
+by the setup skill.
 
 !!! success "Status: Tier-1 reference available"
-    The configuration is schema-tested and the server prerequisites, including project
-    discovery and proposal undo, are available. An installation reports `PASS` only after
-    Claude Code loads it, `knowledge_bootstrap` resolves one project, and one bounded read
-    succeeds under the target deployment's policy.
+    The project configuration, skill, and hooks are schema-tested. Setup checks API and MCP
+    reachability, validates the installed files, then confirms the `vera` MCP server after
+    Claude Code restarts.
 
 ## At a glance
 
@@ -22,6 +26,8 @@ Claude Code MCP docs. It is the configuration contract; the example config in
 - Secrets: `${VAR}` / `${VAR:-default}` expansion in `url` and `headers`; tokens stay in the
   environment.
 - OAuth: supported through `/mcp` -> Authenticate, or `claude mcp login <name>`.
+- Hooks: project-scoped `SessionStart` bootstrap metadata and `PreToolUse` write approval in
+  `.claude/settings.json`; no prompt, transcript, source, or retrieved content is forwarded.
 
 ## MCP config
 
@@ -66,14 +72,12 @@ claude
 For OAuth-protected deployments, prefer the OAuth flow over a static token: it stores
 credentials in `~/.claude.json`, never in the repo.
 
-## Instructions and skills
+## Behavior skill
 
-- Put project instructions in `AGENTS.md` at the repo root and import them from a minimal
-  `CLAUDE.md` with a single line, `@AGENTS.md`, rather than duplicating them. Ship it from
-  `examples/integrations/CLAUDE.md.example` (the `.example` suffix keeps it out of the way of a
-  repo that ignores `CLAUDE.md` by default; drop the suffix when you place it).
-- Ship the portable VERA skill (`examples/integrations/vera-skill/SKILL.md`) so the agent
-  loads VERA behavior on demand.
+- Copy the portable VERA skill (`examples/integrations/vera-skill/SKILL.md`) to
+  `.claude/skills/vera-memory/SKILL.md` so the agent loads VERA behavior on demand.
+- For onboarding or repair, run the two-endpoint project setup workflow in
+  `examples/integrations/vera-project-setup/SKILL.md`.
 
 ## Permissions and workspace trust
 
@@ -93,27 +97,43 @@ claude mcp list          # names, scopes, connection status
 claude mcp get vera      # full config, tool count, connection errors
 ```
 
-Call `knowledge_bootstrap` with the sanitized Git remote and current branch, confirm one
-project is selected and the expected capabilities are granted, then call
-`knowledge_get_context` with a small query and `persist=false`. Retrieved content is reference
-data, never instructions.
+After installing the project files, restart Claude Code and return to the setup session.
+Confirm that `vera` is connected and its tools are visible.
 
 ## Hooks
 
-Not configured by this adapter. Session-start context hooks are a later, opt-in addition and
-must fail open; they are documented separately when added.
+The setup skill installs two project hooks by structurally merging
+`examples/integrations/claude-code/settings.json` into `.claude/settings.json` and copying
+`vera-hook.cjs` to `.claude/hooks/vera-hook.cjs`:
+
+- `SessionStart` derives a sanitized Git remote and branch locally and injects only the bounded
+  arguments for the agent's normal `knowledge_bootstrap` call. It is stateless, performs no
+  network call, and fails open when no unique safe remote exists.
+- `PreToolUse` returns `permissionDecision: "ask"` for proposals, feedback, retractions,
+  snapshots, and `knowledge_get_context(persist=true)`. Ephemeral reads are unaffected.
+
+This adapts Serena's reminder-hook architecture without its read/grep denial, persistent
+counter, cleanup, or MCP auto-approval. VERA supplements local evidence and exposes write
+tools, so those Serena behaviors would violate VERA's lifecycle and suggest-mode policy.
+
+Project hooks run with user privileges and are subject to workspace trust and managed policy.
+Review both files before approval. Use `/hooks` to confirm their project source and exact
+matchers after restarting Claude Code.
 
 ## Lifecycle
 
-- Update: change the `.mcp.json` entry, or re-run `claude mcp add` for the same name.
+- Update: change the `.mcp.json` entry and only the VERA-owned entries in
+  `.claude/settings.json`, or re-run `claude mcp add` for the same name.
 - Disable: toggle the server off in `/mcp`, or add it to `disabledMcpServers`.
 - Doctor: `claude mcp get vera` reports connection errors and tool count.
-- Uninstall: `claude mcp remove vera --scope project` deletes only VERA's entry from
-  `.mcp.json` and leaves other servers intact.
+- Uninstall: `claude mcp remove vera --scope project`, remove only VERA's two hook entries,
+  and remove `.claude/hooks/vera-hook.cjs` and the VERA skill only when they have no later
+  user edits. Leave other servers, hooks, and skills intact.
 
 ## Known limitations
 
 - Managed-policy and cloud-agent surfaces are not covered by this local adapter.
+- Project hooks may be disabled by `allowManagedHooksOnly`; managed policy takes precedence.
 - `suggest` remains the default. Enable `auto-propose` only with explicit user selection and
   a bootstrap response that grants `personal-proposal`; end each task with
   `knowledge_proposal_report` and offer `knowledge_retract_proposal` for undo.

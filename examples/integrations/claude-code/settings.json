@@ -1,0 +1,37 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear|compact|fork",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PROJECT_DIR}/.claude/hooks/vera-hook.cjs",
+              "session-start"
+            ],
+            "timeout": 5,
+            "statusMessage": "Preparing sanitized VERA bootstrap metadata"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "^mcp__vera__(knowledge_get_context|knowledge_propose|knowledge_retract_proposal|knowledge_feedback|knowledge_create_snapshot|memory_propose|memory_feedback)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PROJECT_DIR}/.claude/hooks/vera-hook.cjs",
+              "require-write-approval"
+            ],
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}
