@@ -26,7 +26,9 @@ required:
 ```
 
 If either value is absent, ask for both in one question. Runtime and repository
-root are detected; they are not setup parameters.
+root are detected; they are not setup parameters. Detect the runtime from the
+current agent host, not from other installed executables: a Claude Code session
+selects Claude Code even when Codex or OpenCode is also installed.
 
 Remote setup prefers interactive OAuth and needs no credential input when OAuth
 discovery and login succeed. Fallback needs one of these secrets:

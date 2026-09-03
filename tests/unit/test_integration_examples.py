@@ -202,6 +202,7 @@ def test_setup_skill_has_two_inputs_and_endpoint_smoke_checks() -> None:
     assert "Report that VERA setup completed" in apply_spec
     assert "hidden terminal prompt" in skill
     assert "never repeat or print it" in skill
+    assert "a Claude Code session\nselects Claude Code" in skill
     assert len(skill.splitlines()) < 120
     assert all(
         detail not in skill
