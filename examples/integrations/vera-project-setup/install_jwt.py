@@ -50,6 +50,14 @@ def _read_secret(prompt: str) -> str:
         raise RuntimeError("a real terminal with hidden input is required") from exc
 
 
+def _credential(*, existing_token: bool) -> str:
+    env_name = "VERA_MCP_TOKEN" if existing_token else "VERA_API_KEY"
+    value = os.environ.pop(env_name, None)
+    if value is not None:
+        return value
+    return _read_secret("Existing MCP JWT: " if existing_token else "VERA API key: ")
+
+
 def _safe_url(value: str, *, mcp: bool = False) -> str:
     url = value.rstrip("/")
     parsed = urlsplit(url)
@@ -81,7 +89,7 @@ def _request_json(
         raise RuntimeError(failure) from exc
 
 
-def _exchange(api_url: str, api_key: str) -> tuple[str, int]:
+def _exchange(api_url: str, api_key: str) -> tuple[str, int | None]:
     request = urllib.request.Request(  # noqa: S310
         f"{api_url}/identity/mcp-token",
         data=json.dumps({"scopes": _SCOPES}).encode(),
@@ -94,7 +102,12 @@ def _exchange(api_url: str, api_key: str) -> tuple[str, int]:
     payload, headers = _request_json(request, failure="MCP token issuance failed")
     token = payload.get("access_token")
     expires_in = payload.get("expires_in")
-    if not isinstance(token, str) or not token or not isinstance(expires_in, int):
+    if (
+        not isinstance(token, str)
+        or not token
+        or "expires_in" not in payload
+        or (expires_in is not None and not isinstance(expires_in, int))
+    ):
         raise RuntimeError("MCP token response is incomplete")
     if "no-store" not in headers.get("Cache-Control", ""):
         raise RuntimeError("MCP token response is missing Cache-Control: no-store")
@@ -331,11 +344,11 @@ def main() -> None:
     try:
         api_url = _safe_url(args.api_url)
         mcp_url = _safe_url(args.mcp_url, mcp=True)
-        secret = _read_secret("Existing MCP JWT: " if args.existing_token else "VERA API key: ")
+        secret = _credential(existing_token=args.existing_token)
         if not secret:
             raise RuntimeError("credential is required")
         if args.existing_token:
-            token, expires_in = secret, 0
+            token, expires_in = secret, None
         else:
             token, expires_in = _exchange(api_url, secret)
         _probe(mcp_url, token)
@@ -343,7 +356,7 @@ def main() -> None:
     except (OSError, ValueError, RuntimeError) as exc:
         parser.exit(1, f"VERA JWT install failed: {exc}\n")
 
-    lifetime = f"; expires in {expires_in} seconds" if expires_in else ""
+    lifetime = f"; expires in {expires_in} seconds" if expires_in else "; non-expiring"
     print(f"VERA JWT fallback installed and MCP authentication verified{lifetime}.")
 
 

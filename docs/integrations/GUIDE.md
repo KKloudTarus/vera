@@ -113,8 +113,9 @@ shared or remote network.
 **remote-authenticated.** Built-in JWT verification, external OAuth/OIDC verification, or both
 are configured. The server is an OAuth 2.1 Resource Server (RFC 9728). Every call MUST carry a
 valid bearer JWT: verified signature, issuer, audience (audience binding per RFC 8707 and RFC
-9728), a future expiry, and the required scopes. Built-in JWT subjects MUST be real principal
-ids; external `iss|sub` identities are JIT-mapped to stable, personal-only principals. Any
+9728), and the required scopes. External OIDC tokens MUST also have a future expiry. Built-in JWT
+subjects MUST be real principal ids; external `iss|sub` identities are JIT-mapped to stable,
+personal-only principals. Any
 non-local environment MUST use this profile.
 
 When an external authorization server is advertised, a runtime MUST prefer interactive OAuth
@@ -125,8 +126,10 @@ the agent MUST write a resulting fallback JWT only to an untracked location, nev
 file (`credentials: interactive_only`).
 
 When OAuth is unavailable, an ordinary principal MAY authenticate to the REST API with a VERA
-API key and call `POST /identity/mcp-token`. The endpoint issues a short-lived MCP JWT for that
-same principal and cannot mint for another principal. A VERA API key MUST NOT be sent to the MCP
+API key and call `POST /identity/mcp-token`. The endpoint issues a non-expiring MCP JWT for that
+same principal and cannot mint for another principal. This fallback JWT intentionally has no
+expiry until the OAuth EPIC is complete, so its untracked config MUST be protected like a
+credential. A VERA API key MUST NOT be sent to the MCP
 server. The coding-tool setup adapters store the fallback JWT as a literal header only in an
 untracked project config and MUST redact it from reports.
 

@@ -29,13 +29,12 @@ If either value is absent, ask for both in one question. Runtime and repository
 root are detected; they are not setup parameters.
 
 Remote setup prefers interactive OAuth and needs no credential input when OAuth
-discovery and login succeed. Fallback needs one of these secrets, but the user
-enters it only into `install_jwt.py`'s hidden terminal prompt, never the chat:
+discovery and login succeed. Fallback needs one of these secrets:
 
 ```yaml
 remote_fallback_auth_one_of:
-  VERA_API_KEY: REST API key entered at the helper's hidden prompt
-  VERA_MCP_TOKEN: Existing MCP JWT entered with --existing-token
+  VERA_API_KEY: REST API key supplied to the helper process or entered at its hidden terminal prompt
+  VERA_MCP_TOKEN: Existing MCP JWT supplied to the helper process with --existing-token
 ```
 
 A loopback local-dev endpoint needs neither secret. For remote setup, first
@@ -46,10 +45,11 @@ returned `access_token`. This route issues a token for the authenticated caller
 and does not require workspace-admin privileges. A supplied `VERA_MCP_TOKEN`
 must already be a valid MCP JWT; an API key is not accepted by the MCP server.
 
-Never ask the user to paste either credential into the conversation or run a
-command containing it. Prepare the untracked placeholder config, then ask the user
-to run `install_jwt.py`; it prompts without echo, exchanges and probes the token,
-and replaces the placeholder without printing either secret. Report the config as
+If a credential was already supplied in the setup request, never repeat or print it.
+Pass it only to the `install_jwt.py` process as `VERA_API_KEY` or `VERA_MCP_TOKEN`,
+then run the helper yourself. Otherwise prepare the untracked placeholder config
+and ask the user to run the helper; it prompts without echo. The helper exchanges,
+probes, and installs the token without printing either secret. Report the config as
 credential-bearing and never stage or commit it.
 
 ## Load
@@ -90,4 +90,4 @@ unavailable, state the concrete problem and stop without changing project files.
 - Project scope is the default. User-home files and dependencies require separate
   explicit approval.
 - Preserve unrelated configuration. A remote runtime config contains a
-  short-lived credential after setup and must remain untracked.
+  non-expiring credential after JWT fallback setup and must remain untracked.

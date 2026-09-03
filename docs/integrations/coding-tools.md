@@ -37,7 +37,7 @@ Enter either a VERA API key or an existing MCP JWT only at that helper's hidden
 terminal prompt, never in the setup conversation.
 
 The API-key fallback works for an ordinary authenticated user; it does not require a
-workspace admin. The helper calls `POST /identity/mcp-token`, receives a short-lived
+workspace admin. The helper calls `POST /identity/mcp-token`, receives a non-expiring
 JWT for that same principal and the four coding scopes, verifies it against MCP, then
 writes it directly into the selected coding tool's config. The REST API key is never
 written there or shown to the coding agent.

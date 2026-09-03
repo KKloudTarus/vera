@@ -124,7 +124,6 @@ class McpSettings(BaseModel):
     auth_audience: str = "https://mcp.vera.local"
     jwt_secret: SecretStr | None = None
     jwt_algorithm: str = "HS256"
-    token_ttl_seconds: int = Field(default=28800, ge=60, le=86400)
     # Optional external OAuth/OIDC authorization server. Its access tokens are mapped
     # to VERA principals by the stable (issuer, subject) identity link.
     oauth_issuer: str | None = None

@@ -24,7 +24,7 @@ by the setup skill.
   are out of scope for this adapter.
 - MCP config: `.mcp.json` at the repository root, top-level `mcpServers`.
 - Authentication: browser OAuth with client-managed storage and refresh; a
-  short-lived literal MCP JWT is the fallback when OAuth is unavailable.
+  non-expiring literal MCP JWT is the temporary fallback when OAuth is unavailable.
 - Hooks: project-scoped `SessionStart` bootstrap metadata and `PreToolUse` write approval in
   `.claude/settings.json`; no prompt, transcript, source, or retrieved content is forwarded.
 
@@ -77,7 +77,7 @@ python <VERA_REPO>/examples/integrations/vera-project-setup/install_jwt.py \
 The helper prompts without echo, requests all four coding scopes, probes MCP, and atomically
 replaces the placeholder. Add `--existing-token` to enter an existing JWT or `--rotate` to
 replace the config's single expired JWT. The API key
-is not a valid MCP bearer token and must not be written into `.mcp.json`. The JWT is short-lived,
+is not a valid MCP bearer token and must not be written into `.mcp.json`. The JWT is non-expiring,
 so rerun the helper with `--rotate` after expiry. Keep this config untracked and do not run commands
 that print its static headers.
 

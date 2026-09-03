@@ -39,10 +39,9 @@ def issue_mcp_jwt(
     issuer: str,
     audience: str,
     scopes: list[str],
-    ttl_seconds: int,
     now: int | None = None,
 ) -> str:
-    """Issue a short-lived MCP bearer token for an authenticated principal."""
+    """Issue an intentionally non-expiring MCP bearer token for a principal."""
     issued_at = int(time.time()) if now is None else now
     return jwt.encode(
         {
@@ -51,7 +50,6 @@ def issue_mcp_jwt(
             "aud": audience,
             "scope": " ".join(dict.fromkeys(scopes)),
             "iat": issued_at,
-            "exp": issued_at + ttl_seconds,
         },
         secret,
         algorithm=algorithm,
@@ -84,7 +82,7 @@ class JwtTokenVerifier(TokenVerifier):
                 algorithms=[self._algorithm],
                 audience=self._audience,
                 issuer=self._issuer,
-                options={"require": ["exp", "iss", "aud", "sub"]},
+                options={"require": ["iss", "aud", "sub"]},
             )
         except jwt.PyJWTError:
             return None

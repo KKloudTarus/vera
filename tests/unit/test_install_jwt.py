@@ -150,6 +150,15 @@ def test_hidden_prompt_fails_closed_without_a_terminal(monkeypatch: pytest.Monke
         functions["_read_secret"]("Secret: ")
 
 
+def test_credential_uses_and_removes_process_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("VERA_API_KEY", "local-test-api-key")
+
+    assert _functions()["_credential"](existing_token=False) == "local-test-api-key"
+    assert "VERA_API_KEY" not in os.environ
+
+
 def test_windows_permissions_apply_a_restricted_dacl(monkeypatch: pytest.MonkeyPatch) -> None:
     restrict = _functions()["_restrict_permissions"]
     module_globals = restrict.__globals__

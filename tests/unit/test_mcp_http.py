@@ -250,12 +250,6 @@ async def test_expired_token_is_rejected() -> None:
     assert resp.status_code == 401
 
 
-async def test_token_without_expiry_is_rejected() -> None:
-    sub = "00000000-0000-0000-0000-000000000001"
-    resp = await _post_with_token({"iss": _ISS, "aud": _AUD, "sub": sub, "scope": "memory.read"})
-    assert resp.status_code == 401
-
-
 async def test_wrong_audience_token_is_rejected() -> None:
     sub = "00000000-0000-0000-0000-000000000001"
     resp = await _post_with_token(

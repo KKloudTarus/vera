@@ -22,12 +22,14 @@ Run only these endpoint and authentication checks before changing project files.
    storage and refresh; never copy its access token into project config.
 6. If OAuth discovery or interactive login fails, retain any existing JWT config
    and prepare the selected runtime's untracked config with exactly one
-   `<VERA_MCP_JWT>` placeholder. Ask the user to run `install_jwt.py` with the API
-   URL, MCP URL, and config path. The helper requests the four coding scopes,
-   validates `access_token`, `expires_in`, and `Cache-Control: no-store`, performs
+    `<VERA_MCP_JWT>` placeholder. If the setup request supplied an API key, pass it
+    only as `VERA_API_KEY` to `install_jwt.py` and run the helper. Otherwise ask the
+    user to run it and enter the key at its hidden prompt. The helper requests the four coding scopes,
+    validates `access_token`, the explicit nullable `expires_in`, and
+    `Cache-Control: no-store`, performs
    authenticated JSON-RPC `initialize`, and atomically replaces the placeholder.
    Use `--existing-token` when the user already has an MCP JWT.
 
-Never ask for, read, or print the REST API key or MCP JWT. Never use the API key as
-the MCP bearer token. Do not run a config-inspection command that prints static
-headers.
+Never repeat or print the REST API key or MCP JWT.
+Never use the API key as the MCP bearer token. Do not run a config-inspection command
+that prints static headers.

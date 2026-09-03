@@ -58,7 +58,7 @@ def _token(**overrides: object) -> str:
     return jwt.encode(claims, _SECRET, algorithm="HS256")
 
 
-def test_issue_mcp_jwt_binds_principal_resource_scopes_and_expiry() -> None:
+def test_issue_mcp_jwt_binds_principal_resource_scopes_without_expiry() -> None:
     token = issue_mcp_jwt(
         principal_id=_PRINCIPAL_ID,
         secret=_SECRET,
@@ -66,7 +66,6 @@ def test_issue_mcp_jwt_binds_principal_resource_scopes_and_expiry() -> None:
         issuer=_ISS,
         audience=_AUD,
         scopes=["memory:read", "memory:propose", "memory:read"],
-        ttl_seconds=900,
         now=1_800_000_000,
     )
 
@@ -84,7 +83,6 @@ def test_issue_mcp_jwt_binds_principal_resource_scopes_and_expiry() -> None:
         "aud": _AUD,
         "scope": "memory:read memory:propose",
         "iat": 1_800_000_000,
-        "exp": 1_800_000_900,
     }
 
 
@@ -97,7 +95,7 @@ async def test_valid_token_yields_access_token() -> None:
 
 
 @pytest.mark.asyncio
-async def test_token_without_expiry_is_rejected() -> None:
+async def test_non_expiring_token_is_accepted() -> None:
     token = jwt.encode(
         {
             "sub": str(_PRINCIPAL_ID),
@@ -108,7 +106,7 @@ async def test_token_without_expiry_is_rejected() -> None:
         _SECRET,
         algorithm="HS256",
     )
-    assert await _verifier().verify_token(token) is None
+    assert await _verifier().verify_token(token) is not None
 
 
 @pytest.mark.asyncio

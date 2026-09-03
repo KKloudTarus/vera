@@ -134,7 +134,7 @@ async def test_registration_and_me_require_a_valid_credential(
         assert body["group_ids"] == [body["personal_group_id"]]  # only personal scope yet
 
 
-async def test_regular_user_api_key_issues_own_short_lived_mcp_jwt(
+async def test_regular_user_api_key_issues_own_non_expiring_mcp_jwt(
     make_container: Callable[[object], Container],
     graphiti_engine: GraphitiMemoryEngine,
 ) -> None:
@@ -154,7 +154,6 @@ async def test_regular_user_api_key_issues_own_short_lived_mcp_jwt(
                 "jwt_secret": SecretStr(_MCP_SECRET),
                 "auth_issuer": _MCP_ISSUER,
                 "auth_audience": _MCP_AUDIENCE,
-                "token_ttl_seconds": 900,
             }
         )
         app.state.container = replace(
@@ -185,7 +184,7 @@ async def test_regular_user_api_key_issues_own_short_lived_mcp_jwt(
         assert issued.headers["pragma"] == "no-cache"
         body = issued.json()
         assert body["token_type"] == "Bearer"  # noqa: S105 - OAuth token type
-        assert body["expires_in"] == 900
+        assert body["expires_in"] is None
         assert body["scope"] == ("memory:read memory:propose memory:feedback memory:snapshot")
         claims = jwt.decode(
             body["access_token"],
@@ -195,7 +194,7 @@ async def test_regular_user_api_key_issues_own_short_lived_mcp_jwt(
             issuer=_MCP_ISSUER,
         )
         assert claims["sub"] == registered.json()["principal_id"]
-        assert claims["exp"] - claims["iat"] == 900
+        assert "exp" not in claims
 
         unsupported = await client.post(
             "/identity/mcp-token",

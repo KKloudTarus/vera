@@ -69,7 +69,6 @@ mcp:
   # URL so a bearer token's `aud` binds to this server; empty keeps the app defaults.
   authAudience: ""          # e.g. https://mcp-vera.example.net
   authIssuer: ""            # e.g. https://api-vera.example.net
-  tokenTtlSeconds: 28800     # API-key exchange lifetime; valid range 60..86400
   # Optional external OAuth/OIDC authorization server. It must issue audience-bound JWT access
   # tokens with VERA MCP scopes. oauthIssuer is advertised by RFC 9728 discovery; oauthJwksUrl
   # lets VERA verify its rotating signing keys while coding clients own login and refresh.

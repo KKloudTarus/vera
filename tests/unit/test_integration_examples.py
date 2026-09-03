@@ -201,7 +201,7 @@ def test_setup_skill_has_two_inputs_and_endpoint_smoke_checks() -> None:
     assert "tools are visible" in skill
     assert "Report that VERA setup completed" in apply_spec
     assert "hidden terminal prompt" in skill
-    assert "Never ask the user to paste" in skill
+    assert "never repeat or print it" in skill
     assert len(skill.splitlines()) < 120
     assert all(
         detail not in skill

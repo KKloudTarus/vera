@@ -166,7 +166,7 @@ class MeOut(BaseModel):
 class McpTokenOut(BaseModel):
     access_token: str
     token_type: Literal["Bearer"] = "Bearer"  # noqa: S105 - OAuth token type, not a secret
-    expires_in: int
+    expires_in: None = None
     scope: str
 
 
@@ -209,7 +209,7 @@ async def me(principal: PrincipalDep, scopes: ScopesDep) -> MeOut:
 @router.post(
     "/mcp-token",
     response_model=McpTokenOut,
-    summary="Issue a short-lived MCP JWT for the authenticated principal",
+    summary="Issue a non-expiring MCP JWT for the authenticated principal",
 )
 async def issue_mcp_token(
     response: Response,
@@ -249,13 +249,11 @@ async def issue_mcp_token(
         issuer=settings.auth_issuer,
         audience=settings.auth_audience,
         scopes=scopes,
-        ttl_seconds=settings.token_ttl_seconds,
     )
     response.headers["Cache-Control"] = "no-store"
     response.headers["Pragma"] = "no-cache"
     return McpTokenOut(
         access_token=token,
-        expires_in=settings.token_ttl_seconds,
         scope=" ".join(scopes),
     )
 

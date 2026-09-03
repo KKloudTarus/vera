@@ -19,7 +19,7 @@ exact tool permissions, and a local bootstrap plugin. The config and plugin inva
   in current docs.
 - Scopes: project-scoped `opencode.json` (or `opencode.jsonc`) at the repo root.
 - MCP config: the `mcp` object, keyed by server name, with `"$schema"` set.
-- Authentication: browser OAuth with OpenCode-managed token refresh; a short-lived
+- Authentication: browser OAuth with OpenCode-managed token refresh; a non-expiring
   literal MCP JWT is the fallback.
 - Skills: `.opencode/skills/vera-memory/SKILL.md`.
 - Plugins: project-local `.opencode/plugins/vera.ts`, discovered without a package entry.

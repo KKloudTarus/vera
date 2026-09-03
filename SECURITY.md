@@ -35,12 +35,15 @@ prompt-injection review of the MCP surface.
   `<prefix>.<secret>`; only the secret is hashed (SHA-256) and it is verified in constant
   time. OIDC tokens are validated for signature, issuer, audience, and expiry.
 - MCP: OAuth 2.1 Resource Server (RFC 9728). Built-in and external OIDC JWT verifiers check
-  signature, `iss`, `aud`, `exp`, and required scopes; a token minted for another audience is
-  rejected. External `iss|sub` identities are JIT-linked to personal-only VERA principals.
-- MCP token issuance: an API-authenticated principal can mint only a short-lived token whose
+  signature, `iss`, `aud`, and required scopes; external OIDC tokens also require `exp`. A token
+  minted for another audience is rejected. External `iss|sub` identities are JIT-linked to
+  personal-only VERA principals.
+- MCP token issuance: an API-authenticated principal can mint only a non-expiring token whose
   `sub` is its own principal id. The endpoint accepts no target principal id and returns
   `Cache-Control: no-store`; the signing secret never leaves the server. Tokens are read-only
-  by default, and requested scopes are limited to the four MCP capability classes.
+  by default, and requested scopes are limited to the four MCP capability classes. This is an
+  intentional temporary bootstrap tradeoff; credential-bearing configs remain untracked and
+  rotating the signing key invalidates all issued fallback tokens.
 - A service account authenticates as a principal of kind `service_account`, so it carries
   no ambient authority beyond its memberships.
 

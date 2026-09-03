@@ -99,8 +99,9 @@ or remote network: it grants any caller full access to that principal's memory.
 
 When built-in JWT or external OAuth verification is configured, the server is an OAuth 2.1
 Resource Server (RFC 9728). Every call requires a valid bearer JWT. The token is checked for
-signature, issuer, audience, expiry, and the required scopes. A built-in token's `sub` is a
-VERA principal id; an external OIDC token's verified `iss|sub` is JIT-mapped to one. An
+signature, issuer, audience, and the required scopes. External OIDC tokens must also have a valid
+expiry. A built-in token's `sub` is a VERA principal id; an external OIDC token's verified
+`iss|sub` is JIT-mapped to one. An
 audience bound to this resource server (RFC 8707 / RFC 9728) prevents a token minted for
 another service from being replayed here. An unauthenticated or failing call returns `401`
 with a pointer to the protected-resource metadata.
@@ -115,24 +116,26 @@ sequenceDiagram
   C->>A: obtain token (audience = this MCP URL)
   A-->>C: audience-bound JWT with MCP scopes
   C->>M: tool call + Authorization: Bearer JWT
-  M->>M: verify signature, iss, aud, exp, scope, sub
+  M->>M: verify signature, iss, aud, scope, sub (+ exp for OIDC)
   M-->>C: result (or 401 on any failed check)
 ```
 
-The resource server verifies audience binding, expiry, and scope. With an external
+The resource server verifies audience binding and scope, plus expiry for external OAuth. With an external
 authorization server, coding clients perform authorization-code + PKCE login and own secure
 token storage and refresh. The IdP must expose valid authorization-server discovery and either
 dynamic client registration or pre-registered coding-tool clients.
 
 VERA also provides `POST /identity/mcp-token` on the REST API for coding clients that use
 literal bearer headers. Any principal authenticated with its VERA API key can call this
-endpoint; it returns a short-lived MCP JWT whose `sub` is that same principal. It is not an
+endpoint; it returns an intentionally non-expiring MCP JWT whose `sub` is that same principal. It is not an
 admin-only endpoint and it never accepts a target principal id. The API key itself is not a
 valid MCP credential.
 
 The API and MCP processes must share the MCP JWT secret, algorithm, issuer, and audience.
 The endpoint returns `503` when MCP token issuance is not configured. This exchange is not an
-OAuth authorization server and provides no refresh token; request a new JWT when it expires.
+OAuth authorization server and provides no refresh token. Tokens issued by this temporary
+bootstrap endpoint intentionally do not expire; protect the untracked config as a credential and
+rotate the shared signing key to invalidate issued tokens.
 
 ```bash
 curl -s -X POST https://api.vera.example/identity/mcp-token \
@@ -142,7 +145,7 @@ curl -s -X POST https://api.vera.example/identity/mcp-token \
 ```
 
 Omit the body for a read-only token. Token scopes are limited to the four MCP capability
-classes, and the default lifetime is eight hours (`VERA_MCP__TOKEN_TTL_SECONDS=28800`).
+classes. The response explicitly returns `expires_in: null` for the non-expiring JWT.
 
 Any non-local environment (`dev`, `staging`, `prod`) must configure built-in JWT, external
 OAuth verification, or both. Without either, the server has no way to resolve a principal and

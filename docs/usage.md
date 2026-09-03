@@ -99,7 +99,9 @@ auto-published.
 accounts, and API-key issuance, rotation, and revocation. A workspace admin can manage keys
 for members of a workspace it administers. See `http://localhost:8000/docs` for the full set.
 Any authenticated principal can call `POST /identity/mcp-token` with its own API key to obtain
-a short-lived MCP JWT for itself; this does not require an admin role. This is a fallback for
+an intentionally non-expiring MCP JWT for itself; this does not require an admin role. This is a
+temporary bootstrap contract until production OAuth is complete, and the credential-bearing
+project config must remain untracked. This is a fallback for
 clients or deployments without external browser OAuth. When OAuth is configured, the MCP server
 validates the IdP access token and maps its OIDC identity to the same VERA principal model.
 

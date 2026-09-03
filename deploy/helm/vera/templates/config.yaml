@@ -46,7 +46,6 @@ data:
 {{- end }}
   VERA_MCP__ALLOWED_HOSTS: {{ toJson .Values.mcp.allowedHosts | quote }}
   VERA_MCP__ALLOWED_ORIGINS: {{ toJson .Values.mcp.allowedOrigins | quote }}
-  VERA_MCP__TOKEN_TTL_SECONDS: {{ .Values.mcp.tokenTtlSeconds | quote }}
 {{- if .Values.mcp.authAudience }}
   VERA_MCP__AUTH_AUDIENCE: {{ .Values.mcp.authAudience | quote }}
 {{- end }}

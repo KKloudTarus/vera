@@ -19,10 +19,11 @@
 5. Before acquiring or writing a JWT, stop if the target config is tracked or
    staged. For a new untracked config, add its path to `.git/info/exclude` before
    writing. Never stage or commit a credential-bearing config.
-6. For JWT fallback, give the user this command with absolute, shell-quoted paths
-   and wait for its redacted success result. Add `--existing-token` only for that
-   mode, or `--rotate` to replace the config's single expired literal JWT; never
-   put a secret in the command:
+6. For JWT fallback, run this command when the credential is already available to
+   the setup session; expose it only to that process as `VERA_API_KEY` or
+   `VERA_MCP_TOKEN`. Otherwise give the command to the user and wait for its redacted
+   hidden-prompt result. Add `--existing-token` only for that mode, or `--rotate` to
+   replace the config's single literal JWT; never put a secret in the command:
 
    `python <VERA_REPO>/examples/integrations/vera-project-setup/install_jwt.py --api-url <VERA_API_URL> --mcp-url <VERA_MCP_URL> --config <PROJECT_CONFIG>`
 7. During migration, inspect `AGENTS.md` and `CLAUDE.md`. Remove one only when its
@@ -41,5 +42,5 @@
    fallback.
 
 Report that VERA setup completed, the auth mode, and the changed files. Never
-include a credential value. For JWT fallback, include the lifetime from
-`expires_in` so the user knows when setup must be rerun.
+include a credential value. For JWT fallback, report that `expires_in: null`
+means the installed token is intentionally non-expiring.

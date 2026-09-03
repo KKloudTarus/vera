@@ -160,7 +160,7 @@ Every setting is an environment variable `VERA_<SECTION>__<FIELD>` (see
 | `VERA_RERANK__CROSS_ENCODER_ENABLED`, `VERA_RERANK__CROSS_ENCODER_PROVIDER` | stage-3 reranker (`llm` or `voyage`) |
 | `VERA_OBJECTSTORE__*` | S3-compatible object store |
 | `VERA_RESILIENCE__VALKEY_URL` | shared cache and rate limiter |
-| `VERA_MCP__JWT_SECRET`, `VERA_MCP__AUTH_ISSUER`, `VERA_MCP__AUTH_AUDIENCE`, `VERA_MCP__TOKEN_TTL_SECONDS` | Built-in MCP JWT fallback verification and regular-user token issuance |
+| `VERA_MCP__JWT_SECRET`, `VERA_MCP__AUTH_ISSUER`, `VERA_MCP__AUTH_AUDIENCE` | Built-in MCP JWT fallback verification and non-expiring regular-user token issuance |
 | `VERA_MCP__OAUTH_ISSUER`, `VERA_MCP__OAUTH_JWKS_URL`, `VERA_MCP__OAUTH_ALGORITHMS` | External OAuth discovery and OIDC access-token verification; use `OAUTH_SIGNING_KEY` only for static-key testing |
 | `VERA_API__AUTH_REQUIRED`, `VERA_API__REGISTRATION_OPEN` | require a principal on the API; open or close self-service signup |
 | `VERA_BOOTSTRAP__ENABLED`, `VERA_BOOTSTRAP__ADMIN_API_KEY`, `VERA_BOOTSTRAP__ADMIN_EMAIL` | seed the init admin on a closed deployment (the key is a secret) |

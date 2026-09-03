@@ -21,7 +21,7 @@ Wire VERA into Codex as a project-scoped streamable-HTTP MCP server. The referen
   `~/.codex/` and managed requirements are inspected for conflicts but are not modified by
   default.
 - MCP config: `[mcp_servers.vera]` in `.codex/config.toml`.
-- Authentication: browser OAuth with Codex-managed token refresh; a short-lived
+- Authentication: browser OAuth with Codex-managed token refresh; a non-expiring
   literal MCP JWT in `http_headers` is the fallback.
 - Skills: `.agents/skills/vera-memory/SKILL.md`.
 - Hooks: a trusted project `SessionStart` hook supplies sanitized bootstrap metadata. MCP
