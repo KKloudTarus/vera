@@ -76,9 +76,9 @@ python <VERA_REPO>/examples/integrations/vera-project-setup/install_jwt.py \
 
 The helper prompts without echo, requests all four coding scopes, probes MCP, and atomically
 replaces the placeholder. Add `--existing-token` to enter an existing JWT or `--rotate` to
-replace the config's single expired JWT. The API key
+replace the config's single JWT after compromise or intentional credential rotation. The API key
 is not a valid MCP bearer token and must not be written into `.mcp.json`. The JWT is non-expiring,
-so rerun the helper with `--rotate` after expiry. Keep this config untracked and do not run commands
+so keep this config untracked and do not run commands
 that print its static headers.
 
 ## Behavior Skill

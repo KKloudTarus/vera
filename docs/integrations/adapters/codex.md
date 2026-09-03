@@ -69,7 +69,8 @@ python <VERA_REPO>/examples/integrations/vera-project-setup/install_jwt.py \
 ```
 
 A REST API key is not a valid MCP bearer token. Keep fallback config untracked and
-rerun the helper with `--rotate` to replace an expired JWT. Loopback local-dev also
+rerun the helper with `--rotate` after compromise or intentional credential rotation.
+Loopback local-dev also
 omits `http_headers`.
 
 ## Behavior Skill

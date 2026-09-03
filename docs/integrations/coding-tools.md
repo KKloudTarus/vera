@@ -78,8 +78,7 @@ API key or a previously issued MCP JWT:
 - A VERA API key (`vera_<prefix>.<secret>`) authenticates the REST API. The
   hidden-input helper exchanges it at `POST ${VERA_API_URL}/identity/mcp-token` for a JWT.
 - An MCP JWT authenticates only the MCP resource. It is bound to the MCP issuer
-  and audience, identifies the caller in `sub`, carries memory scopes, and
-  expires.
+  and audience, identifies the caller in `sub`, and carries memory scopes.
 
 The built-in token endpoint always issues for the authenticated caller, so a
 normal user can obtain their own MCP JWT. Admin access is needed to provision
@@ -90,8 +89,10 @@ algorithm settings.
 Only fallback setup stores the JWT as a literal Authorization header in `.mcp.json`,
 `.codex/config.toml`, or `opencode.json`. These files become credential-bearing:
 the setup refuses tracked or staged targets and locally excludes a newly created
-config before writing. The default token lifetime is eight hours; rerun setup to
-replace an expired token with the helper's `--rotate` option. Successful OAuth
+config before writing. The current fallback token is intentionally non-expiring;
+rerun setup to replace a compromised token or intentionally rotate credentials with
+the helper's `--rotate` option.
+Successful OAuth
 config contains no JWT header; the
 runtime owns access-token storage and refresh.
 

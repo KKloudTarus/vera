@@ -56,7 +56,7 @@ def _map_scope_error(exc: Exception) -> MCPError:
 class Guard:
     """Applies the per-tool policy at registration and at call time.
 
-    In the local-dev profile (local environment, no JWT secret) the single local
+    In the local-dev profile (local environment, no token verifier) the single local
     principal holds every class, so scope checks are skipped; quotas and bounds still
     apply. In the remote-authenticated profile the caller's token scopes decide access.
     """
@@ -65,7 +65,12 @@ class Guard:
         self._server = server
         self._settings = settings
         self._quota = quota
-        self._local = settings.environment == "local" and settings.mcp.jwt_secret is None
+        self._local = (
+            settings.environment == "local"
+            and settings.mcp.jwt_secret is None
+            and settings.mcp.oauth_signing_key is None
+            and settings.mcp.oauth_jwks_url is None
+        )
 
     def tool(
         self,

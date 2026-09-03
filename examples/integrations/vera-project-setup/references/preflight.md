@@ -9,8 +9,9 @@ Run only these endpoint and authentication checks before changing project files.
 2. Call `${VERA_API_URL}/health/live` and `${VERA_API_URL}/health/ready` without
    credentials. Both responses must be successful.
 3. Send one unauthenticated JSON-RPC `initialize` request to `VERA_MCP_URL`. A
-   successful response selects no-auth mode regardless of host. A timeout,
-   connection failure, `404`, or 5xx response fails preflight.
+   successful response selects no-auth mode only for a loopback URL; a successful
+   unauthenticated response from any remote host fails closed. A timeout, connection
+   failure, `404`, or 5xx response also fails preflight.
 4. If the unauthenticated request returns `401` or `403`, read its
    `WWW-Authenticate` protected-resource metadata URL. Require HTTPS and the same
    origin as `VERA_MCP_URL`, then validate the metadata's `resource` and

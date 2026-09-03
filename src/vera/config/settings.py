@@ -164,6 +164,14 @@ class McpSettings(BaseModel):
             raise ValueError(
                 "oauth_issuer and an OAuth signing key or JWKS URL must be set together"
             )
+        capability_scopes = {
+            self.scope_read,
+            self.scope_propose,
+            self.scope_feedback,
+            self.scope_snapshot,
+        }
+        if not set(self.required_scopes).issubset(capability_scopes):
+            raise ValueError("required_scopes must use the four MCP capability scopes")
         return self
 
     # Server-wide baseline scope, enforced by the SDK before any tool runs. Reads need

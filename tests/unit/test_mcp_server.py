@@ -262,6 +262,11 @@ def test_external_oauth_configuration_must_be_complete(partial: dict[str, str]) 
         McpSettings(**partial)
 
 
+def test_required_scopes_are_limited_to_capability_scopes() -> None:
+    with pytest.raises(ValidationError, match="four MCP capability scopes"):
+        McpSettings(required_scopes=["memory:read", "memory:admin"])
+
+
 @pytest.mark.parametrize(
     "invalid",
     [

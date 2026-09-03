@@ -81,7 +81,8 @@ python <VERA_REPO>/examples/integrations/vera-project-setup/install_jwt.py \
 
 Set `oauth: false` and add `headers.Authorization = "Bearer <VERA_MCP_JWT>"`. The helper
 prompts without echo, requests/probes a JWT, and atomically replaces the placeholder. Add
-`--existing-token` when appropriate or `--rotate` for the config's single expired JWT. The API
+`--existing-token` when appropriate or `--rotate` after compromise or intentional credential
+rotation. The API
 key is not a valid MCP bearer token. Keep the resulting config untracked.
 
 ## Behavior Skill

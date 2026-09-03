@@ -228,7 +228,6 @@ async def issue_mcp_token(
         settings.scope_propose,
         settings.scope_feedback,
         settings.scope_snapshot,
-        *settings.required_scopes,
     }
     scopes = list(
         dict.fromkeys(

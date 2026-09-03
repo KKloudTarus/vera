@@ -8,6 +8,7 @@ import runpy
 import shutil
 import stat
 import subprocess
+import sys
 import types
 import warnings
 from pathlib import Path
@@ -153,10 +154,114 @@ def test_hidden_prompt_fails_closed_without_a_terminal(monkeypatch: pytest.Monke
 def test_credential_uses_and_removes_process_environment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("VERA_API_KEY", "local-test-api-key")
+    monkeypatch.setenv("VERA_API_KEY", "vera_local-test.local-secret")
 
-    assert _functions()["_credential"](existing_token=False) == "local-test-api-key"
+    assert _functions()["_credential"](existing_token=False) == "vera_local-test.local-secret"
     assert "VERA_API_KEY" not in os.environ
+
+
+def test_credential_rejects_unsafe_input_without_echoing_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sentinel = "vera_prefix.secret\r\nX-Leak: credential"
+    monkeypatch.setenv("VERA_API_KEY", sentinel)
+
+    with pytest.raises(RuntimeError) as exc:
+        _functions()["_credential"](existing_token=False)
+
+    assert sentinel not in str(exc.value)
+
+
+def test_main_failure_does_not_print_the_credential(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    sentinel = "vera_prefix.secret\r\nX-Leak: credential"
+    monkeypatch.setenv("VERA_API_KEY", sentinel)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "install_jwt.py",
+            "--api-url",
+            "https://api.vera.example",
+            "--mcp-url",
+            _MCP_URL,
+            "--config",
+            str(tmp_path / ".mcp.json"),
+        ],
+    )
+
+    with pytest.raises(SystemExit):
+        _functions()["main"]()
+
+    stderr = capsys.readouterr().err
+    assert sentinel not in stderr
+    assert "no credential was written" in stderr
+
+
+def test_request_json_rejects_a_non_object_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Response:
+        def __init__(self) -> None:
+            self.headers: dict[str, str] = {}
+
+        def __enter__(self) -> Response:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return b"[]"
+
+    class Opener:
+        def open(self, _request: object, *, timeout: int) -> Response:
+            assert timeout == 15
+            return Response()
+
+    request_json = _functions()["_request_json"]
+    monkeypatch.setitem(request_json.__globals__, "_OPENER", Opener())
+
+    with pytest.raises(RuntimeError, match="fixed failure"):
+        request_json(object(), failure="fixed failure")
+
+
+def test_main_sanitizes_an_unexpected_exception(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    sentinel = "credential-sentinel-must-not-escape"
+    functions = _functions()
+
+    def fail(*, existing_token: bool) -> str:
+        assert existing_token is False
+        raise KeyError(sentinel)
+
+    monkeypatch.setitem(functions, "_credential", fail)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "install_jwt.py",
+            "--api-url",
+            "https://api.vera.example",
+            "--mcp-url",
+            _MCP_URL,
+            "--config",
+            str(tmp_path / ".mcp.json"),
+        ],
+    )
+
+    with pytest.raises(SystemExit):
+        functions["main"]()
+
+    stderr = capsys.readouterr().err
+    assert sentinel not in stderr
+    assert "no credential was written" in stderr
 
 
 def test_windows_permissions_apply_a_restricted_dacl(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -201,6 +306,33 @@ def test_install_refuses_a_tracked_config(tmp_path: Path) -> None:
 
     with pytest.raises(RuntimeError, match="tracked or staged"):
         _functions()["_install"](config, "header.payload.signature", mcp_url=_MCP_URL)
+
+
+def test_install_fails_closed_when_git_tracking_check_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = tmp_path / ".mcp.json"
+    original = (
+        '{"mcpServers":{"vera":{"url":"https://mcp.vera.example/mcp",'
+        '"headers":{"Authorization":"Bearer <VERA_MCP_JWT>"}}}}\n'
+    )
+    config.write_text(original)
+    calls = 0
+
+    def run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return subprocess.CompletedProcess(command, 0, stdout=f"{tmp_path}\n")
+        return subprocess.CompletedProcess(command, 128, stderr="fatal index failure")
+
+    monkeypatch.setattr(subprocess, "run", run)
+
+    with pytest.raises(RuntimeError, match="could not verify"):
+        _functions()["_install"](config, "header.payload.signature", mcp_url=_MCP_URL)
+
+    assert config.read_text() == original
 
 
 @pytest.mark.parametrize(

@@ -39,6 +39,7 @@ def _app() -> httpx.ASGITransport:
                 jwt_secret=_SECRET,  # type: ignore[arg-type]
                 auth_issuer=_ISS,
                 auth_audience=_AUD,
+                scope_read="memory.read",
                 required_scopes=["memory.read"],
             )
         }
@@ -175,7 +176,6 @@ async def test_metadata_endpoint_advertises_the_resource() -> None:
     assert body["resource"] == _AUD
     assert body["authorization_servers"] == [_ISS]
     assert set(body["scopes_supported"]) == {
-        "memory:read",
         "memory:propose",
         "memory:feedback",
         "memory:snapshot",

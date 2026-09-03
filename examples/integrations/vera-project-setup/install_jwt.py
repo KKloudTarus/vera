@@ -23,6 +23,7 @@ from urllib.parse import urlsplit
 _PLACEHOLDER = "<VERA_MCP_JWT>"
 _SCOPES = ["memory:read", "memory:propose", "memory:feedback", "memory:snapshot"]
 _JWT_PATTERN = re.compile(r"[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+")
+_API_KEY_PATTERN = re.compile(r"vera_[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+")
 
 
 class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -53,9 +54,12 @@ def _read_secret(prompt: str) -> str:
 def _credential(*, existing_token: bool) -> str:
     env_name = "VERA_MCP_TOKEN" if existing_token else "VERA_API_KEY"
     value = os.environ.pop(env_name, None)
-    if value is not None:
-        return value
-    return _read_secret("Existing MCP JWT: " if existing_token else "VERA API key: ")
+    if value is None:
+        value = _read_secret("Existing MCP JWT: " if existing_token else "VERA API key: ")
+    pattern = _JWT_PATTERN if existing_token else _API_KEY_PATTERN
+    if pattern.fullmatch(value) is None:
+        raise RuntimeError("credential format is invalid")
+    return value
 
 
 def _safe_url(value: str, *, mcp: bool = False) -> str:
@@ -79,12 +83,17 @@ def _request_json(
     try:
         with _OPENER.open(request, timeout=15) as response:
             payload = json.loads(response.read())
+            if not isinstance(payload, dict):
+                raise ValueError("JSON response must be an object")
             return payload, response.headers
     except (
         urllib.error.HTTPError,
         urllib.error.URLError,
         TimeoutError,
         json.JSONDecodeError,
+        UnicodeDecodeError,
+        TypeError,
+        ValueError,
     ) as exc:
         raise RuntimeError(failure) from exc
 
@@ -104,7 +113,7 @@ def _exchange(api_url: str, api_key: str) -> tuple[str, int | None]:
     expires_in = payload.get("expires_in")
     if (
         not isinstance(token, str)
-        or not token
+        or _JWT_PATTERN.fullmatch(token) is None
         or "expires_in" not in payload
         or (expires_in is not None and not isinstance(expires_in, int))
     ):
@@ -295,6 +304,8 @@ def _install(config_path: Path, token: str, *, mcp_url: str, rotate: bool = Fals
     )
     if tracked.returncode == 0:
         raise RuntimeError("refusing to write a JWT into a tracked or staged config")
+    if tracked.returncode != 1:
+        raise RuntimeError("could not verify whether the credential config is tracked")
 
     content = config_path.read_text()
     authorization, configured_url = _vera_config(content, config_path)
@@ -353,8 +364,8 @@ def main() -> None:
             token, expires_in = _exchange(api_url, secret)
         _probe(mcp_url, token)
         _install(args.config, token, mcp_url=mcp_url, rotate=args.rotate)
-    except (OSError, ValueError, RuntimeError) as exc:
-        parser.exit(1, f"VERA JWT install failed: {exc}\n")
+    except Exception:
+        parser.exit(1, "VERA JWT install failed; no credential was written.\n")
 
     lifetime = f"; expires in {expires_in} seconds" if expires_in else "; non-expiring"
     print(f"VERA JWT fallback installed and MCP authentication verified{lifetime}.")

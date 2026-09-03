@@ -187,6 +187,7 @@ def test_setup_skill_has_two_inputs_and_endpoint_smoke_checks() -> None:
     assert "${VERA_API_URL}/health/ready" in preflight
     assert "VERA_MCP_URL" in preflight
     assert "unauthenticated JSON-RPC `initialize`" in preflight
+    assert "only for a loopback URL" in preflight
     assert "authorization-server metadata" in preflight
     assert "PKCE `S256`" in preflight
     assert "/identity/mcp-token" in jwt_helper
