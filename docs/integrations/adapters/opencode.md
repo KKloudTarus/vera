@@ -13,7 +13,7 @@ exact tool permissions, and a local bootstrap plugin. The config and plugin inva
     reachability, validates the installed files, then confirms the `vera` MCP server after
     OpenCode restarts.
 
-## At a glance
+## At a Glance
 
 - Surfaces: OpenCode CLI (local). Cite a current OpenCode release; the fields below are stable
   in current docs.
@@ -27,7 +27,7 @@ exact tool permissions, and a local bootstrap plugin. The config and plugin inva
 - Plugins: project-local `.opencode/plugins/vera.ts`, discovered without a package entry.
 - Permissions: exact `vera_*` tool keys set to `"ask"` after broader wildcard rules.
 
-## MCP config
+## MCP Config
 
 Write `opencode.json` at the repo root:
 
@@ -72,14 +72,14 @@ and `clientSecret`; authenticate with:
 opencode mcp auth vera
 ```
 
-## Behavior skill
+## Behavior Skill
 
 - Copy the portable VERA skill (`examples/integrations/vera-skill/SKILL.md`) to
   `.opencode/skills/vera-memory/SKILL.md`.
 - For onboarding or repair, run the two-endpoint project setup workflow in
   `examples/integrations/vera-project-setup/SKILL.md`.
 
-## Permissions and trust
+## Permissions and Trust
 
 OpenCode runs configured project MCP servers. Keep VERA in `opencode.json` so the setup is
 explicit and reviewable. Put the exact VERA permission keys after broader wildcard rules;
@@ -103,7 +103,7 @@ opencode mcp list       # servers and their auth status
 Restart OpenCode, return to the setup session, and use a normal TUI without `--auto`. Confirm
 that `vera` is connected and its tools are visible.
 
-## Hooks and plugins
+## Hooks and Plugins
 
 Copy `examples/integrations/opencode/vera.ts` to `.opencode/plugins/vera.ts`. OpenCode discovers
 project-local TypeScript plugins automatically. The `chat.message` hook injects one bounded
@@ -123,7 +123,7 @@ On process restart, a resumed session can receive the idempotent reminder again.
 - Uninstall: remove the owned MCP entry and permission keys, remove the plugin and skill only
   if unchanged, run `opencode mcp logout vera` for OAuth, and leave unrelated content intact.
 
-## Known limitations
+## Known Limitations
 
 - Cloud and managed-policy surfaces are not covered by this local adapter.
 - `"ask"` is bypassable through `Always` or `--auto`; use server-side read-only credentials

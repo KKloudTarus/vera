@@ -15,7 +15,7 @@ by the setup skill.
     reachability, validates the installed files, then confirms the `vera` MCP server after
     Claude Code restarts.
 
-## At a glance
+## At a Glance
 
 - Surfaces: local CLI and IDE extension. Use a current Claude Code release that supports remote
   HTTP MCP, `${VAR}` expansion in `.mcp.json`, and `/mcp` OAuth.
@@ -29,7 +29,7 @@ by the setup skill.
 - Hooks: project-scoped `SessionStart` bootstrap metadata and `PreToolUse` write approval in
   `.claude/settings.json`; no prompt, transcript, source, or retrieved content is forwarded.
 
-## MCP config
+## MCP Config
 
 Project scope writes `.mcp.json` at the repo root. A remote server uses `type: "http"`:
 
@@ -72,14 +72,14 @@ claude
 For OAuth-protected deployments, prefer the OAuth flow over a static token: it stores
 credentials in `~/.claude.json`, never in the repo.
 
-## Behavior skill
+## Behavior Skill
 
 - Copy the portable VERA skill (`examples/integrations/vera-skill/SKILL.md`) to
   `.claude/skills/vera-memory/SKILL.md` so the agent loads VERA behavior on demand.
 - For onboarding or repair, run the two-endpoint project setup workflow in
   `examples/integrations/vera-project-setup/SKILL.md`.
 
-## Permissions and workspace trust
+## Permissions and Workspace Trust
 
 A project-scoped `.mcp.json` server is gated by workspace trust: on first use in an
 interactive session Claude Code prompts to approve the project's MCP servers, and the server
@@ -130,7 +130,7 @@ matchers after restarting Claude Code.
   and remove `.claude/hooks/vera-hook.cjs` and the VERA skill only when they have no later
   user edits. Leave other servers, hooks, and skills intact.
 
-## Known limitations
+## Known Limitations
 
 - Managed-policy and cloud-agent surfaces are not covered by this local adapter.
 - Project hooks may be disabled by `allowManagedHooksOnly`; managed policy takes precedence.

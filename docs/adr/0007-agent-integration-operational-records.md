@@ -1,4 +1,4 @@
-# ADR-0007: Agent integration operational records
+# ADR-0007: Agent Integration Operational Records
 
 ## Status
 

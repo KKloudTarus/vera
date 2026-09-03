@@ -1,4 +1,4 @@
-# ADR-0004: Append-only KnowledgeEvent ledger and immutable revisions
+# ADR-0004: Append-only KnowledgeEvent Ledger and Immutable Revisions
 
 Status: accepted (Phase 1)
 
@@ -24,7 +24,7 @@ supersession creates a new Fact revision and links the old one with a `SUPERSEDE
 The ledger feeds the semantic change projection. The `facts`, `assertions`, and `evidence`
 tables hold authoritative Fact state.
 
-## Implementation status
+## Implementation Status
 
 The event ledger is append-only. Current lifecycle and aggregate fields are updated in place,
 so the ledger lacks enough row data to reconstruct arbitrary earlier system states. Knowledge

@@ -1,4 +1,4 @@
-# Remaining-risk register
+# Remaining-Risk Register
 
 Honest status after the knowledge-lifecycle work in issue #6. Exact provenance,
 deterministic reconciliation, authoritative-first writes, projection cleanup, hybrid
@@ -7,7 +7,7 @@ ontology governance, and governed community lineage are implemented and tested. 
 below remain operational or migration risks; none is a substitute for a production readiness
 review.
 
-## Cutover and deployment
+## Cutover and Deployment
 
 - **Authoritative Fabric writes remain an explicit rollout decision.**
   `VERA_MEMORY__FABRIC_WRITE_MODE` supports `legacy`, `dual`, and `fabric`, and defaults to
@@ -39,7 +39,7 @@ review.
   hit@k, MRR, nDCG@k, and citation rate against deterministic fixtures. Domain coverage,
   latency, and ranking quality still need measurement with production-shaped data and traffic.
 
-## Graph and communities
+## Graph and Communities
 
 - **Community construction remains an operator-run, potentially expensive step.** Each run
   rebuilds the active fact projection from PostgreSQL, records normalized lineage in
@@ -51,7 +51,7 @@ review.
   detectable and stale facts are removed incrementally, but operations must alert on queue lag
   and drift and retain a tested rebuild procedure.
 
-## Historical migration
+## Historical Migration
 
 - **Free-text legacy episodes remain queued for controlled re-extraction.** Episodes without structured
   triples are counted as `needs_review` rather than assigned invented evidence. Recovering them
@@ -59,7 +59,8 @@ review.
 - **Backfilled legacy objects remain scalar values.** The backfill does not reconstruct the
   object side of historical entity-to-entity graph edges. Re-ingestion is required where that
   relationship structure matters.
-## Production operations
+
+## Production Operations
 
 - **No production-scale benchmark or recovery drill has been run here.** The
   `benchmark_fabric` harness reports context-pack latency percentiles, but target volumes,

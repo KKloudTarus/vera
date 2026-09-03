@@ -1,11 +1,13 @@
 # Using VERA (HTTP API)
 
-Reading memory over HTTP. All endpoints require a bearer credential (an API key from
-`/identity/register`, or an OIDC token) and resolve the caller's tenant scopes server-side,
-so a client never chooses a scope. Interactive docs are at `http://localhost:8000/docs`.
+Reading memory over HTTP. All endpoints require a bearer credential and resolve the caller's
+tenant scopes server-side, so a client never chooses a scope. The credential is a VERA API key
+(`vera_<prefix>.<secret>`) or an OIDC token. On an open deployment you self-register for a key;
+on a closed one an admin provisions you (see [Identity and administration](#identity-and-administration)).
+Interactive docs are at `http://localhost:8000/docs`.
 
 ```bash
-KEY=vera_...   # from POST /identity/register
+KEY=vera_...   # from POST /identity/register, or from an admin via POST /identity/users
 ```
 
 ## Search
@@ -36,7 +38,7 @@ A hit looks like:
 `verification` and `authority` tell you how much to trust the fact; `source_id` is the
 handle for provenance and retraction.
 
-## Point-in-time queries (`as_of`)
+## Point-in-Time Queries (`as_of`)
 
 By default search returns the current view (superseded and retracted facts are hidden). Pass
 `as_of` (ISO-8601) to select the valid-time boundary from the authoritative revisions currently
@@ -54,7 +56,7 @@ vector inputs at one system-time boundary and pins the embedding, retrieval-inde
 assembler/scoring contracts. Persisted context packs retain the canonical request JSON as well
 as its hash, so audits do not depend on reconstructing omitted defaults.
 
-## Multi-hop explore
+## Multi-hop Explore
 
 From a named entity, return the facts on paths within N hops (bounded), to trace how things
 connect in ways a single-fact search misses.
@@ -67,7 +69,7 @@ curl -s -X POST localhost:8000/memory/explore \
 
 `depth` is 1-3. Each connected fact comes back with its provenance.
 
-## Retraction and erasure
+## Retraction and Erasure
 
 Withdraw a published source. `source_id` is the value from a search hit.
 
@@ -83,7 +85,7 @@ curl -s -X DELETE "localhost:8000/memory/sources/<SOURCE_ID>?erase=true" \
 
 Every retraction writes an audit event. The caller must be able to read the source's scope.
 
-## Writing to memory
+## Writing to Memory
 
 There is no raw ingest endpoint on purpose: writing goes through connectors and curation, so
 trust and provenance are never bypassed. To add knowledge, configure a source and connector
@@ -91,8 +93,23 @@ trust and provenance are never bypassed. To add knowledge, configure a source an
 `memory_propose` tool; a proposal lands unverified in the agent's personal scope and is never
 auto-published.
 
-## Identity and administration
+## Identity and Administration
 
 `/identity/*` covers registration, organizations, workspaces, projects, memberships, service
 accounts, and API-key issuance, rotation, and revocation. A workspace admin can manage keys
 for members of a workspace it administers. See `http://localhost:8000/docs` for the full set.
+
+Self-service signup at `POST /identity/register` is gated by `VERA_API__REGISTRATION_OPEN`.
+A shared or production deployment sets it off (the route returns `403`), and an admin provisions
+each user in one call:
+
+```bash
+curl -s -X POST http://localhost:8000/identity/users \
+  -H "authorization: Bearer $ADMIN_KEY" -H 'content-type: application/json' \
+  -d '{"workspace_id":"<uuid>","display_name":"Bob","email":"bob@example.com","role":"member"}'
+# creates the principal, adds the workspace membership, and returns a one-time api_key
+```
+
+The first admin on a closed deployment is seeded out of band by the bootstrap Job, not by
+signup (see [deployment](deployment.md)). Machines use `POST /identity/service-accounts` for a
+scoped key instead.
