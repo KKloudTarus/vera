@@ -101,54 +101,44 @@ Phases are sequential where they share schema; independent within a phase.
 | 7 | review/conflict/timeline endpoints; DB role split; destructive authz | 1-6 | production role breakage | new roles behind migration; tests under real roles |
 | 8 | data migration, benchmarks, docs, runbooks | 1-7 | data loss | uncertain rows flagged for review; documented rollback |
 
-Delivered so far: Phase 0 (this document, the ADRs, characterization tests), Phase 1 (the
-authoritative model, migration `f3a1b2c4d5e6`), Phase 2 (chunking, ontology-driven
-reconciliation, change events), Phase 3 (fact projection into Graphiti, the Graphiti 0.29.x
-compatibility contract tests, and rebuild verification), and Phase 4 (Postgres full-text
-passage/code/fact candidate sources over rebuildable `search_vector` columns, migration
-`a7c9e1f2b3d4`, and a `ContextAssembler` that fans out to them in parallel, dedups, scores
-with an explainable signal vector, applies source-diversity, annotates conflicts, cites
-every hit, and packs to a token budget with no LLM on the path), Phase 5 (immutable
-`KnowledgeSnapshot`s that freeze fact, provenance, chunk, and vector retrieval inputs with the
-ontology/policy versions, source boundaries, and retrieval/assembler contracts, migrations
-`b8d0f1a2c3e4`, `0b2c3d4e5f6a`, and `1c3d4e5f6a7b`,
-snapshot-scoped retrieval that stays
-reproducible after supersession, and persisted `ContextPack`s carrying the cited results and
-the canonical request plus conflict/freshness counts, both appending to the change ledger), and
-Phase 6 (a
-`KnowledgeService` behind a versioned REST surface `/v2/knowledge` and generic `knowledge_*`
-MCP tools with `knowledge_get_context` as the primary entry point: context, search,
-get_fact, explain_fact, changes, conflicts, snapshots, and propose, all with scopes resolved
-server-side and proposals confined to the caller's personal scope; the existing `/memory`
-endpoints and `memory_*` tools remain for backward compatibility). Within Phase 6,
-`knowledge_feedback` reuses the existing `memory_feedback` path and `get_evidence` is served
-by `explain_fact`; migrating them to the new model follows the Phase 8 cutover. Phase 7 adds
-governance and the production role model: destructive retraction now requires an admin role
-(a `role_for`/`can_administer` resolver, not mere read access); the review queue, fact
-timeline, promote/reject (admin-gated), and ontology-policy endpoints back a future Knowledge
-Workbench; and migration `c9e2f3a4b5d6` creates the non-superuser `vera_trusted` (read) and
-`vera_worker` (read/write) BYPASSRLS roles so the cross-scope read and worker paths need no
-superuser in production, with `vera_app` staying the RLS-enforced tenant path. Phase 8 adds
-the cutover tooling: an idempotent backfill (`migrate_to_fabric`) that converts
-`published_episodes` into Facts/Assertions/Evidence while preserving the legacy rows and
-flagging free-text episodes for review, a benchmark harness (`benchmark_fabric`) that reports
-measured context-pack latency percentiles, and the runbook and remaining-risk register
-(`docs/runbooks.md`, `docs/remaining-risks.md`). The live worker cutover and the remaining
-deferrals are tracked in the risk register. Within Phase 3, projecting
-Sagas and building derived communities/summaries is deferred: those depend on Graphiti's
-LLM-driven community APIs, whereas the invariant that matters here, a graph rebuildable from
-Postgres, is delivered and verified by `FactProjectionService` and its drift check. Within
-Phase 4, a vector backend (pgvector) and the full evaluation-metric expansion (nDCG, citation
-and temporal correctness datasets) are deferred behind the swappable ports; the combined,
-cited, diversity-aware retrieval and its scoring are delivered and tested. The reconciliation,
-projection, and retrieval services are not yet wired into the live worker or the MCP/REST
-surface; that wiring lands with Phase 6 (contracts) and the Phase 8 migration.
+### Status by Phase
 
-Cross-cutting risks: (a) Graphiti making itself authoritative is prevented by keeping it a
-projection and adding rebuild-equivalence tests (invariant 10); (b) agents mutating shared
-truth is prevented by keeping `knowledge_propose` proposal-only in personal scope
-(invariant 5); (c) generated summaries masquerading as facts is prevented by `derived=true`,
-`authority=0` marking (invariant 11).
+All eight phases are delivered as code and tests. The one piece of work left is the live
+worker cutover (Phase 8), tracked in the [remaining-risk register](../remaining-risks.md).
+
+| Phase | Status | Delivered |
+|-------|--------|-----------|
+| 0 | Done | This document, the ADRs, characterization tests |
+| 1 | Done | Authoritative model (Chunk, Fact, Assertion, Evidence, FactRelation, KnowledgeEvent); migration `f3a1b2c4d5e6` |
+| 2 | Done | Structure-aware chunking, ontology-driven reconciliation, change events |
+| 3 | Done (Sagas and communities deferred) | Fact projection into Graphiti, the 0.29.x compatibility contract tests, rebuild verification (`FactProjectionService` and its drift check) |
+| 4 | Done (pgvector and extended metrics deferred) | Postgres full-text passage/code/fact candidates over rebuildable `search_vector` (migration `a7c9e1f2b3d4`); a `ContextAssembler` that fans out in parallel, dedups, scores with an explainable signal vector, applies source-diversity, annotates conflicts, cites every hit, and packs to a token budget with no LLM on the path |
+| 5 | Done | Immutable `KnowledgeSnapshot`s that freeze fact/provenance/chunk/vector inputs with the ontology, policy, and assembler contracts (migrations `b8d0f1a2c3e4`, `0b2c3d4e5f6a`, `1c3d4e5f6a7b`); snapshot-scoped retrieval that stays reproducible after supersession; persisted `ContextPack`s with cited results and conflict/freshness counts; both append to the ledger |
+| 6 | Done | `KnowledgeService` behind versioned REST `/v2/knowledge` and generic `knowledge_*` MCP tools, `knowledge_get_context` primary (context, search, get_fact, explain_fact, changes, conflicts, snapshots, propose); scopes resolved server-side; proposals confined to the caller's personal scope; `/memory` and `memory_*` kept for backward compatibility |
+| 7 | Done | Governance and production roles: admin-gated destructive retraction (`role_for` / `can_administer`); review queue, fact timeline, promote/reject, and ontology-policy endpoints; migration `c9e2f3a4b5d6` adds the `vera_trusted` (read) and `vera_worker` (read/write) BYPASSRLS roles, with `vera_app` staying the RLS-enforced tenant path |
+| 8 | Tooling done, live cutover pending | Idempotent `migrate_to_fabric` backfill (preserves the legacy rows, flags free-text episodes for review), the `benchmark_fabric` latency harness, and the runbook plus risk register |
+
+### Deferred, Behind the Ports
+
+- **Phase 3:** projecting Sagas and building derived communities/summaries, which depend on
+  Graphiti's LLM-driven community APIs. The invariant that matters, a graph rebuildable from
+  Postgres, is delivered and verified.
+- **Phase 4:** a pgvector vector backend and the full evaluation-metric expansion (nDCG,
+  citation and temporal-correctness datasets). The combined, cited, diversity-aware retrieval
+  and its scoring are delivered and tested.
+- **Live wiring:** the reconciliation, projection, and retrieval services are not yet wired
+  into the live worker; that cutover lands with the Phase 8 migration. Until then
+  `knowledge_feedback` reuses the `memory_feedback` path and `get_evidence` is served by
+  `explain_fact`.
+
+### Cross-cutting Risks
+
+- Graphiti making itself authoritative is prevented by keeping it a projection and adding
+  rebuild-equivalence tests (invariant 10).
+- Agents mutating shared truth is prevented by keeping `knowledge_propose` proposal-only in
+  personal scope (invariant 5).
+- Generated summaries masquerading as facts is prevented by the `derived=true`, `authority=0`
+  marking (invariant 11).
 
 ## 4. Backward Compatibility
 
