@@ -21,9 +21,8 @@ Wire VERA into Codex as a project-scoped streamable-HTTP MCP server. The referen
   `~/.codex/` and managed requirements are inspected for conflicts but are not modified by
   default.
 - MCP config: `[mcp_servers.vera]` in `.codex/config.toml`.
-- Secrets: `bearer_token_env_var = "VERA_MCP_TOKEN"`; never put a literal token in
-  `http_headers`.
-- OAuth: set `auth = "oauth"`, declare deployment scopes, then run `codex mcp login vera`.
+- Authentication: browser OAuth with Codex-managed token refresh; a non-expiring
+  literal MCP JWT in `http_headers` is the fallback.
 - Skills: `.agents/skills/vera-memory/SKILL.md`.
 - Hooks: a trusted project `SessionStart` hook supplies sanitized bootstrap metadata. MCP
   write approval uses `default_tools_approval_mode = "writes"`, not a hook.
@@ -41,7 +40,6 @@ hooks = true
 
 [mcp_servers.vera]
 url = "https://mcp.vera.example/mcp"
-bearer_token_env_var = "VERA_MCP_TOKEN"
 enabled = true
 required = false
 startup_timeout_sec = 10
@@ -51,16 +49,29 @@ default_tools_approval_mode = "writes"
 
 `required = false` preserves VERA's fail-open coding behavior.
 
-For a loopback local-dev endpoint, omit `bearer_token_env_var`. For OAuth, replace it with:
+For remote OAuth, run:
 
-```toml
-auth = "oauth"
-scopes = ["memory:read", "memory:propose", "memory:feedback", "memory:snapshot"]
+```bash
+codex mcp login vera --scopes memory:read,memory:propose,memory:feedback,memory:snapshot
 ```
 
-Request only `memory:read` when the integration does not need writes. VERA is the OAuth
-resource server; authorization-server discovery, registration, PKCE, refresh, and revocation
-remain deployment concerns.
+Codex stores and refreshes its OAuth credential outside the project config. Remove
+an existing `http_headers` value only after login and connection succeed. If OAuth
+is unavailable, add
+`http_headers = { Authorization = "Bearer <VERA_MCP_JWT>" }` and replace the
+placeholder through the hidden-input helper:
+
+```bash
+python <VERA_REPO>/examples/integrations/vera-project-setup/install_jwt.py \
+  --api-url https://api.vera.example \
+  --mcp-url https://mcp.vera.example/mcp \
+  --config .codex/config.toml
+```
+
+A REST API key is not a valid MCP bearer token. Keep fallback config untracked and
+rerun the helper with `--rotate` after compromise or intentional credential rotation.
+Loopback local-dev also
+omits `http_headers`.
 
 ## Behavior Skill
 
@@ -109,21 +120,20 @@ Run:
 ```bash
 codex doctor
 codex mcp list
-codex mcp get vera --json
 ```
 
-For OAuth, run `codex mcp login vera`. Restart Codex inside the trusted repository, return to
-the setup session, then inspect `/debug-config`, `/hooks`, `/mcp verbose`, and `/skills`.
+Restart Codex inside the trusted repository, return to the setup session, then inspect
+`/debug-config`, `/hooks`, `/mcp verbose`, and `/skills`.
 Confirm that `vera` is connected and its tools are visible.
 
 ## Lifecycle
 
-- Update: structurally merge only the owned `[mcp_servers.vera]`, hook group, and approval
-  keys; changing a hook requires trust review again.
+- Update: OAuth refresh is runtime-managed. Structurally merge only the owned
+  `[mcp_servers.vera]`, hook group, and approval keys; changing a hook requires trust review.
 - Disable: set `enabled = false` or remove only the VERA project table.
 - Doctor: use `codex doctor`, `/debug-config`, `/hooks`, and `/mcp verbose`.
-- Uninstall: run `codex mcp logout vera` for OAuth, remove only VERA-owned project config,
-  hook, and skill content, then restart and verify VERA is absent. Do not use
+- Uninstall: remove only VERA-owned project config, hook, and skill content, then restart and
+  verify VERA is absent. Do not use
   `codex mcp remove vera` for the project entry because the CLI command targets user config.
 
 ## Known Limitations

@@ -103,25 +103,35 @@ authoritative list of visible names.
 VERA exposes two authentication profiles. A runtime MUST detect which profile the target
 endpoint uses during setup and configure the credential flow accordingly.
 
-**local-dev.** `VERA_ENVIRONMENT=local` and no `VERA_MCP__JWT_SECRET`. The server runs
-without authentication and every call acts as one stable local principal
+**local-dev.** `VERA_ENVIRONMENT=local` with neither built-in JWT nor external OAuth
+verification. The server runs without authentication and every call acts as one stable local principal
 (`VERA_MCP__LOCAL_PRINCIPAL_ID`) that holds a personal scope only. No token is required, and
 the local principal holds every authorization class. Input bounds and quotas still apply.
 This profile is for a single developer on their own machine and MUST NOT be exposed on a
 shared or remote network.
 
-**remote-authenticated.** `VERA_MCP__JWT_SECRET` is set. The server is an OAuth 2.1 Resource
-Server (RFC 9728). Every call MUST carry a valid bearer JWT: verified signature, issuer,
-audience (audience binding per RFC 8707 and RFC 9728), a future expiry, and the required
-scopes. The token `sub` MUST be a real principal id. Any non-local environment MUST use this
-profile.
+**remote-authenticated.** Built-in JWT verification, external OAuth/OIDC verification, or both
+are configured. The server is an OAuth 2.1 Resource Server (RFC 9728). Every call MUST carry a
+valid bearer JWT: verified signature, issuer, audience (audience binding per RFC 8707 and RFC
+9728), and the required scopes. External OIDC tokens MUST also have a future expiry. Built-in JWT
+subjects MUST be real principal ids; external `iss|sub` identities are JIT-mapped to stable,
+personal-only principals. Any
+non-local environment MUST use this profile.
 
-The resource server verifies audience binding, expiry, and scope. The wider OAuth
-authorization-server lifecycle (PKCE, device flow, token refresh, and revocation) is a
-client and deployment concern, not the resource server's. The agent MUST perform
-authentication interactively and MUST write the resulting credential only to the runtime's
-secret store or an untracked location, never into a tracked file
-(`credentials: interactive_only`).
+When an external authorization server is advertised, a runtime MUST prefer interactive OAuth
+with PKCE and runtime-owned token storage/refresh. Discovery metadata alone is insufficient:
+authorization-server metadata and an authenticated MCP connection MUST succeed before removing
+an existing static JWT. Credential acquisition MUST be explicitly initiated by the user, and
+the agent MUST write a resulting fallback JWT only to an untracked location, never a tracked
+file (`credentials: interactive_only`).
+
+When OAuth is unavailable, an ordinary principal MAY authenticate to the REST API with a VERA
+API key and call `POST /identity/mcp-token`. The endpoint issues a non-expiring MCP JWT for that
+same principal and cannot mint for another principal. This fallback JWT intentionally has no
+expiry until the OAuth EPIC is complete, so its untracked config MUST be protected like a
+credential. A VERA API key MUST NOT be sent to the MCP
+server. The coding-tool setup adapters store the fallback JWT as a literal header only in an
+untracked project config and MUST redact it from reports.
 
 ### Tool Authorization Classes
 

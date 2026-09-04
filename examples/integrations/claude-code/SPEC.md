@@ -21,10 +21,12 @@ Parse and merge JSON by key. Preserve unrelated servers, settings, and hooks.
 
 ## MCP and auth
 
-- Remote static token: use the reference `type: "http"` shape and keep
-  `Authorization: Bearer ${VERA_MCP_TOKEN}` as an environment reference.
-- Remote OAuth: omit the static header and run `claude mcp login vera` or use
-  `/mcp` -> Authenticate. Credentials belong in Claude's user secret storage.
+- Remote OAuth: configure only `type: "http"` and the supplied URL, with no
+  `headers`. Restart, approve `vera`, and complete `/mcp` browser authentication.
+  Remove an existing JWT header only after OAuth login and connection succeed.
+- Remote JWT: replace `<VERA_MCP_JWT>` in the reference `type: "http"` config
+  only through `install_jwt.py` after the config is excluded from Git. Never ask
+  for or put the REST API key in `.mcp.json`.
 - Loopback local-dev: replace the URL with the supplied endpoint and omit the
   Authorization header.
 - Project scope is the repository-root `.mcp.json`; do not use local or user
@@ -46,9 +48,10 @@ Project hooks run with user privileges and require workspace trust. A managed
 
 1. Parse `.mcp.json` and `.claude/settings.json`, then run `node --check` on the
    hook helper.
-2. Restart Claude Code and approve the project MCP server and hooks.
-3. Run `claude mcp get vera` and confirm `vera` is connected and its tools are
-   visible.
+2. Restart Claude Code, trust the workspace, open `/mcp`, and approve only the project server named
+   `vera`. Open `/hooks` and review the exact project hook source.
+3. Return to the same setup session and use `/mcp` to confirm `vera` is connected
+   and its tools are visible. Do not run a command that prints static headers.
 
 ## Runtime uninstall
 

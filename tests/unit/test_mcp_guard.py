@@ -69,6 +69,23 @@ async def test_read_only_credential_cannot_call_a_write_tool(
         assert _code(exc.value) == "unauthorized"
 
 
+async def test_oauth_only_read_credential_cannot_call_a_write_tool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(guard_module, "get_access_token", lambda: _token("memory:read"))
+    settings = _remote(
+        jwt_secret=None,
+        oauth_issuer="https://login.example.com",
+        oauth_signing_key="external-test-key",
+        oauth_algorithms=["HS256"],
+    )
+
+    with pytest.raises(MCPError) as exc:
+        _guard(settings)._authorize(ToolClass.PROPOSE)
+
+    assert _code(exc.value) == "unauthorized"
+
+
 async def test_write_scope_authorizes_the_write_tool(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         guard_module, "get_access_token", lambda: _token("memory:read", "memory:propose")

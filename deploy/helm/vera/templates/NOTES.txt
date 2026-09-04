@@ -13,7 +13,7 @@ embedder = {{ .Values.memory.embedder }}.
    kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "vera.mcpName" . }} 8080:{{ .Values.mcp.service.port }}
 
    API health:   curl -s localhost:8000/health/ready
-   MCP metadata: curl -s localhost:8080/.well-known/oauth-protected-resource   # only when a JWT secret is set
+   MCP metadata: curl -s localhost:8080/.well-known/oauth-protected-resource   # when JWT or OAuth verification is set
 
 {{- if not .Values.memory.openaiApiKey }}
 
@@ -25,6 +25,6 @@ embedder = {{ .Values.memory.embedder }}.
 {{- end }}
 {{- if and (eq .Values.environment "local") (not .Values.mcp.jwtSecret) }}
 
-4. The MCP serves one unauthenticated local principal (environment=local, no JWT secret).
+4. The MCP serves one unauthenticated local principal (environment=local, no JWT/OAuth verifier).
    For a real deployment set environment=prod, mcp.jwtSecret, and api.authRequired=true.
 {{- end }}

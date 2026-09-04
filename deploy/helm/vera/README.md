@@ -73,8 +73,12 @@ helm upgrade vera deploy/helm/vera -n vera \
 ```
 
 With `environment=prod` and a JWT secret, the MCP is an OAuth 2.1 resource server and no
-longer serves the local principal. Manage secrets with your secret store rather than
-`--set` in production.
+longer serves the local principal. This enables the intentionally non-expiring JWT fallback,
+not browser
+login. For browser OAuth, also set `mcp.authAudience`, `mcp.oauthIssuer`, and
+`mcp.oauthJwksUrl` for an external OIDC provider. Keep the JWT secret until OAuth login and
+refresh pass end to end. Manage secrets with your secret store rather than `--set` in
+production.
 
 ## Choosing the graph backend
 

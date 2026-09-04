@@ -102,6 +102,24 @@ admin provisions everyone else through `POST /identity/users`. For GitOps, keep 
 out of git: leave `secrets.create=false` and put `VERA_BOOTSTRAP__ADMIN_API_KEY` in the
 externally created `vera-secrets` Secret instead of passing it on the command line.
 
+The command above enables the API-key-to-JWT fallback. For browser OAuth, pair MCP with an
+external OIDC authorization server that supports authorization code + PKCE and either dynamic
+client registration or pre-registered coding-tool clients:
+
+```bash
+helm upgrade vera deploy/helm/vera -n vera \
+  --set mcp.authAudience=https://mcp-vera.example.net \
+  --set mcp.oauthIssuer=https://login.example.net \
+  --set mcp.oauthJwksUrl=https://login.example.net/.well-known/jwks.json
+```
+
+The IdP must issue JWT access tokens for that audience and the `memory:read`,
+`memory:propose`, `memory:feedback`, and `memory:snapshot` scopes. Keep `mcp.jwtSecret`
+during rollout; remove it only after OAuth discovery, browser login, refresh, and an MCP tool
+call pass end to end. To link pre-provisioned users by email, its access token must also carry
+the trusted email and `email_verified: true`; otherwise a personal-only principal is created.
+With both configured, OAuth is advertised while fallback JWTs remain valid.
+
 ```mermaid
 flowchart TB
   ING[Ingress nginx + TLS] --> SA[vera-api Service] & SM[vera-mcp Service]
@@ -142,7 +160,8 @@ Every setting is an environment variable `VERA_<SECTION>__<FIELD>` (see
 | `VERA_RERANK__CROSS_ENCODER_ENABLED`, `VERA_RERANK__CROSS_ENCODER_PROVIDER` | stage-3 reranker (`llm` or `voyage`) |
 | `VERA_OBJECTSTORE__*` | S3-compatible object store |
 | `VERA_RESILIENCE__VALKEY_URL` | shared cache and rate limiter |
-| `VERA_MCP__JWT_SECRET`, `VERA_MCP__AUTH_ISSUER`, `VERA_MCP__AUTH_AUDIENCE` | MCP auth |
+| `VERA_MCP__JWT_SECRET`, `VERA_MCP__AUTH_ISSUER`, `VERA_MCP__AUTH_AUDIENCE` | Built-in MCP JWT fallback verification and non-expiring regular-user token issuance |
+| `VERA_MCP__OAUTH_ISSUER`, `VERA_MCP__OAUTH_JWKS_URL`, `VERA_MCP__OAUTH_ALGORITHMS` | External OAuth discovery and OIDC access-token verification; use `OAUTH_SIGNING_KEY` only for static-key testing |
 | `VERA_API__AUTH_REQUIRED`, `VERA_API__REGISTRATION_OPEN` | require a principal on the API; open or close self-service signup |
 | `VERA_BOOTSTRAP__ENABLED`, `VERA_BOOTSTRAP__ADMIN_API_KEY`, `VERA_BOOTSTRAP__ADMIN_EMAIL` | seed the init admin on a closed deployment (the key is a secret) |
 | `VERA_CONNECTORS__SPECS` | scheduled connectors (JSON) |

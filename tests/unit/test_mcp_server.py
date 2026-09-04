@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 from mcp.server.auth.provider import AccessToken
 from mcp.server.transport_security import TransportSecuritySettings
+from pydantic import ValidationError
 
 from vera.bootstrap import build_container, dispose_container
 from vera.config.settings import McpSettings, get_settings
@@ -216,6 +217,70 @@ def test_remote_capabilities_follow_token_scopes(monkeypatch: pytest.MonkeyPatch
 
     assert mcp_main.auth_profile(settings) == "remote-authenticated"
     assert mcp_main._capability_classes(settings) == ("read", "feedback")
+
+
+def test_external_oauth_configuration_disables_local_principal() -> None:
+    settings = get_settings().model_copy(
+        update={
+            "mcp": McpSettings(
+                oauth_issuer="https://login.example.com",
+                oauth_signing_key=_JWT_SECRET,  # type: ignore[arg-type]
+                oauth_algorithms=["HS256"],
+            )
+        }
+    )
+
+    assert mcp_main.auth_profile(settings) == "remote-authenticated"
+
+
+@pytest.mark.parametrize("field", ["oauth_issuer", "oauth_jwks_url"])
+def test_external_oauth_urls_require_tls_except_on_loopback(field: str) -> None:
+    unsafe = {
+        "oauth_issuer": "https://idp.example",
+        "oauth_jwks_url": "https://idp.example/jwks",
+    }
+    unsafe[field] = "http://idp.example/value"
+    with pytest.raises(ValidationError, match="must use HTTPS"):
+        McpSettings(**unsafe)
+
+    loopback = {
+        "oauth_issuer": "http://127.0.0.1:9000",
+        "oauth_jwks_url": "http://127.0.0.1:9000/jwks",
+    }
+    assert McpSettings(**loopback).model_dump()[field]
+
+
+@pytest.mark.parametrize(
+    "partial",
+    [
+        {"oauth_issuer": "https://idp.example"},
+        {"oauth_jwks_url": "https://idp.example/jwks"},
+    ],
+)
+def test_external_oauth_configuration_must_be_complete(partial: dict[str, str]) -> None:
+    with pytest.raises(ValidationError, match="must be set together"):
+        McpSettings(**partial)
+
+
+def test_required_scopes_are_limited_to_capability_scopes() -> None:
+    with pytest.raises(ValidationError, match="four MCP capability scopes"):
+        McpSettings(required_scopes=["memory:read", "memory:admin"])
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    [
+        {"auth_issuer": "HTTPS://IDP.EXAMPLE:443"},
+        {"auth_audience": "https://mcp.example?tenant=one"},
+        {
+            "oauth_issuer": "https://idp.example?tenant=one",
+            "oauth_jwks_url": "https://idp.example/jwks",
+        },
+    ],
+)
+def test_oauth_identifiers_reject_noncanonical_or_query_urls(invalid: dict[str, str]) -> None:
+    with pytest.raises(ValidationError):
+        McpSettings(**invalid)
 
 
 def test_mcp_timestamps_require_an_offset() -> None:

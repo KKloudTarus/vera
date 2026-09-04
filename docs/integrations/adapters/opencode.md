@@ -17,12 +17,10 @@ exact tool permissions, and a local bootstrap plugin. The config and plugin inva
 
 - Surfaces: OpenCode CLI (local). Cite a current OpenCode release; the fields below are stable
   in current docs.
-- Scopes: project-scoped `opencode.json` (or `opencode.jsonc`) at the repo root. Keep VERA in
-  the project file for a shared, reviewable setup.
+- Scopes: project-scoped `opencode.json` (or `opencode.jsonc`) at the repo root.
 - MCP config: the `mcp` object, keyed by server name, with `"$schema"` set.
-- Secrets: `{env:VAR}` expansion in values.
-- OAuth: supported (Dynamic Client Registration, or a manual client id and secret), or set
-  `oauth: false` to disable.
+- Authentication: browser OAuth with OpenCode-managed token refresh; a non-expiring
+  literal MCP JWT is the fallback.
 - Skills: `.opencode/skills/vera-memory/SKILL.md`.
 - Plugins: project-local `.opencode/plugins/vera.ts`, discovered without a package entry.
 - Permissions: exact `vera_*` tool keys set to `"ask"` after broader wildcard rules.
@@ -38,10 +36,7 @@ Write `opencode.json` at the repo root:
     "vera": {
       "type": "remote",
       "url": "https://mcp.vera.example/mcp",
-      "enabled": true,
-      "headers": {
-        "Authorization": "Bearer {env:VERA_MCP_TOKEN}"
-      }
+      "enabled": true
     }
   },
   "permission": {
@@ -56,21 +51,39 @@ Write `opencode.json` at the repo root:
 }
 ```
 
-A remote server uses `type: "remote"`, `url`, `enabled`, and `headers`. `timeout` (ms, default
-5000) and `oauth` are optional. OpenCode names MCP tools by sanitizing the config key and tool
-name, so the fixed key `vera` produces permission names such as
+A remote OAuth server uses `type: "remote"`, `url`, and `enabled`; omitting
+`oauth: false` enables discovery. `timeout` (ms, default
+5000) is optional. OpenCode names MCP tools by sanitizing the config key and tool name, so the
+fixed key `vera` produces permission names such as
 `vera_knowledge_propose`.
 
-## Secrets
-
-OpenCode expands `{env:VAR}` in config values. Keep the bearer token in the environment and
-reference it from `headers`, so nothing secret is written into `opencode.json`. For OAuth,
-OpenCode registers dynamically when the server supports RFC 7591, or takes a manual `clientId`
-and `clientSecret`; authenticate with:
+Authenticate after writing the endpoint-only config:
 
 ```bash
 opencode mcp auth vera
 ```
+
+OpenCode owns token storage and refresh. Remove a prior JWT header only after this
+login and the MCP connection succeed.
+
+## JWT Fallback
+
+An ordinary VERA user can exchange their REST API key for an MCP JWT without
+exposing either credential to the coding agent. Prepare one placeholder in the
+untracked config, then run:
+
+```bash
+python <VERA_REPO>/examples/integrations/vera-project-setup/install_jwt.py \
+  --api-url https://api.vera.example \
+  --mcp-url https://mcp.vera.example/mcp \
+  --config opencode.json
+```
+
+Set `oauth: false` and add `headers.Authorization = "Bearer <VERA_MCP_JWT>"`. The helper
+prompts without echo, requests/probes a JWT, and atomically replaces the placeholder. Add
+`--existing-token` when appropriate or `--rotate` after compromise or intentional credential
+rotation. The API
+key is not a valid MCP bearer token. Keep the resulting config untracked.
 
 ## Behavior Skill
 
@@ -121,7 +134,7 @@ On process restart, a resumed session can receive the idempotent reminder again.
   content, preserving unrelated configuration.
 - Disable: set `"enabled": false`.
 - Uninstall: remove the owned MCP entry and permission keys, remove the plugin and skill only
-  if unchanged, run `opencode mcp logout vera` for OAuth, and leave unrelated content intact.
+  if unchanged, and leave unrelated content intact.
 
 ## Known Limitations
 

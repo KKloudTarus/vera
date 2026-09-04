@@ -28,6 +28,7 @@ pytestmark = pytest.mark.asyncio
 _SECRET = "mcp-test-secret-long-enough-for-hs256-000"  # noqa: S105
 _WRONG_SECRET = "not-the-server-secret-long-enough"  # noqa: S105
 _ISS = "https://idp.example"
+_OAUTH_ISS = "https://login.example"
 _AUD = "https://api.vera.local"
 
 
@@ -38,12 +39,32 @@ def _app() -> httpx.ASGITransport:
                 jwt_secret=_SECRET,  # type: ignore[arg-type]
                 auth_issuer=_ISS,
                 auth_audience=_AUD,
+                scope_read="memory.read",
                 required_scopes=["memory.read"],
             )
         }
     )
     container = build_container(settings)
     app = build_server(container, settings).streamable_http_app()
+    mcp_main._replace_protected_resource_metadata(app, settings)
+    return httpx.ASGITransport(app=app)
+
+
+def _oauth_app() -> httpx.ASGITransport:
+    settings = get_settings().model_copy(
+        update={
+            "mcp": McpSettings(
+                oauth_issuer=_OAUTH_ISS,
+                oauth_signing_key=_SECRET,  # type: ignore[arg-type]
+                oauth_algorithms=["HS256"],
+                auth_audience=_AUD,
+                required_scopes=["memory:read"],
+            )
+        }
+    )
+    container = build_container(settings)
+    app = build_server(container, settings).streamable_http_app()
+    mcp_main._replace_protected_resource_metadata(app, settings)
     return httpx.ASGITransport(app=app)
 
 
@@ -152,9 +173,22 @@ async def test_metadata_endpoint_advertises_the_resource() -> None:
         resp = await client.get("/.well-known/oauth-protected-resource")
     assert resp.status_code == 200
     body = resp.json()
-    assert body["resource"].startswith(_AUD)
-    assert _ISS + "/" in body["authorization_servers"]
-    assert body["scopes_supported"] == ["memory.read"]
+    assert body["resource"] == _AUD
+    assert body["authorization_servers"] == [_ISS]
+    assert set(body["scopes_supported"]) == {
+        "memory:propose",
+        "memory:feedback",
+        "memory:snapshot",
+        "memory.read",
+    }
+
+
+async def test_external_oauth_metadata_advertises_the_real_authorization_server() -> None:
+    async with httpx.AsyncClient(transport=_oauth_app(), base_url="http://t") as client:
+        resp = await client.get("/.well-known/oauth-protected-resource")
+
+    assert resp.status_code == 200
+    assert resp.json()["authorization_servers"] == [_OAUTH_ISS]
 
 
 async def test_unauthenticated_call_gets_401_with_metadata_pointer() -> None:
@@ -213,12 +247,6 @@ async def test_expired_token_is_rejected() -> None:
     resp = await _post_with_token(
         {"iss": _ISS, "aud": _AUD, "sub": sub, "scope": "memory.read", "exp": int(time.time()) - 30}
     )
-    assert resp.status_code == 401
-
-
-async def test_token_without_expiry_is_rejected() -> None:
-    sub = "00000000-0000-0000-0000-000000000001"
-    resp = await _post_with_token({"iss": _ISS, "aud": _AUD, "sub": sub, "scope": "memory.read"})
     assert resp.status_code == 401
 
 

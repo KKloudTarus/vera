@@ -1,19 +1,18 @@
 """Validate the Tier-1 integration examples against each runtime's schema.
 
-The examples under ``examples/integrations`` are the configs an agent applies when
-wiring VERA into Claude Code, Codex, or OpenCode. This harness checks each one
-against the fields the runtime's official docs define and enforces the invariant
-that a bearer token is referenced from the environment, never written into a
-tracked file. A planted literal token must fail, so the negative test guards the
-guard.
+The examples under ``examples/integrations`` are the JWT-fallback configs an agent
+applies when wiring VERA into Claude Code, Codex, or OpenCode. This harness checks
+each one against the fields the runtime's official docs define and enforces the
+invariant that committed templates contain only a token placeholder. OAuth setup
+removes the static header after interactive login succeeds.
 
 Field references:
 - Claude Code `.mcp.json`: `mcpServers.<name>` with `type: "http"`, `url`, `headers`;
-  `${VAR}` expansion (https://code.claude.com/docs/en/mcp.md).
+  direct headers (https://code.claude.com/docs/en/mcp.md).
 - Codex `.codex/config.toml`: `mcp_servers.<name>` with `url` and
-  `bearer_token_env_var` (https://developers.openai.com/codex/mcp/).
+  `http_headers` (https://developers.openai.com/codex/mcp/).
 - OpenCode `opencode.json`: `mcp.<name>` with `type: "remote"`, `url`, `enabled`,
-  `headers`; `{env:VAR}` expansion (https://opencode.ai/docs/mcp-servers/).
+  and direct `headers` (https://opencode.ai/docs/mcp-servers/).
 """
 
 from __future__ import annotations
@@ -32,12 +31,7 @@ _EXAMPLES = Path(__file__).resolve().parents[2] / "examples" / "integrations"
 _ROOT = _EXAMPLES.parents[1]
 _SERVER = "vera"
 
-# Per-runtime environment-reference syntax for the Authorization header. A match
-# proves the token is not a literal in the tracked file.
-_HEADER_ENV_REF = {
-    "claude-code": re.compile(r"^Bearer \$\{[A-Z0-9_]+(:-[^}]*)?\}$"),
-    "opencode": re.compile(r"^Bearer \{env:[A-Z0-9_]+\}$"),
-}
+_AUTH_PLACEHOLDER = "Bearer <VERA_MCP_JWT>"
 
 
 def _load(path: Path) -> dict[str, Any]:
@@ -64,8 +58,8 @@ def validate_claude_code(config: dict[str, Any]) -> list[str]:
         problems.append("type must be 'http' for a remote streamable-HTTP server")
     if not str(entry.get("url", "")).startswith("https://"):
         problems.append("url must be an https endpoint")
-    if not _HEADER_ENV_REF["claude-code"].match(_auth_header(entry)):
-        problems.append("Authorization must reference ${VAR}, not a literal token")
+    if _auth_header(entry) != _AUTH_PLACEHOLDER:
+        problems.append("Authorization must use the MCP JWT template placeholder")
     return problems
 
 
@@ -83,10 +77,11 @@ def validate_codex(config: dict[str, Any]) -> list[str]:
     entry = servers[_SERVER]
     if not str(entry.get("url", "")).startswith("https://"):
         problems.append("url must be an https endpoint")
-    if entry.get("bearer_token_env_var") != "VERA_MCP_TOKEN":
-        problems.append("bearer_token_env_var must reference VERA_MCP_TOKEN")
-    if "http_headers" in entry:
-        problems.append("tracked Codex config must not carry literal HTTP headers")
+    headers = entry.get("http_headers")
+    if not isinstance(headers, dict) or headers.get("Authorization") != _AUTH_PLACEHOLDER:
+        problems.append("http_headers.Authorization must use the MCP JWT template placeholder")
+    if "bearer_token_env_var" in entry:
+        problems.append("Codex config must not use an environment token reference")
     if entry.get("default_tools_approval_mode") != "writes":
         problems.append("default_tools_approval_mode must be 'writes'")
     return problems
@@ -104,10 +99,12 @@ def validate_opencode(config: dict[str, Any]) -> list[str]:
         problems.append("type must be 'remote'")
     if entry.get("enabled") is not True:
         problems.append("enabled must be true")
+    if entry.get("oauth") is not False:
+        problems.append("oauth must be false for literal JWT authentication")
     if not str(entry.get("url", "")).startswith("https://"):
         problems.append("url must be an https endpoint")
-    if not _HEADER_ENV_REF["opencode"].match(_auth_header(entry)):
-        problems.append("Authorization must reference {env:VAR}, not a literal token")
+    if _auth_header(entry) != _AUTH_PLACEHOLDER:
+        problems.append("Authorization must use the MCP JWT template placeholder")
     permissions = config.get("permission")
     if not isinstance(permissions, dict):
         problems.append("permission rules are required")
@@ -134,14 +131,13 @@ _VALIDATORS = {
 
 
 @pytest.mark.parametrize("runtime", sorted(_VALIDATORS))
-def test_example_config_is_valid_and_secret_free(runtime: str) -> None:
+def test_example_config_is_valid_and_contains_only_token_placeholder(runtime: str) -> None:
     validator, path = _VALIDATORS[runtime]
     assert path.is_file(), f"missing example config for {runtime}: {path}"
     assert validator(_load(path)) == []
 
 
 def test_validator_rejects_a_literal_token() -> None:
-    # A token written into the file (rather than an env reference) must be caught.
     leaked = {
         "mcpServers": {
             _SERVER: {
@@ -175,22 +171,39 @@ def test_setup_skill_has_two_inputs_and_endpoint_smoke_checks() -> None:
     assert "description:" in frontmatter
 
     input_contract = skill.split("```yaml", 1)[1].split("```", 1)[0]
-    required = re.findall(r"^  (VERA_[A-Z0-9_]+):", input_contract, flags=re.MULTILINE)
+    required_block = input_contract.split("remote_auth_one_of:", 1)[0]
+    required = re.findall(r"^  (VERA_[A-Z0-9_]+):", required_block, flags=re.MULTILINE)
     assert required == ["VERA_API_URL", "VERA_MCP_URL"]
+
+    auth_contract = skill.split("```yaml", 2)[2].split("```", 1)[0]
+    auth_inputs = re.findall(r"^  (VERA_[A-Z0-9_]+):", auth_contract, flags=re.MULTILINE)
+    assert auth_inputs == ["VERA_API_KEY", "VERA_MCP_TOKEN"]
 
     preflight = (_EXAMPLES / "vera-project-setup" / "references" / "preflight.md").read_text()
     apply_spec = (_EXAMPLES / "vera-project-setup" / "references" / "apply.md").read_text()
+    jwt_helper = (_EXAMPLES / "vera-project-setup" / "install_jwt.py").read_text()
 
     assert "${VERA_API_URL}/health/live" in preflight
     assert "${VERA_API_URL}/health/ready" in preflight
     assert "VERA_MCP_URL" in preflight
-    assert "`OPTIONS` or `HEAD`" in preflight
+    assert "unauthenticated JSON-RPC `initialize`" in preflight
+    assert "only for a loopback URL" in preflight
+    assert "authorization-server metadata" in preflight
+    assert "PKCE `S256`" in preflight
+    assert "/identity/mcp-token" in jwt_helper
+    assert "JSON-RPC `initialize`" in preflight
+    assert re.search(r"Never use the API key as\s+the MCP bearer token", preflight)
+    assert "four coding scopes" in preflight
+    assert preflight.index("authorization-server metadata") < preflight.index("install_jwt.py")
     assert all(runtime in skill for runtime in ("Claude Code", "Codex", "OpenCode"))
     assert "references/preflight.md" in skill
     assert "references/apply.md" in skill
     assert "restart the coding tool" in skill
     assert "tools are visible" in skill
     assert "Report that VERA setup completed" in apply_spec
+    assert "hidden terminal prompt" in skill
+    assert "never repeat or print it" in skill
+    assert "a Claude Code session\nselects Claude Code" in skill
     assert len(skill.splitlines()) < 120
     assert all(
         detail not in skill
@@ -200,14 +213,26 @@ def test_setup_skill_has_two_inputs_and_endpoint_smoke_checks() -> None:
 
 def test_runtime_setup_specs_are_small_and_runtime_specific() -> None:
     expected = {
-        "claude-code": (".mcp.json", "permissionDecision", "claude mcp", "node --version"),
+        "claude-code": (
+            ".mcp.json",
+            "<VERA_MCP_JWT>",
+            "permissionDecision",
+            "claude mcp",
+            "node --version",
+        ),
         "codex": (
             ".codex/config.toml",
+            "http_headers.Authorization",
             "default_tools_approval_mode",
             "codex mcp",
             "node --version",
         ),
-        "opencode": ("opencode.json", 'permission.vera_* = "ask"', "opencode mcp"),
+        "opencode": (
+            "opencode.json",
+            "<VERA_MCP_JWT>",
+            'permission.vera_* = "ask"',
+            "opencode mcp",
+        ),
     }
 
     for runtime, fragments in expected.items():
@@ -215,6 +240,12 @@ def test_runtime_setup_specs_are_small_and_runtime_specific() -> None:
         assert len(spec.splitlines()) < 100
         assert "../vera-project-setup/SKILL.md" in spec
         assert all(fragment in spec for fragment in fragments)
+        assert "Remote OAuth" in spec
+        assert "only after OAuth login" in spec
+
+    codex_spec = (_EXAMPLES / "codex" / "SPEC.md").read_text()
+    assert "codex mcp list" in codex_spec
+    assert "codex mcp get" in codex_spec and "may expose the JWT" in codex_spec
 
 
 def test_claude_code_hook_config_is_project_scoped_and_never_auto_approves() -> None:

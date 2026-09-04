@@ -328,8 +328,9 @@ golden.json`.
   isolation holds even if a query forgets its `WHERE group_id`.
 - **Authentication.** API keys (a 256-bit random secret, stored only as a SHA-256 hash) and
   OIDC (validated by signing key or live JWKS, with just-in-time provisioning). The MCP
-  server is an OAuth 2.1 Resource Server (RFC 9728): an unauthenticated call gets a 401 that
-  points to the protected-resource metadata, and a token missing the required scope is
+  server is an OAuth 2.1 Resource Server (RFC 9728) that accepts browser-login tokens from a
+  configured external IdP and optional built-in fallback JWTs. An unauthenticated call gets a
+  401 that points to protected-resource metadata, and a token missing the required scope is
   rejected before any tool runs.
 - **Authorization.** Roles are totally ordered (VIEWER < MEMBER < ADMIN < OWNER), so a check
   is one comparison. A workspace admin can issue, rotate, and revoke API keys for principals
@@ -356,8 +357,9 @@ golden.json`.
 
 ## Interfaces
 
-**HTTP API** (`vera-api`): identity and tenancy administration, `/memory/search` (with
-`as_of`), `/memory/explore` (multi-hop), and `DELETE /memory/sources/{id}` (retraction).
+**HTTP API** (`vera-api`): identity and tenancy administration, regular-user MCP JWT issuance
+at `POST /identity/mcp-token`, `/memory/search` (with `as_of`), `/memory/explore` (multi-hop),
+and `DELETE /memory/sources/{id}` (retraction).
 Writing to memory goes through connectors and curation, not a raw ingest endpoint, so trust
 and provenance are never bypassed.
 

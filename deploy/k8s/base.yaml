@@ -29,6 +29,12 @@ data:
   VERA_API__AUTH_REQUIRED: "true"
   VERA_MCP__ALLOWED_HOSTS: '["vera-mcp","vera-mcp:*","vera-mcp.vera.svc.cluster.local","vera-mcp.vera.svc.cluster.local:*","mcp.vera.local","mcp.vera.local:*"]'
   VERA_MCP__ALLOWED_ORIGINS: '["https://mcp.vera.local"]'
+  # For browser OAuth, set AUTH_AUDIENCE to the public /mcp URL and uncomment the external
+  # OIDC issuer/JWKS settings. Keep JWT_SECRET as fallback until OAuth passes end to end.
+  # VERA_MCP__AUTH_AUDIENCE: "https://mcp.vera.local"
+  # VERA_MCP__OAUTH_ISSUER: "https://login.example.com"
+  # VERA_MCP__OAUTH_JWKS_URL: "https://login.example.com/.well-known/jwks.json"
+  # VERA_MCP__OAUTH_ALGORITHMS: '["RS256"]'
 ---
 # Fill these in before applying (or use an external secret manager / sealed-secrets).
 apiVersion: v1

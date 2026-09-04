@@ -82,12 +82,13 @@ transcript, request id, and unknown requested tool names are never exported.
 ## Authentication
 
 The server runs in one of two authentication profiles, decided by the environment and
-whether a JWT secret is configured.
+whether built-in JWT or external OAuth verification is configured.
 
 ### Local Development (unauthenticated)
 
-When `VERA_ENVIRONMENT=local` **and** `VERA_MCP__JWT_SECRET` is unset, the server runs with
-no authentication. Every call acts as a single fixed local principal
+When `VERA_ENVIRONMENT=local`, `VERA_MCP__JWT_SECRET` is unset, and no external OAuth
+signing key or JWKS URL is configured, the server runs with no authentication. Every
+call acts as a single fixed local principal
 (`VERA_MCP__LOCAL_PRINCIPAL_ID`, a stable default id created on startup) that has a personal
 scope only. No token is required.
 
@@ -96,9 +97,11 @@ or remote network: it grants any caller full access to that principal's memory.
 
 ### Authenticated (OAuth 2.1 Resource Server)
 
-When `VERA_MCP__JWT_SECRET` is set, the server is an OAuth 2.1 Resource Server (RFC 9728).
-Every call requires a valid bearer JWT. The token is checked for signature, issuer,
-audience, expiry, and the required scopes; its `sub` claim must be a real principal id. An
+When built-in JWT or external OAuth verification is configured, the server is an OAuth 2.1
+Resource Server (RFC 9728). Every call requires a valid bearer JWT. The token is checked for
+signature, issuer, audience, and the required scopes. External OIDC tokens must also have a valid
+expiry. A built-in token's `sub` is a VERA principal id; an external OIDC token's verified
+`iss|sub` is JIT-mapped to one. An
 audience bound to this resource server (RFC 8707 / RFC 9728) prevents a token minted for
 another service from being replayed here. An unauthenticated or failing call returns `401`
 with a pointer to the protected-resource metadata.
@@ -111,18 +114,42 @@ sequenceDiagram
   C->>M: tool call (no token)
   M-->>C: 401 + /.well-known/oauth-protected-resource
   C->>A: obtain token (audience = this MCP URL)
-  A-->>C: JWT (sub = principal id, scopes)
+  A-->>C: audience-bound JWT with MCP scopes
   C->>M: tool call + Authorization: Bearer JWT
-  M->>M: verify signature, iss, aud, exp, scope, sub
+  M->>M: verify signature, iss, aud, scope, sub (+ exp for OIDC)
   M-->>C: result (or 401 on any failed check)
 ```
 
-The resource server verifies audience binding, expiry, and scope. The wider OAuth
-authorization-server lifecycle (PKCE, device flow, token refresh, and revocation) is a
-client and deployment concern, not the resource server's.
+The resource server verifies audience binding and scope, plus expiry for external OAuth. With an external
+authorization server, coding clients perform authorization-code + PKCE login and own secure
+token storage and refresh. The IdP must expose valid authorization-server discovery and either
+dynamic client registration or pre-registered coding-tool clients.
 
-Any non-local environment (`dev`, `staging`, `prod`) must set `VERA_MCP__JWT_SECRET`.
-Without it, the server has no way to resolve a principal and every tool call fails.
+VERA also provides `POST /identity/mcp-token` on the REST API for coding clients that use
+literal bearer headers. Any principal authenticated with its VERA API key can call this
+endpoint; it returns an intentionally non-expiring MCP JWT whose `sub` is that same principal. It is not an
+admin-only endpoint and it never accepts a target principal id. The API key itself is not a
+valid MCP credential.
+
+The API and MCP processes must share the MCP JWT secret, algorithm, issuer, and audience.
+The endpoint returns `503` when MCP token issuance is not configured. This exchange is not an
+OAuth authorization server and provides no refresh token. Tokens issued by this temporary
+bootstrap endpoint intentionally do not expire; protect the untracked config as a credential and
+rotate the shared signing key to invalidate issued tokens.
+
+```bash
+curl -s -X POST https://api.vera.example/identity/mcp-token \
+  -H "authorization: Bearer <VERA_API_KEY>" \
+  -H "content-type: application/json" \
+  -d '{"scopes":["memory:read","memory:propose","memory:feedback","memory:snapshot"]}'
+```
+
+Omit the body for a read-only token. Token scopes are limited to the four MCP capability
+classes. The response explicitly returns `expires_in: null` for the non-expiring JWT.
+
+Any non-local environment (`dev`, `staging`, `prod`) must configure built-in JWT, external
+OAuth verification, or both. Without either, the server has no way to resolve a principal and
+every tool call fails.
 
 Configure the authenticated profile in `.env`:
 
@@ -133,16 +160,34 @@ VERA_MCP__AUTH_AUDIENCE=https://mcp.vera.local  # this resource server's audienc
 # VERA_MCP__REQUIRED_SCOPES defaults to ["memory:read"]
 ```
 
+For browser OAuth, configure an authorization server that issues JWT access tokens for the
+MCP audience and VERA scopes:
+
+```bash
+VERA_MCP__AUTH_AUDIENCE=https://mcp.vera.example
+VERA_MCP__OAUTH_ISSUER=https://login.example.com
+VERA_MCP__OAUTH_JWKS_URL=https://login.example.com/.well-known/jwks.json
+VERA_MCP__OAUTH_ALGORITHMS=["RS256"]
+```
+
+Only an external token with `email_verified: true` may use its email to link an existing
+principal; otherwise VERA links only `iss|sub` and JIT-creates a personal principal. Workspace
+membership is still resolved server-side. Prefer JWKS key rotation;
+`VERA_MCP__OAUTH_SIGNING_KEY` exists for local/static-key testing. If built-in JWT is also
+configured, both token types remain valid while protected-resource metadata advertises
+`VERA_MCP__OAUTH_ISSUER` for interactive login.
+
 Discover the protected-resource metadata:
 
 ```bash
 curl -s http://localhost:8080/.well-known/oauth-protected-resource
 ```
 
-In production a real authorization server issues the tokens. For local testing of the
-authenticated path you can mint one with the shared secret. The token's `sub` must be a
-real principal id (the `principal_id` from `/identity/register` on an open deployment, or from
-`/identity/users` when an admin provisions the account):
+The built-in REST exchange above is the fallback token path for regular users. A deployment may
+pair the resource server with a separate authorization server for browser login. For local operator
+testing, you can mint a token with the shared secret. Its `sub` must be a real principal id
+(the `principal_id` from `/identity/register` on an open deployment, or from `/identity/users`
+when an admin provisions the account):
 
 ```python
 import jwt, time
@@ -161,8 +206,8 @@ token = jwt.encode(
 print(token)
 ```
 
-Hand-minted HS256 tokens are a local convenience only. A real deployment issues short-lived
-tokens from an authorization server and never persists long-lived secrets in tracked files.
+Hand-minted HS256 tokens are a local convenience only. A real deployment uses the authenticated
+REST exchange or a separate authorization server and never exposes the signing secret.
 
 The principal must be a member of the workspace whose facts it wants to read (the principal
 that created a tenancy is its owner and can read it). A token missing a required scope is
