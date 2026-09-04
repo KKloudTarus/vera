@@ -13,7 +13,7 @@ from typing import Any
 
 import aioboto3
 from botocore.config import Config
-from botocore.exceptions import ClientError
+from botocore.exceptions import BotoCoreError, ClientError
 
 from vera.config.settings import ObjectStoreSettings
 from vera.domain.ports.object_store import StoredObject
@@ -57,15 +57,18 @@ class S3ObjectStore:
 
     async def put(self, *, key: str, data: bytes, content_type: str) -> StoredObject:
         content_hash = "sha256:" + hashlib.sha256(data).hexdigest()
-        async with self._client() as client:
-            await self._ensure_bucket(client)
-            await client.put_object(
-                Bucket=self._settings.bucket,
-                Key=key,
-                Body=data,
-                ContentType=content_type,
-                Metadata={"content-hash": content_hash},
-            )
+        try:
+            async with self._client() as client:
+                await self._ensure_bucket(client)
+                await client.put_object(
+                    Bucket=self._settings.bucket,
+                    Key=key,
+                    Body=data,
+                    ContentType=content_type,
+                    Metadata={"content-hash": content_hash},
+                )
+        except (BotoCoreError, ClientError) as exc:
+            raise InfrastructureError(f"object write failed: {key}") from exc
         return StoredObject(key=key, size=len(data), content_hash=content_hash)
 
     async def get(self, *, key: str) -> bytes:
@@ -74,7 +77,7 @@ class S3ObjectStore:
                 response = await client.get_object(Bucket=self._settings.bucket, Key=key)
                 async with response["Body"] as stream:
                     return await stream.read()
-            except ClientError as exc:
+            except (BotoCoreError, ClientError) as exc:
                 raise InfrastructureError(f"object not found: {key}") from exc
 
     async def presigned_url(self, *, key: str, expires_in_s: int = 3600) -> str:
@@ -87,5 +90,8 @@ class S3ObjectStore:
 
     async def delete(self, *, key: str) -> None:
         # S3 delete_object is idempotent: deleting an absent key returns success.
-        async with self._client() as client:
-            await client.delete_object(Bucket=self._settings.bucket, Key=key)
+        try:
+            async with self._client() as client:
+                await client.delete_object(Bucket=self._settings.bucket, Key=key)
+        except (BotoCoreError, ClientError) as exc:
+            raise InfrastructureError(f"object deletion failed: {key}") from exc

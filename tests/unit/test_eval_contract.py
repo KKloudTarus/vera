@@ -106,6 +106,7 @@ def _build_report(
             "service_version": "0.1.0",
             "git_sha": "0123456789abcdef0123456789abcdef01234567",
             "git_dirty": True,
+            **({"app_image_digest": "sha256:" + "a" * 64} if profile == "release" else {}),
             "dataset_sha256": dataset_sha256(),
             "checklist_sha256": sha256_file(ROOT / "checklist.json"),
             "action_catalog_sha256": sha256_file(ROOT / "action_catalog.json"),

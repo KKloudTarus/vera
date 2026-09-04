@@ -83,13 +83,19 @@ spec:
       labels:
         app.kubernetes.io/instance: {{ .Release.Name }}
         vera.component: neo4j
+      annotations:
+        checksum/admin-secret: {{ printf "%s:%s" "neo4j" .Values.graph.neo4j.password | sha256sum }}
+        checksum/external-secrets: {{ .Values.secrets.externalRevision | quote }}
     spec:
       containers:
         - name: neo4j
           image: {{ .Values.graph.neo4j.image }}
           env:
             - name: NEO4J_AUTH
-              value: "neo4j/{{ .Values.graph.neo4j.password }}"
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "vera.fullname" . }}-secrets
+                  key: NEO4J_AUTH
           ports:
             - containerPort: 7687
             - containerPort: 7474

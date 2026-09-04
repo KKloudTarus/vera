@@ -2,6 +2,29 @@
 # No managed single-cloud services (no SQS/DynamoDB/etc.).
 name: vera
 
+x-app-build: &app-build
+  context: .
+  args:
+    VERA_BUILD_GIT_SHA: ${VERA_BUILD_GIT_SHA:-unknown}
+    VERA_BUILD_GIT_DIRTY: ${VERA_BUILD_GIT_DIRTY:-true}
+
+x-app-image: &app-image "${VERA_APP_IMAGE:-vera-app:local}"
+x-database-provision-image: &database-provision-image "${VERA_DB_PROVISION_IMAGE:-vera-database-provision:local}"
+
+x-app-environment: &app-env
+  VERA_DB__DSN: postgresql+asyncpg://vera_runtime:${VERA_DB_RUNTIME_PASSWORD_URLENCODED:-${VERA_DB_RUNTIME_PASSWORD:-vera-runtime}}@postgres:5432/vera
+  VERA_DB__ROLE_ENFORCEMENT: "true"
+  VERA_NEO4J__URI: bolt://neo4j:7687
+  VERA_NEO4J__USER: neo4j
+  VERA_NEO4J__PASSWORD: vera-local-pass
+  VERA_MEMORY__PROVIDER: graphiti
+  VERA_FALKOR__HOST: falkordb
+  VERA_FALKOR__PORT: 6379
+  VERA_RESILIENCE__VALKEY_URL: redis://valkey:6379/0
+  VERA_OBJECTSTORE__ENDPOINT_URL: http://minio:9000
+  VERA_OBJECTSTORE__ACCESS_KEY: minioadmin
+  VERA_OBJECTSTORE__SECRET_KEY: minioadmin
+
 services:
   postgres:
     # pgvector's image is the official postgres:18 plus the `vector` extension, so the data
@@ -55,63 +78,74 @@ services:
   # default `docker compose up` brings only local infra; run them with:
   #   docker compose --profile app up --build
   migrate:
-    build: .
+    image: *app-image
+    build: *app-build
     profiles: ["app"]
     command: ["alembic", "upgrade", "head"]
     env_file:
-      - path: .env
+      - path: ${VERA_RUNTIME_ENV_FILE:-.env}
         required: false
-    environment: &app_env
+    environment:
       VERA_DB__DSN: postgresql+asyncpg://vera:vera@postgres:5432/vera
-      VERA_NEO4J__URI: bolt://neo4j:7687
-      VERA_NEO4J__USER: neo4j
-      VERA_NEO4J__PASSWORD: vera-local-pass
-      VERA_MEMORY__PROVIDER: graphiti
-      VERA_FALKOR__HOST: falkordb
-      VERA_FALKOR__PORT: 6379
-      VERA_RESILIENCE__VALKEY_URL: redis://valkey:6379/0
-      VERA_OBJECTSTORE__ENDPOINT_URL: http://minio:9000
-      VERA_OBJECTSTORE__ACCESS_KEY: minioadmin
-      VERA_OBJECTSTORE__SECRET_KEY: minioadmin
     depends_on:
       postgres:
         condition: service_healthy
 
-  api:
-    build: .
+  database-provision:
+    image: *database-provision-image
+    build:
+      context: .
+      dockerfile: deploy/postgres/Dockerfile
     profiles: ["app"]
-    env_file:
-      - path: .env
-        required: false
-    environment: *app_env
-    ports: ["8000:8000"]
+    environment:
+      PGPASSWORD: vera
+      VERA_RUNTIME_PASSWORD: ${VERA_DB_RUNTIME_PASSWORD:-vera-runtime}
+      VERA_WORKER_PASSWORD: ${VERA_DB_WORKER_PASSWORD:-vera-worker}
+      VERA_SCALER_PASSWORD: ${VERA_DB_SCALER_PASSWORD:-}
     depends_on:
       migrate:
+        condition: service_completed_successfully
+
+  api:
+    image: *app-image
+    build: *app-build
+    profiles: ["app"]
+    env_file:
+      - path: ${VERA_RUNTIME_ENV_FILE:-.env}
+        required: false
+    environment: *app-env
+    ports: ["8000:8000"]
+    depends_on:
+      database-provision:
         condition: service_completed_successfully
 
   worker:
-    build: .
+    image: *app-image
+    build: *app-build
     profiles: ["app"]
     command: ["python", "-m", "vera.entrypoints.worker.main"]
     env_file:
-      - path: .env
+      - path: ${VERA_RUNTIME_ENV_FILE:-.env}
         required: false
-    environment: *app_env
+    environment:
+      <<: *app-env
+      VERA_DB__DSN: postgresql+asyncpg://vera_worker_runtime:${VERA_DB_WORKER_PASSWORD_URLENCODED:-${VERA_DB_WORKER_PASSWORD:-vera-worker}}@postgres:5432/vera
     depends_on:
-      migrate:
+      database-provision:
         condition: service_completed_successfully
 
   mcp:
-    build: .
+    image: *app-image
+    build: *app-build
     profiles: ["app"]
     command: ["python", "-m", "vera.entrypoints.mcp.main"]
     env_file:
-      - path: .env
+      - path: ${VERA_RUNTIME_ENV_FILE:-.env}
         required: false
-    environment: *app_env
+    environment: *app-env
     ports: ["127.0.0.1:8080:8080"]
     depends_on:
-      migrate:
+      database-provision:
         condition: service_completed_successfully
 
 volumes:

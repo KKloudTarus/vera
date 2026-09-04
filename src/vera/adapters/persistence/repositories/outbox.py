@@ -13,6 +13,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from vera.adapters.persistence.models.ingestion import IngestionJobRow
+from vera.observability.cost import provider_budget_trace_context
 from vera.shared.types import JsonDict
 
 
@@ -36,7 +37,7 @@ class SqlAlchemyOutboxRepository:
                 source_id=source_id,
                 dedup_uuid=dedup_uuid,
                 payload=payload,
-                trace_context=trace_context or {},
+                trace_context=provider_budget_trace_context(trace_context),
             )
             .on_conflict_do_nothing(index_elements=["dedup_uuid"])
         )

@@ -5,14 +5,16 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import math
 import os
 import secrets
 import signal
 import subprocess
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import Any, Protocol, TypeVar
 
 STATUSES = frozenset({"PASS", "FAIL", "BLOCKED", "NOT_APPLICABLE"})
+_T = TypeVar("_T")
 
 
 class AdapterProtocolError(RuntimeError):
@@ -21,6 +23,21 @@ class AdapterProtocolError(RuntimeError):
 
 class _OutputLimitExceeded(RuntimeError):
     pass
+
+
+async def finish_finalizer(task: asyncio.Task[_T]) -> _T:
+    cancelled = False
+    while True:
+        try:
+            result = await asyncio.shield(task)
+            break
+        except asyncio.CancelledError:
+            if task.done():
+                raise
+            cancelled = True
+    if cancelled:
+        raise asyncio.CancelledError
+    return result
 
 
 async def _read_limited(stream: asyncio.StreamReader, limit: int, stream_name: str) -> bytes:
@@ -126,6 +143,7 @@ class ActionResponse:
     evidence: tuple[dict[str, Any], ...] = ()
     created_resources: tuple[str, ...] = ()
     removed_resources: tuple[str, ...] = ()
+    cost_usd: float | None = None
 
     @classmethod
     def from_dict(
@@ -144,6 +162,7 @@ class ActionResponse:
             "evidence",
             "created_resources",
             "removed_resources",
+            "cost_usd",
         }
         unknown = set(value) - allowed
         if unknown:
@@ -164,6 +183,7 @@ class ActionResponse:
         created = value.get("created_resources", [])
         removed = value.get("removed_resources", [])
         message = value.get("message", "")
+        cost_usd = value.get("cost_usd")
         if not isinstance(observations, dict):
             raise AdapterProtocolError("adapter observations must be an object")
         if not isinstance(metrics, list) or not all(isinstance(item, dict) for item in metrics):
@@ -192,6 +212,13 @@ class ActionResponse:
             raise AdapterProtocolError("removed_resources must be an array of strings")
         if not isinstance(message, str):
             raise AdapterProtocolError("adapter message must be a string")
+        if cost_usd is not None and (
+            isinstance(cost_usd, bool)
+            or not isinstance(cost_usd, (int, float))
+            or not math.isfinite(float(cost_usd))
+            or cost_usd < 0
+        ):
+            raise AdapterProtocolError("cost_usd must be a finite non-negative number or null")
         return cls(
             status=status,
             observations=observations,
@@ -200,6 +227,7 @@ class ActionResponse:
             evidence=tuple(evidence),
             created_resources=tuple(created),
             removed_resources=tuple(removed),
+            cost_usd=float(cost_usd) if cost_usd is not None else None,
         )
 
 
@@ -268,19 +296,19 @@ class SubprocessActionDriver:
                 timeout=self.timeout_s,
             )
         except TimeoutError:
-            await asyncio.shield(_terminate_process_tree(process))
+            await finish_finalizer(asyncio.create_task(_terminate_process_tree(process)))
             return ActionResponse(
                 status="BLOCKED",
                 message=f"adapter timed out after {self.timeout_s:g} seconds",
             )
         except _OutputLimitExceeded as exc:
-            await asyncio.shield(_terminate_process_tree(process))
+            await finish_finalizer(asyncio.create_task(_terminate_process_tree(process)))
             return ActionResponse(status="BLOCKED", message=str(exc))
         except asyncio.CancelledError:
-            await asyncio.shield(_terminate_process_tree(process))
+            await finish_finalizer(asyncio.create_task(_terminate_process_tree(process)))
             raise
         except BaseException:
-            await asyncio.shield(_terminate_process_tree(process))
+            await finish_finalizer(asyncio.create_task(_terminate_process_tree(process)))
             raise
         if process.returncode != 0:
             return ActionResponse(

@@ -25,11 +25,19 @@ from evals.runner import (
     _candidate_output_present,
     _normalize_metric,
     _observation_contract_errors,
+    _order_cases,
     _prepare_candidate_for_judging,
     _resolve_inputs,
     _strip_gold_labels,
 )
-from evals.validate import load_json, validate_report
+from evals.validate import load_json, source_tree_sha256, validate_report
+from vera.observability.cost import (
+    ProviderBudgetContext,
+    ProviderBudgetExceededError,
+    reserve_provider_call,
+    reset_provider_budget_context,
+    set_provider_budget_context,
+)
 
 EVAL_ROOT = Path(__file__).resolve().parents[1]
 _PART = re.compile(r"([^\[\]]+)(?:\[(\d+)\])?")
@@ -42,6 +50,43 @@ _ALL_EFFECTS = [
     "load",
     "cleanup",
 ]
+
+
+def test_source_tree_digest_covers_release_assets(tmp_path: Path) -> None:
+    eval_root = tmp_path / "evals"
+    deploy_file = tmp_path / "deploy" / "alerts.yaml"
+    docs_file = tmp_path / "docs" / "runbook.md"
+    eval_root.mkdir()
+    deploy_file.parent.mkdir()
+    docs_file.parent.mkdir()
+    deploy_file.write_text("alert: one\n", encoding="utf-8")
+    docs_file.write_text("recover one\n", encoding="utf-8")
+    initial = source_tree_sha256(eval_root)
+
+    deploy_file.write_text("alert: two\n", encoding="utf-8")
+    after_deploy = source_tree_sha256(eval_root)
+    docs_file.write_text("recover two\n", encoding="utf-8")
+    after_docs = source_tree_sha256(eval_root)
+
+    assert initial != after_deploy
+    assert after_deploy != after_docs
+
+
+def test_source_tree_digest_covers_file_mode_and_symlink_type(tmp_path: Path) -> None:
+    eval_root = tmp_path / "evals"
+    script = eval_root / "release_stack.sh"
+    eval_root.mkdir()
+    script.write_text("target", encoding="utf-8")
+    regular = source_tree_sha256(eval_root)
+
+    script.chmod(0o755)
+    executable = source_tree_sha256(eval_root)
+    script.unlink()
+    script.symlink_to("target")
+    symlink = source_tree_sha256(eval_root)
+
+    assert regular != executable
+    assert executable != symlink
 
 
 def _set_path(root: dict[str, Any], path: str, value: Any) -> None:
@@ -177,10 +222,14 @@ class SyntheticDriver:
         *,
         unsupported: set[str] | None = None,
         cleanup_complete: bool = True,
+        agent_cost_usd: float = 0.0,
+        check_cost_usd: float | None = 0.0,
     ) -> None:
         self._cases = {case["case_id"]: case for case in cases}
         self._unsupported = unsupported or set()
         self._cleanup_complete = cleanup_complete
+        self._agent_cost_usd = agent_cost_usd
+        self._check_cost_usd = check_cost_usd
         self._created_cases: set[str] = set()
         self._emitted_case_data: set[str] = set()
         self.calls: list[str] = []
@@ -201,6 +250,7 @@ class SyntheticDriver:
                         "cleanup_supported": True,
                     }
                 },
+                cost_usd=0.0,
             )
         if request.action == "cleanup.run_scope":
             discovered = sorted(f"resource:{case_id}" for case_id in self._created_cases)
@@ -218,6 +268,7 @@ class SyntheticDriver:
                     }
                 },
                 removed_resources=tuple(removed),
+                cost_usd=0.0,
             )
         if request.action == "__check__":
             return ActionResponse(
@@ -228,6 +279,7 @@ class SyntheticDriver:
                     {"label": label, "kind": "file", "synthetic": True}
                     for label in request.inputs["check"]["evidence"]
                 ),
+                cost_usd=self._check_cost_usd,
             )
         if request.action in {"parity.verify", "result.score"}:
             raise AssertionError(f"runner-owned action reached adapter: {request.action}")
@@ -253,7 +305,7 @@ class SyntheticDriver:
                 "model_id": "synthetic-candidate-model",
                 "prompt_version": "synthetic-v1",
                 "latency_ms": 1,
-                "cost_usd": 0,
+                "cost_usd": self._agent_cost_usd,
             }
         for step in [*case["steps"], *case.get("cleanup", [])]:
             for key, value in step["input"].items():
@@ -311,6 +363,7 @@ class SyntheticDriver:
                         "query_id": query["query_id"],
                         "repetition_index": repetition_index,
                         "token_usage": {"total_tokens": 10},
+                        "cost_usd": self._agent_cost_usd,
                     }
                     for repetition_index in range(10)
                     for question_index, query in enumerate(fixture["queries"])
@@ -379,6 +432,7 @@ class SyntheticDriver:
             metrics=adapter_metrics,
             evidence=adapter_evidence,
             created_resources=created,
+            cost_usd=self._agent_cost_usd if request.action == "agent.run" else 0.0,
         )
 
 
@@ -393,8 +447,23 @@ class FailingActionDriver(SyntheticDriver):
                 metrics=response.metrics,
                 evidence=response.evidence,
                 created_resources=response.created_resources,
+                cost_usd=0.25,
             )
         return response
+
+
+class SlowActionDriver(SyntheticDriver):
+    async def execute(self, request: ActionRequest) -> ActionResponse:
+        if request.action not in {"safety.preflight", "cleanup.run_scope", "__check__"}:
+            await asyncio.sleep(0.05)
+        return await super().execute(request)
+
+
+class SlowCheckDriver(SyntheticDriver):
+    async def execute(self, request: ActionRequest) -> ActionResponse:
+        if request.action == "__check__":
+            await asyncio.sleep(0.05)
+        return await super().execute(request)
 
 
 class BlockedResilienceDriver(SyntheticDriver):
@@ -414,7 +483,9 @@ class BlockedResilienceDriver(SyntheticDriver):
         )
         response = await super().execute(request)
         if request.case_id == "RES-001" and request.action == "fixture.seed":
-            return ActionResponse(status="BLOCKED", message="synthetic resilience timeout")
+            return ActionResponse(
+                status="BLOCKED", message="synthetic resilience timeout", cost_usd=response.cost_usd
+            )
         return response
 
 
@@ -428,6 +499,7 @@ class MissingEvidenceDriver(SyntheticDriver):
             metrics=response.metrics,
             created_resources=response.created_resources,
             removed_resources=response.removed_resources,
+            cost_usd=response.cost_usd,
         )
 
 
@@ -441,6 +513,7 @@ class NoResourceDriver(SyntheticDriver):
             metrics=response.metrics,
             evidence=response.evidence,
             removed_resources=response.removed_resources,
+            cost_usd=response.cost_usd,
         )
 
 
@@ -448,7 +521,7 @@ class NoInventoryCleanupDriver(SyntheticDriver):
     async def execute(self, request: ActionRequest) -> ActionResponse:
         if request.action == "cleanup.run_scope":
             self.calls.append(request.action)
-            return ActionResponse(status="PASS")
+            return ActionResponse(status="PASS", cost_usd=0.0)
         return await super().execute(request)
 
 
@@ -467,6 +540,7 @@ class StaleObservationDriver(SyntheticDriver):
                     metrics=response.metrics,
                     evidence=response.evidence,
                     created_resources=response.created_resources,
+                    cost_usd=response.cost_usd,
                 )
         return response
 
@@ -485,6 +559,7 @@ class UnsafePreflightDriver(SyntheticDriver):
                         "cleanup_supported": True,
                     }
                 },
+                cost_usd=0.0,
             )
         return await super().execute(request)
 
@@ -500,6 +575,7 @@ class UnderSampledDriver(SyntheticDriver):
             evidence=response.evidence,
             created_resources=response.created_resources,
             removed_resources=response.removed_resources,
+            cost_usd=response.cost_usd,
         )
 
 
@@ -513,6 +589,7 @@ class MissingMetricsDriver(SyntheticDriver):
             evidence=response.evidence,
             created_resources=response.created_resources,
             removed_resources=response.removed_resources,
+            cost_usd=response.cost_usd,
         )
 
 
@@ -531,6 +608,7 @@ class EmptyCandidateDriver(SyntheticDriver):
             evidence=response.evidence,
             created_resources=response.created_resources,
             removed_resources=response.removed_resources,
+            cost_usd=response.cost_usd,
         )
 
 
@@ -564,7 +642,16 @@ def _contract_copy(
     return root
 
 
-def _config(root: Path, *, profile: str, run_id: str, baseline: Path | None = None) -> RunConfig:
+def _config(
+    root: Path,
+    *,
+    profile: str,
+    run_id: str,
+    baseline: Path | None = None,
+    max_duration_s: float = 3600,
+    max_cost_usd: float = 10,
+    step_timeout_s: float = 120,
+) -> RunConfig:
     return RunConfig.from_dict(
         {
             "profile": profile,
@@ -572,6 +659,7 @@ def _config(root: Path, *, profile: str, run_id: str, baseline: Path | None = No
             "service_version": "0.1.0",
             "git_sha": "0123456789abcdef0123456789abcdef01234567",
             "git_dirty": False,
+            **({"app_image_digest": "sha256:" + "a" * 64} if profile == "release" else {}),
             "graph_backend": "neo4j",
             "hardware_profile": "test",
             "cache_state": "disabled",
@@ -589,15 +677,30 @@ def _config(root: Path, *, profile: str, run_id: str, baseline: Path | None = No
                     "run_owned": True,
                     "production_writable": False,
                 },
-                "cost_budget": {"max_duration_s": 3600, "max_cost_usd": 10},
+                "cost_budget": {
+                    "max_duration_s": max_duration_s,
+                    "max_cost_usd": max_cost_usd,
+                    "max_action_cost_usd": min(max_cost_usd, 1.0),
+                },
             },
             "allowed_effects": _ALL_EFFECTS,
+            "step_timeout_s": step_timeout_s,
             "output_root": str(root / "test-runs"),
             "baseline_path": str(baseline) if baseline else None,
             "run_id": run_id,
         },
         root=root,
     )
+
+
+def test_subprocess_timeout_exceeds_the_selected_profile_deadline() -> None:
+    config = RunConfig.from_path(EVAL_ROOT / "run.release.local.json")
+
+    assert runner_module._maximum_runner_timeout(config) == 2405
+    assert runner_module._subprocess_timeout(config, None) == 2410
+    with pytest.raises(ValueError, match=r"must exceed.*2405"):
+        runner_module._subprocess_timeout(config, 2405)
+    assert runner_module._subprocess_timeout(config, 2430) == 2430
 
 
 def _compatible_baseline(
@@ -743,6 +846,10 @@ def test_all_declared_scenarios_execute_through_the_production_protocol(
     assert report["cleanup"]["status"] == "PASS"
     assert report["quality_status"] == "PENDING_JUDGMENT"
     assert len(report["judge_packets"]) == 5
+    result_ids = [item["case_id"] for item in report["case_results"]]
+    assert result_ids.index("PERF-001") < result_ids.index("OPS-001")
+    assert result_ids.index("PERF-002") < result_ids.index("OPS-001")
+    assert result_ids.index("PERF-001") < result_ids.index("OPS-010")
     packet = load_json(Path(report["judge_packets"][0]["ref"]))
     serialized_packet = json.dumps(packet, sort_keys=True)
     assert packet["candidate"]["identity_blinded"] is True
@@ -793,6 +900,28 @@ def test_all_declared_scenarios_execute_through_the_production_protocol(
     )
 
 
+def test_case_order_honors_dependencies_before_priority() -> None:
+    cases = [
+        {"case_id": "OPS-001", "priority": "P0"},
+        {"case_id": "PERF-001", "priority": "P1"},
+        {"case_id": "SEC-001", "priority": "P0"},
+    ]
+
+    ordered = _order_cases(cases, {"OPS-001": ["PERF-001"]})
+
+    assert [case["case_id"] for case in ordered] == ["SEC-001", "PERF-001", "OPS-001"]
+
+
+def test_case_order_rejects_dependency_cycle() -> None:
+    cases = [
+        {"case_id": "OPS-001", "priority": "P0"},
+        {"case_id": "PERF-001", "priority": "P1"},
+    ]
+
+    with pytest.raises(RunnerError, match="case dependency cycle"):
+        _order_cases(cases, {"OPS-001": ["PERF-001"], "PERF-001": ["OPS-001"]})
+
+
 def test_empty_final_answer_does_not_create_a_judge_packet(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -819,6 +948,10 @@ def test_release_blocks_before_production_actions_when_targets_are_unresolved(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     root = _contract_copy(tmp_path, monkeypatch, fill_production=False)
+    production_path = root / "fixtures" / "production.json"
+    production = load_json(production_path)
+    production["targets"]["search_p95_ms"] = None
+    production_path.write_text(json.dumps(production), encoding="utf-8")
     cases = validate_module.load_cases()
     driver = SyntheticDriver(cases)
 
@@ -925,10 +1058,415 @@ def test_unsafe_preflight_stops_before_scenario_actions(
 
     report = load_json(outcome.report_path)
     assert outcome.status == "FAIL"
-    assert driver.calls == ["safety.preflight"]
+    assert driver.calls == ["safety.preflight", "cleanup.run_scope"]
+    assert report["cleanup"]["status"] == "PASS"
     assert (
         next(item for item in report["check_results"] if item["check_id"] == "PRE-003")["status"]
         == "FAIL"
+    )
+
+
+def test_duration_budget_stops_actions_and_preserves_cleanup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _contract_copy(tmp_path, monkeypatch, fill_production=False)
+    cases = validate_module.load_cases()
+    driver = SlowActionDriver(cases)
+
+    outcome = asyncio.run(
+        EvaluationRunner(
+            _config(
+                root,
+                profile="daily",
+                run_id="daily-duration-budget",
+                max_duration_s=0.01,
+            ),
+            driver,
+            root=root,
+        ).run()
+    )
+
+    report = load_json(outcome.report_path)
+    assert outcome.status == "BLOCKED"
+    assert report["budget"]["status"] == "BLOCKED"
+    assert report["budget"]["reason"].startswith("run duration budget was exhausted")
+    assert "cleanup.run_scope" in driver.calls
+
+
+def test_cost_budget_stops_after_reported_agent_cost(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _contract_copy(tmp_path, monkeypatch, fill_production=False)
+    cases = validate_module.load_cases()
+    driver = SyntheticDriver(cases, agent_cost_usd=0.6)
+
+    outcome = asyncio.run(
+        EvaluationRunner(
+            _config(
+                root,
+                profile="nightly",
+                run_id="nightly-cost-budget",
+                max_cost_usd=0.5,
+            ),
+            driver,
+            root=root,
+        ).run()
+    )
+
+    report = load_json(outcome.report_path)
+    assert outcome.status == "BLOCKED"
+    assert report["budget"] == {
+        "status": "BLOCKED",
+        "max_duration_s": 3600.0,
+        "elapsed_s": report["budget"]["elapsed_s"],
+        "max_cost_usd": 0.5,
+        "cost_usd": 0.6,
+        "cost_complete": True,
+        "reason": "run cost budget exceeded: 0.600000 USD used, 0.500000 USD allowed",
+    }
+
+
+def test_exhausted_cost_budget_is_propagated_to_cleanup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _contract_copy(tmp_path, monkeypatch, fill_production=False)
+    cases = validate_module.load_cases()
+
+    class CapturingDriver(SyntheticDriver):
+        def __init__(self) -> None:
+            super().__init__(cases, agent_cost_usd=0.6)
+            self.cleanup_request: ActionRequest | None = None
+            self.cleanup_executed = False
+            self.provider_call_denied = False
+
+        async def execute(self, request: ActionRequest) -> ActionResponse:
+            if request.action == "cleanup.run_scope":
+                self.cleanup_request = request
+                self.cleanup_executed = True
+
+                class ExhaustedSink:
+                    async def reserve_provider_budget(
+                        self, _action_key: str, _max_cost_usd: float
+                    ) -> bool:
+                        return False
+
+                token = set_provider_budget_context(ProviderBudgetContext("cleanup"))
+                try:
+                    with pytest.raises(ProviderBudgetExceededError):
+                        await reserve_provider_call(
+                            ExhaustedSink(),  # type: ignore[arg-type]
+                            model="gpt-4.1-mini",
+                            prompt_tokens=100,
+                            completion_tokens=100,
+                        )
+                    self.provider_call_denied = True
+                finally:
+                    reset_provider_budget_context(token)
+            return await super().execute(request)
+
+    driver = CapturingDriver()
+    asyncio.run(
+        EvaluationRunner(
+            _config(
+                root,
+                profile="nightly",
+                run_id="nightly-exhausted-cleanup-budget",
+                max_cost_usd=0.5,
+            ),
+            driver,
+            root=root,
+        ).run()
+    )
+
+    assert driver.cleanup_request is not None
+    assert driver.cleanup_executed is True
+    assert driver.provider_call_denied is True
+    budget = driver.cleanup_request.run_context["cost_budget"]
+    assert budget["remaining_cost_usd"] == 0.0
+    assert budget["reserved_action_cost_usd"] == 0.5
+
+
+def test_cost_budget_refuses_an_action_without_its_full_reservation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _contract_copy(tmp_path, monkeypatch, fill_production=False)
+    runner = EvaluationRunner(
+        _config(
+            root,
+            profile="daily",
+            run_id="daily-cost-admission",
+            max_cost_usd=0.5,
+        ),
+        SyntheticDriver(validate_module.load_cases()),
+        root=root,
+    )
+    runner._start_budget()
+    runner._cost_usd = 0.1
+
+    reason = runner._cost_admission_reason("agent.run")
+    context = runner._budgeted_run_context(runner._config.run_context)
+
+    assert reason == (
+        "insufficient cost budget to reserve 0.500000 USD for agent.run: 0.400000 USD remains"
+    )
+    assert context["cost_budget"]["remaining_cost_usd"] == 0.4
+    assert context["cost_budget"]["reserved_action_cost_usd"] == 0.5
+
+
+def test_regular_action_receives_the_reserved_budget_context(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _contract_copy(tmp_path, monkeypatch, fill_production=False)
+    cases = validate_module.load_cases()
+
+    class CapturingDriver(SyntheticDriver):
+        def __init__(self) -> None:
+            super().__init__(cases)
+            self.captured: list[ActionRequest] = []
+
+        async def execute(self, request: ActionRequest) -> ActionResponse:
+            self.captured.append(request)
+            return await super().execute(request)
+
+    driver = CapturingDriver()
+    asyncio.run(
+        EvaluationRunner(
+            _config(root, profile="daily", run_id="daily-budget-context"),
+            driver,
+            root=root,
+        ).run()
+    )
+
+    request = next(
+        value
+        for value in driver.captured
+        if value.action not in {"safety.preflight", "cleanup.run_scope", "__check__"}
+    )
+    assert request.run_context["cost_budget"]["remaining_cost_usd"] == 10.0
+    assert request.run_context["cost_budget"]["reserved_action_cost_usd"] == 1.0
+
+
+def test_action_cost_must_fit_its_reservation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _contract_copy(tmp_path, monkeypatch, fill_production=False)
+    runner = EvaluationRunner(
+        _config(root, profile="daily", run_id="daily-action-cost-limit"),
+        SyntheticDriver(validate_module.load_cases()),
+        root=root,
+    )
+    runner._start_budget()
+
+    reason = runner._record_action_cost(
+        "agent.run", ActionResponse(status="PASS", cost_usd=1.25), required=True
+    )
+
+    assert reason == (
+        "agent.run exceeded its reserved action cost: 1.250000 USD used, 1.000000 USD reserved"
+    )
+
+
+def test_preflight_requires_a_per_action_cost_reservation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _contract_copy(tmp_path, monkeypatch, fill_production=False)
+    config = _config(root, profile="daily", run_id="daily-missing-action-budget")
+    config.run_context["cost_budget"].pop("max_action_cost_usd")
+    runner = EvaluationRunner(config, SyntheticDriver(validate_module.load_cases()), root=root)
+    evidence = EvidenceStore(tmp_path / "evidence", retain_payloads=False)
+
+    result = asyncio.run(runner._preflight("run", validate_module.load_cases(), evidence, {}))
+
+    assert result["status"] == "BLOCKED"
+    assert "max_action_cost_usd must be positive" in result["reason"]
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf")])
+def test_preflight_rejects_nonfinite_budgets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, value: float
+) -> None:
+    root = _contract_copy(tmp_path, monkeypatch, fill_production=False)
+    cases = validate_module.load_cases()
+    config = _config(root, profile="daily", run_id="daily-invalid-budget")
+    config.run_context["cost_budget"]["max_cost_usd"] = value
+    runner = EvaluationRunner(config, SyntheticDriver(cases), root=root)
+    evidence = EvidenceStore(tmp_path / "evidence", retain_payloads=False)
+
+    result = asyncio.run(runner._preflight("run", cases, evidence, {}))
+
+    assert result["status"] == "BLOCKED"
+    assert "max_cost_usd must be positive" in result["reason"]
+
+
+@pytest.mark.parametrize("value", [-1.0, float("nan"), float("inf")])
+def test_runner_rejects_invalid_in_process_action_cost(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, value: float
+) -> None:
+    root = _contract_copy(tmp_path, monkeypatch, fill_production=False)
+    cases = validate_module.load_cases()
+    runner = EvaluationRunner(
+        _config(root, profile="daily", run_id="daily-invalid-action-cost"),
+        SyntheticDriver(cases),
+        root=root,
+    )
+
+    reason = runner._record_action_cost(
+        "agent.run", ActionResponse(status="PASS", cost_usd=value), required=True
+    )
+
+    assert reason == "agent.run reported invalid provider cost"
+    assert runner._cost_complete is False
+
+
+def test_check_adapter_cost_is_included_in_the_run_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _contract_copy(tmp_path, monkeypatch, fill_production=False)
+    cases = validate_module.load_cases()
+    driver = SyntheticDriver(cases, check_cost_usd=0.125)
+
+    outcome = asyncio.run(
+        EvaluationRunner(
+            _config(root, profile="weekly", run_id="weekly-check-cost"),
+            driver,
+            root=root,
+        ).run()
+    )
+
+    report = load_json(outcome.report_path)
+    check_calls = driver.calls.count("__check__")
+    assert check_calls > 0
+    assert report["budget"]["cost_usd"] == pytest.approx(check_calls * 0.125)
+    assert report["budget"]["cost_complete"] is True
+
+
+def test_check_timeout_marks_cost_accounting_incomplete(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _contract_copy(tmp_path, monkeypatch, fill_production=False)
+    cases = validate_module.load_cases()
+
+    outcome = asyncio.run(
+        EvaluationRunner(
+            _config(
+                root,
+                profile="weekly",
+                run_id="weekly-check-timeout",
+                step_timeout_s=0.01,
+            ),
+            SlowCheckDriver(cases),
+            root=root,
+        ).run()
+    )
+
+    report = load_json(outcome.report_path)
+    assert outcome.status == "BLOCKED"
+    assert report["budget"]["cost_complete"] is False
+    assert report["budget"]["reason"] == "__check__ omitted complete provider cost reporting"
+
+
+def test_cost_blocked_run_does_not_execute_adapter_checks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _contract_copy(tmp_path, monkeypatch, fill_production=False)
+    cases = validate_module.load_cases()
+    driver = SyntheticDriver(cases, agent_cost_usd=0.6)
+
+    outcome = asyncio.run(
+        EvaluationRunner(
+            _config(
+                root,
+                profile="weekly",
+                run_id="weekly-check-budget-stop",
+                max_cost_usd=0.5,
+            ),
+            driver,
+            root=root,
+        ).run()
+    )
+
+    assert outcome.status == "BLOCKED"
+    assert "__check__" not in driver.calls
+
+
+@pytest.mark.parametrize(
+    ("budget_update", "expected_error"),
+    [
+        (
+            {"cost_complete": False, "status": "PASS", "reason": None},
+            "budget.status contradicts measured budget",
+        ),
+        (
+            {"cost_usd": 2.0, "max_cost_usd": 1.0, "status": "PASS", "reason": None},
+            "budget.status contradicts measured budget",
+        ),
+        (
+            {"elapsed_s": 2.0, "max_duration_s": 1.0, "status": "PASS", "reason": None},
+            "budget.status contradicts measured budget",
+        ),
+        (
+            {"cost_complete": False, "status": "BLOCKED", "reason": None},
+            "blocked budget lacks a reason",
+        ),
+    ],
+)
+def test_report_validator_rejects_contradictory_budget_states(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    budget_update: dict[str, Any],
+    expected_error: str,
+) -> None:
+    root = _contract_copy(tmp_path, monkeypatch, fill_production=False)
+    cases = validate_module.load_cases()
+    outcome = asyncio.run(
+        EvaluationRunner(
+            _config(root, profile="daily", run_id="daily-budget-tamper"),
+            SyntheticDriver(cases),
+            root=root,
+        ).run()
+    )
+    report = load_json(outcome.report_path)
+    report["budget"].update(budget_update)
+    outcome.report_path.write_text(
+        json.dumps(report, ensure_ascii=True, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+    errors = validate_report(
+        outcome.report_path,
+        load_json(root / "checklist.json")["items"],
+        cases,
+    )
+    assert any(expected_error in error for error in errors)
+
+
+def test_report_validator_accepts_version_1_0_without_a_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _contract_copy(tmp_path, monkeypatch, fill_production=False)
+    cases = validate_module.load_cases()
+    outcome = asyncio.run(
+        EvaluationRunner(
+            _config(root, profile="daily", run_id="daily-version-1-compatibility"),
+            SyntheticDriver(cases),
+            root=root,
+        ).run()
+    )
+    report = load_json(outcome.report_path)
+    report["schema_version"] = "1.0"
+    report.pop("budget")
+    outcome.report_path.write_text(
+        json.dumps(report, ensure_ascii=True, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+    assert (
+        validate_report(
+            outcome.report_path,
+            load_json(root / "checklist.json")["items"],
+            cases,
+        )
+        == []
     )
 
 
@@ -951,6 +1489,8 @@ def test_action_failure_cannot_pass_from_satisfying_observations(
     result = next(item for item in report["case_results"] if item["case_id"] == "E2E-001")
     assert outcome.status == "FAIL"
     assert result["status"] == "FAIL"
+    assert report["budget"]["cost_usd"] == 0.25
+    assert report["budget"]["cost_complete"] is True
     assert "cleanup.run_scope" in driver.calls
 
 

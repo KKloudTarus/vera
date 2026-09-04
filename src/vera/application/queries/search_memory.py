@@ -156,7 +156,7 @@ class SearchMemoryHandler:
                 results = await self._handle(query)
         finally:
             reset_usage_context(token)
-        record_search(duration_s=time.perf_counter() - started, hits=len(results))
+            record_search(duration_s=time.perf_counter() - started, hits=len(results))
         return results
 
     async def _handle(self, query: SearchMemory) -> list[RankedHit]:

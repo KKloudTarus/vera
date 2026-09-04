@@ -46,8 +46,7 @@ def upgrade() -> None:
         "ALTER TABLE entity_aliases ADD CONSTRAINT uq_alias_norm UNIQUE (group_id, alias_norm)"
     )
     op.execute(
-        "CREATE INDEX ix_alias_norm_trgm ON entity_aliases "
-        "USING gin (alias_norm gin_trgm_ops)"
+        "CREATE INDEX ix_alias_norm_trgm ON entity_aliases USING gin (alias_norm gin_trgm_ops)"
     )
 
 
@@ -64,6 +63,5 @@ def downgrade() -> None:
         "ALTER TABLE entity_aliases ADD CONSTRAINT uq_alias_norm UNIQUE (group_id, alias_norm)"
     )
     op.execute(
-        "CREATE INDEX ix_alias_norm_trgm ON entity_aliases "
-        "USING gin (alias_norm gin_trgm_ops)"
+        "CREATE INDEX ix_alias_norm_trgm ON entity_aliases USING gin (alias_norm gin_trgm_ops)"
     )

@@ -33,6 +33,9 @@ _FACT_LEXICAL_SCORE = """(ts_rank(f.search_vector, q.q)
 _FACT_LEXICAL_MATCH = """f.search_vector @@ q.q
         OR to_tsvector('simple', cs.canonical_name) @@ q.q
         OR to_tsvector('simple', coalesce(co.canonical_name, '')) @@ q.q"""
+_FACT_EXACT_MATCH = """lower(regexp_replace(trim(concat_ws(' ', cs.canonical_name,
+        f.predicate, COALESCE(co.canonical_name, f.object_scalar))),
+        '[[:space:]]+', ' ', 'g')) = :q"""
 
 _PASSAGE = f"""
 SELECT c.id, c.artifact_version_id, c.text, c.content_hash, c.heading_path, c.symbol_name,
@@ -279,6 +282,43 @@ _FACTS_LATEST = _FACTS_TMPL.format(
     score=_FACT_LEXICAL_SCORE,
     query_join=f"CROSS JOIN (SELECT {_ORQ} AS q) q",
     match=_FACT_LEXICAL_MATCH,
+    assertion_membership=(
+        "((CAST(:known_as_of AS timestamptz) IS NULL AND a.state = 'active') OR "
+        "(CAST(:known_as_of AS timestamptz) IS NOT NULL AND a.state <> 'needs_review' "
+        "AND a.recorded_at <= :known_as_of "
+        "AND (a.withdrawn_at IS NULL OR a.withdrawn_at > :known_as_of)))"
+    ),
+    source_assertion_membership=(
+        "((CAST(:known_as_of AS timestamptz) IS NULL AND af.state = 'active') OR "
+        "(CAST(:known_as_of AS timestamptz) IS NOT NULL AND af.state <> 'needs_review' "
+        "AND af.recorded_at <= :known_as_of "
+        "AND (af.withdrawn_at IS NULL OR af.withdrawn_at > :known_as_of)))"
+    ),
+    evidence_membership=(
+        "(CAST(:known_as_of AS timestamptz) IS NULL OR e.created_at <= :known_as_of)"
+    ),
+    support_requirement=(
+        "(CAST(:known_as_of AS timestamptz) IS NULL OR EXISTS ("
+        "SELECT 1 FROM assertions am WHERE am.fact_id = f.id AND am.group_id = f.group_id "
+        "AND am.polarity = 'supports' AND am.state <> 'needs_review' "
+        "AND am.recorded_at <= :known_as_of "
+        "AND (am.withdrawn_at IS NULL OR am.withdrawn_at > :known_as_of)))"
+    ),
+    membership=(
+        "((CAST(:as_of AS timestamptz) IS NULL "
+        "  AND fv.lifecycle_state IN ('active', 'disputed') "
+        "  AND (fv.valid_from IS NULL OR fv.valid_from <= now()) "
+        "  AND (fv.valid_to IS NULL OR fv.valid_to > now())) "
+        " OR (CAST(:as_of AS timestamptz) IS NOT NULL "
+        "  AND fv.lifecycle_state <> 'proposed' "
+        "  AND (fv.valid_from IS NULL OR fv.valid_from <= :as_of) "
+        "  AND (fv.valid_to IS NULL OR fv.valid_to > :as_of)))"
+    ),
+)
+_FACTS_EXACT_LATEST = _FACTS_TMPL.format(
+    score="1.0",
+    query_join="",
+    match=_FACT_EXACT_MATCH,
     assertion_membership=(
         "((CAST(:known_as_of AS timestamptz) IS NULL AND a.state = 'active') OR "
         "(CAST(:known_as_of AS timestamptz) IS NOT NULL AND a.state <> 'needs_review' "
@@ -690,6 +730,20 @@ class SqlAlchemyFactCandidateSource:
             rows = (await session.execute(sql, params)).mappings().all()
         return fact_hits(rows)
 
+    async def search_exact_current(self, *, group_id: str, query: str, limit: int) -> list[FactHit]:
+        params: dict[str, object] = {
+            "g": group_id,
+            "q": " ".join(query.split()).casefold(),
+            "lim": limit,
+            "as_of": None,
+            "known_as_of": None,
+            "include_provenance": self._include_provenance,
+            **retrieval_filter_params(None),
+        }
+        async with self._session_factory() as session:
+            rows = (await session.execute(text(_FACTS_EXACT_LATEST), params)).mappings().all()
+        return fact_hits(rows, exact_match=True)
+
     async def hydrate(
         self,
         *,
@@ -733,7 +787,7 @@ class SqlAlchemyFactCandidateSource:
         return fact_hits(rows)
 
 
-def fact_hits(rows: Any) -> list[FactHit]:
+def fact_hits(rows: Any, *, exact_match: bool = False) -> list[FactHit]:
     hits: list[FactHit] = []
     for row in rows:
         object_name = row["object_name"] or ""
@@ -756,6 +810,7 @@ def fact_hits(rows: Any) -> list[FactHit]:
                 confidence=float(row["confidence"]),
                 lifecycle_state=row["lifecycle_state"],
                 score=float(row["score"]),
+                exact_match=exact_match,
                 valid_from=row["valid_from"],
                 supporting_source_ids=tuple(str(s) for s in sources),
                 evidence_id=row["evidence_id"],

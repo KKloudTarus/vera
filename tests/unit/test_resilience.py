@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 
+import httpx
 import pytest
 
 from vera.adapters.resilience.breaker import (
@@ -14,6 +15,12 @@ from vera.adapters.resilience.breaker import (
 from vera.adapters.resilience.limiter import InProcessRateLimiter
 from vera.adapters.resilience.policy import ResiliencePolicy
 from vera.domain.ports.resilience import RateLimiter
+from vera.observability.cost import (
+    ProviderCallTimeoutError,
+    UsageAccountingError,
+    UsageEvent,
+    guard_provider_call,
+)
 
 
 class _NoLimiter:
@@ -109,6 +116,21 @@ async def test_policy_retries_until_success() -> None:
 
 
 @pytest.mark.asyncio
+async def test_policy_does_not_retry_accounting_failures() -> None:
+    calls = 0
+
+    async def unsafe_to_repeat() -> None:
+        nonlocal calls
+        calls += 1
+        raise UsageAccountingError("usage unavailable")
+
+    with pytest.raises(UsageAccountingError):
+        await _policy(retry_attempts=5).call(unsafe_to_repeat)
+
+    assert calls == 1
+
+
+@pytest.mark.asyncio
 async def test_policy_opens_breaker_after_repeated_failures() -> None:
     breaker = CircuitBreaker(name="dep", failure_threshold=2, reset_timeout_s=30.0)
     policy = _policy(breaker=breaker, retry_attempts=1)
@@ -127,7 +149,7 @@ async def test_policy_opens_breaker_after_repeated_failures() -> None:
 
 
 @pytest.mark.asyncio
-async def test_policy_cancels_a_hung_call_and_retries() -> None:
+async def test_policy_cancels_a_hung_call_without_retrying_ambiguous_timeout() -> None:
     cancelled = {"n": 0}
 
     async def hang() -> None:
@@ -140,8 +162,63 @@ async def test_policy_cancels_a_hung_call_and_retries() -> None:
     policy = _policy(retry_attempts=2, per_call_timeout_s=0.02)
     with pytest.raises(TimeoutError):
         await policy.call(hang)
-    # Each attempt timed out and was cancelled, not left running.
-    assert cancelled["n"] == 2
+    assert cancelled["n"] == 1
+
+
+@pytest.mark.asyncio
+async def test_provider_timeout_records_one_incomplete_attempt() -> None:
+    calls = 0
+    events: list[UsageEvent] = []
+
+    class Sink:
+        async def record(self, event: UsageEvent) -> None:
+            events.append(event)
+
+    async def hang() -> None:
+        nonlocal calls
+        calls += 1
+        await asyncio.sleep(10)
+
+    async def guarded() -> None:
+        await guard_provider_call(hang, Sink(), model="future-model", operation="llm")
+
+    with pytest.raises(TimeoutError):
+        await _policy(retry_attempts=3, per_call_timeout_s=0.02).call(guarded)
+
+    assert calls == 1
+    assert len(events) == 1
+    assert events[0].cost_complete is False
+
+
+@pytest.mark.asyncio
+async def test_provider_native_timeout_is_not_retried() -> None:
+    calls = 0
+    events: list[UsageEvent] = []
+
+    class Sink:
+        async def record(self, event: UsageEvent) -> None:
+            events.append(event)
+
+    async def fail() -> None:
+        nonlocal calls
+        calls += 1
+        raise httpx.ReadTimeout("provider response timed out")
+
+    async def guarded() -> None:
+        await guard_provider_call(
+            fail,
+            Sink(),
+            model="future-model",
+            operation="llm",
+            timeout_exceptions=(httpx.TimeoutException,),
+        )
+
+    with pytest.raises(ProviderCallTimeoutError, match="provider response timed out"):
+        await _policy(retry_attempts=3).call(guarded)
+
+    assert calls == 1
+    assert len(events) == 1
+    assert events[0].cost_complete is False
 
 
 # ---------------------------------------------------------------- limiter ---

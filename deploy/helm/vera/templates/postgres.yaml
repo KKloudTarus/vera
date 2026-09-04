@@ -29,6 +29,9 @@ spec:
       labels:
         app.kubernetes.io/instance: {{ .Release.Name }}
         vera.component: postgres
+      annotations:
+        checksum/admin-secret: {{ printf "%s:%s" .Values.postgres.user .Values.postgres.password | sha256sum }}
+        checksum/external-secrets: {{ .Values.secrets.externalRevision | quote }}
     spec:
       containers:
         - name: postgres
@@ -39,7 +42,7 @@ spec:
             - name: POSTGRES_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "vera.fullname" . }}-secrets
+                  name: {{ include "vera.fullname" . }}-database-admin
                   key: POSTGRES_PASSWORD
             - name: POSTGRES_DB
               value: {{ .Values.postgres.database | quote }}

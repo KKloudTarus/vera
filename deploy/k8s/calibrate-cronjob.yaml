@@ -21,7 +21,7 @@ spec:
             runAsNonRoot: true
           containers:
             - name: calibrate
-              image: ghcr.io/kkloudtarus/vera:latest
+              image: ghcr.io/kkloudtarus/vera@sha256:0000000000000000000000000000000000000000000000000000000000000000
               command: ["python", "-m", "vera.entrypoints.calibrate", "--apply"]
               envFrom:
                 - configMapRef: { name: vera-config }

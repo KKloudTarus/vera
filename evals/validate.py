@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import sys
 from collections import Counter
@@ -57,6 +58,22 @@ def load_cases() -> list[dict[str, Any]]:
     return cases
 
 
+def load_case_dependencies(root: Path | None = None) -> dict[str, list[str]]:
+    document: Any = load_json((ROOT if root is None else root) / "case_dependencies.json")
+    if not isinstance(document, dict):
+        return {}
+    dependencies = document.get("dependencies", {})
+    if not isinstance(dependencies, dict):
+        return {}
+    result: dict[str, list[str]] = {}
+    for case_id, case_dependencies in dependencies.items():
+        if isinstance(case_id, str) and isinstance(case_dependencies, list):
+            result[case_id] = [
+                dependency for dependency in case_dependencies if isinstance(dependency, str)
+            ]
+    return result
+
+
 def sha256_file(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -68,6 +85,7 @@ def sha256_json(value: Any) -> str:
 
 def dataset_sha256() -> str:
     paths = [
+        ROOT / "case_dependencies.json",
         *(ROOT / "scenarios").glob("*.jsonl"),
         *(ROOT / "fixtures").glob("*.json"),
     ]
@@ -94,29 +112,48 @@ def source_tree_sha256(root: Path | None = None) -> str:
         "tests",
     }
     paths: set[Path] = set()
-    for directory in (workspace / "src", workspace / "migrations", root):
+    for directory in (
+        workspace / "src",
+        workspace / "migrations",
+        workspace / "deploy",
+        workspace / "docs",
+        root,
+    ):
         if not directory.is_dir():
             continue
         paths.update(
             path
             for path in directory.rglob("*")
-            if path.is_file() and not excluded_parts.intersection(path.parts)
+            if (path.is_file() or path.is_symlink()) and not excluded_parts.intersection(path.parts)
         )
     paths.update(
         path
         for path in (
             workspace / "alembic.ini",
+            workspace / "CHANGELOG.md",
             workspace / "constraints.lock",
+            workspace / ".dockerignore",
+            workspace / "Dockerfile",
+            workspace / "docker-compose.yml",
+            workspace / "LICENSE",
+            workspace / "NOTICE",
             workspace / "pyproject.toml",
+            workspace / "README.md",
         )
-        if path.is_file()
+        if path.is_file() or path.is_symlink()
     )
     digest = hashlib.sha256()
     for path in sorted(paths, key=lambda item: item.relative_to(workspace).as_posix()):
         relative = path.relative_to(workspace).as_posix().encode()
         digest.update(len(relative).to_bytes(8, "big"))
         digest.update(relative)
-        content = path.read_bytes()
+        if path.is_symlink():
+            mode = b"120000"
+            content = os.readlink(path).encode()
+        else:
+            mode = b"100755" if path.stat().st_mode & 0o111 else b"100644"
+            content = path.read_bytes()
+        digest.update(mode)
         digest.update(len(content).to_bytes(8, "big"))
         digest.update(content)
     return digest.hexdigest()
@@ -432,6 +469,86 @@ def validate_contracts() -> tuple[list[str], int, int, int]:
 
     case_ids = [case.get("case_id") for case in cases]
     require(len(case_ids) == len(set(case_ids)), "duplicate case ID", errors)
+    dependencies_document: Any = load_json(ROOT / "case_dependencies.json")
+    require(
+        isinstance(dependencies_document, dict),
+        "case dependencies: document must be an object",
+        errors,
+    )
+    if not isinstance(dependencies_document, dict):
+        dependencies_document = {}
+    require(
+        dependencies_document.get("schema_version") == "1.0",
+        "case dependencies: invalid schema version",
+        errors,
+    )
+    dependencies_value = dependencies_document.get("dependencies")
+    require(
+        isinstance(dependencies_value, dict),
+        "case dependencies: dependencies must be an object",
+        errors,
+    )
+    if isinstance(dependencies_value, dict):
+        for case_id, dependencies in dependencies_value.items():
+            require(
+                isinstance(case_id, str) and bool(CASE_ID.fullmatch(case_id)),
+                f"case dependencies: invalid case ID {case_id!r}",
+                errors,
+            )
+            require(
+                isinstance(dependencies, list)
+                and all(isinstance(dependency, str) for dependency in dependencies),
+                f"case dependencies: {case_id!r} must map to a string array",
+                errors,
+            )
+    case_dependencies = load_case_dependencies()
+    known_case_ids = set(case_ids)
+    cases_by_id = {case["case_id"]: case for case in cases if "case_id" in case}
+    for case_id, dependencies in case_dependencies.items():
+        require(case_id in known_case_ids, f"case dependencies: unknown case {case_id}", errors)
+        require(
+            len(dependencies) == len(set(dependencies)),
+            f"{case_id}: duplicate case dependency",
+            errors,
+        )
+        for dependency in dependencies:
+            require(
+                bool(CASE_ID.fullmatch(dependency)),
+                f"{case_id}: invalid case dependency {dependency}",
+                errors,
+            )
+            require(
+                dependency in known_case_ids,
+                f"{case_id}: unknown case dependency {dependency}",
+                errors,
+            )
+            require(dependency != case_id, f"{case_id}: cannot depend on itself", errors)
+            if case_id in cases_by_id and dependency in cases_by_id:
+                require(
+                    set(cases_by_id[case_id]["profiles"])
+                    <= set(cases_by_id[dependency]["profiles"]),
+                    f"{case_id}: dependency {dependency} does not cover every selected profile",
+                    errors,
+                )
+
+    visiting: set[str] = set()
+    visited: set[str] = set()
+
+    def visit(case_id: str) -> None:
+        if case_id in visited:
+            return
+        if case_id in visiting:
+            errors.append(f"case dependencies: cycle includes {case_id}")
+            return
+        visiting.add(case_id)
+        for dependency in case_dependencies.get(case_id, []):
+            if dependency in known_case_ids:
+                visit(dependency)
+        visiting.remove(case_id)
+        visited.add(case_id)
+
+    for case_id in case_dependencies:
+        visit(case_id)
     for case in cases:
         case_id = str(case.get("case_id", "<missing>"))
         require(bool(CASE_ID.fullmatch(case_id)), f"{case_id}: invalid case ID", errors)
@@ -1223,7 +1340,51 @@ def validate_report(
 
     cleanup_failed = cleanup_status == "FAIL"
     cleanup_blocked = cleanup_status == "BLOCKED"
-    expected_gate = not (gating_fail or gating_blocked or cleanup_failed or cleanup_blocked)
+    budget_blocked = False
+    if report.get("schema_version") == "1.1" or "budget" in report:
+        budget = report.get("budget", {})
+        max_duration_s = budget.get("max_duration_s")
+        elapsed_s = budget.get("elapsed_s")
+        max_cost_usd = budget.get("max_cost_usd")
+        observed_cost_usd = budget.get("cost_usd")
+        duration_exceeded = (
+            isinstance(max_duration_s, (int, float))
+            and not isinstance(max_duration_s, bool)
+            and isinstance(elapsed_s, (int, float))
+            and not isinstance(elapsed_s, bool)
+            and elapsed_s > max_duration_s
+        )
+        cost_exceeded = (
+            isinstance(max_cost_usd, (int, float))
+            and not isinstance(max_cost_usd, bool)
+            and isinstance(observed_cost_usd, (int, float))
+            and not isinstance(observed_cost_usd, bool)
+            and observed_cost_usd > max_cost_usd
+        )
+        budget_reason = budget.get("reason")
+        budget_blocked = (
+            budget.get("cost_complete") is not True
+            or duration_exceeded
+            or cost_exceeded
+            or isinstance(budget_reason, str)
+        )
+        expected_budget_status = "BLOCKED" if budget_blocked else "PASS"
+        require(
+            budget.get("status") == expected_budget_status,
+            f"{path}: budget.status contradicts measured budget",
+            errors,
+        )
+        if budget_blocked:
+            require(
+                isinstance(budget_reason, str) and bool(budget_reason),
+                f"{path}: blocked budget lacks a reason",
+                errors,
+            )
+        else:
+            require(budget_reason is None, f"{path}: passing budget has a reason", errors)
+    expected_gate = not (
+        gating_fail or gating_blocked or cleanup_failed or cleanup_blocked or budget_blocked
+    )
     require(
         gate.get("passed") is expected_gate,
         f"{path}: gate.passed contradicts results",
@@ -1232,7 +1393,7 @@ def validate_report(
 
     if gating_fail or cleanup_failed:
         expected_run_status = "FAIL"
-    elif gating_blocked or cleanup_blocked:
+    elif gating_blocked or cleanup_blocked or budget_blocked:
         expected_run_status = "BLOCKED"
     else:
         expected_run_status = "PASS"

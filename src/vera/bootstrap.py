@@ -70,6 +70,9 @@ class Container:
     fact_candidate_semaphore: asyncio.Semaphore = field(
         default_factory=lambda: asyncio.Semaphore(8)
     )
+    exact_fact_candidate_semaphore: asyncio.Semaphore = field(
+        default_factory=lambda: asyncio.Semaphore(20)
+    )
     # Active rerank weights: the configured defaults until refresh_rerank_weights loads a
     # calibrated set from the database at startup.
     rerank_weights: RerankWeights = field(default_factory=RerankWeights)
@@ -94,20 +97,25 @@ class Container:
 
 def build_container(settings: Settings) -> Container:
     engine = create_engine(settings.db)
-    sessionmaker = create_sessionmaker(engine)
-    # The cross-scope read and worker paths assume their non-superuser roles when enforcement
-    # is on; otherwise they share the base factory (login role).
+    sessionmaker = create_sessionmaker(
+        engine, role="vera_app" if settings.db.role_enforcement else None
+    )
+    # Every enforced transaction assumes one approved role from a NOINHERIT runtime login.
     read_sessionmaker: async_sessionmaker[AsyncSession] | None = None
     worker_sessionmaker: async_sessionmaker[AsyncSession] | None = None
     if settings.db.role_enforcement:
         read_sessionmaker = create_sessionmaker(engine, role="vera_trusted")
         worker_sessionmaker = create_sessionmaker(engine, role="vera_worker")
     reads = read_sessionmaker or sessionmaker
+    workers = worker_sessionmaker or sessionmaker
     queue: JobQueue = PostgresJobQueue(
-        sessionmaker, visibility_timeout_s=settings.worker.visibility_timeout_s
+        sessionmaker,
+        worker_session_factory=workers,
+        visibility_timeout_s=settings.worker.visibility_timeout_s,
     )
-    usage_sink: UsageSink | None = (
-        SqlAlchemyUsageSink(sessionmaker) if settings.observability.cost_tracking_enabled else None
+    usage_sink: UsageSink = SqlAlchemyUsageSink(
+        sessionmaker,
+        record_enabled=settings.observability.cost_tracking_enabled,
     )
     memory: MemoryEngine = build_memory_engine(settings, usage_sink)
     fact_projection = maybe_fact_projection(memory)
@@ -170,7 +178,7 @@ def build_container(settings: Settings) -> Container:
 
         key = settings.memory.openai_api_key.get_secret_value()
         curation_client = MeteredChatClient(
-            AsyncOpenAI(api_key=key, base_url=settings.memory.openai_base_url),
+            AsyncOpenAI(api_key=key, base_url=settings.memory.openai_base_url, max_retries=0),
             policy=build_resilience_policy(settings.resilience, name="openai-curation"),
             sink=usage_sink,
         )
@@ -232,6 +240,10 @@ def build_container(settings: Settings) -> Container:
         entity_judge=entity_judge,
         embedder=embedder,
         reranker=reranker,
+        fact_candidate_semaphore=asyncio.Semaphore(8),
+        exact_fact_candidate_semaphore=asyncio.Semaphore(
+            min(32, settings.db.pool_size + settings.db.max_overflow)
+        ),
         rerank_weights=build_rerank_weights(settings),
         read_sessionmaker=read_sessionmaker,
         worker_sessionmaker=worker_sessionmaker,

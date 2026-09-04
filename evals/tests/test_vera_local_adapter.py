@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import threading
 from collections import Counter
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
@@ -18,6 +19,7 @@ from evals.adapters import ActionResponse
 from evals.generate_load_fixture import records
 from evals.validate import ROOT, load_jsonl
 from vera.config.settings import Settings
+from vera.entrypoints.rollout_control import configuration_sha256, normalize_control_environment
 
 
 def _settings() -> Settings:
@@ -37,7 +39,7 @@ def _settings() -> Settings:
                 "cross_encoder_enabled": True,
                 "cross_encoder_provider": "voyage",
             },
-        }
+        },
     )
 
 
@@ -76,6 +78,221 @@ def test_plain_http_url_resolves_once_and_preserves_host(monkeypatch: pytest.Mon
     assert secure == ("https://api:8443/v2/knowledge/search", None)
     assert calls == 1
     adapter._resolved_http_url.cache_clear()
+
+
+def test_provider_budget_headers_bind_the_action_and_scope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("VERA_EVAL_SCOPE_ID", "scope-1")
+    token = adapter.set_provider_budget_context(
+        adapter.ProviderBudgetContext("run:case:step:nonce")
+    )
+    try:
+        headers = adapter._provider_budget_headers()
+    finally:
+        adapter.reset_provider_budget_context(token)
+
+    assert headers == {
+        "X-Vera-Eval-Scope": "scope-1",
+        "X-Vera-Provider-Budget": "run:case:step:nonce",
+    }
+
+
+def test_action_provider_budget_carries_action_and_run_limits() -> None:
+    budget = adapter._action_provider_budget(
+        {
+            "run_id": "run-1",
+            "case_id": "CASE-1",
+            "step_id": "step-1",
+            "request_nonce": "nonce-1",
+            "run_context": {
+                "cost_budget": {
+                    "max_cost_usd": 10.0,
+                    "remaining_cost_usd": 7.0,
+                    "reserved_action_cost_usd": 1.0,
+                }
+            },
+        }
+    )
+
+    assert budget is not None
+    context, action_maximum, run_key, run_maximum = budget
+    assert context.action_key == "run-1:CASE-1:step-1:nonce-1"
+    assert action_maximum == 1.0
+    assert run_key == "run-1"
+    assert run_maximum == 10.0
+
+
+def test_action_provider_budget_uses_no_spend_context_when_the_run_is_exhausted() -> None:
+    budget = adapter._action_provider_budget(
+        {
+            "run_id": "run-1",
+            "case_id": "run-1",
+            "step_id": "cleanup",
+            "request_nonce": "nonce-1",
+            "run_context": {
+                "cost_budget": {
+                    "max_cost_usd": 10.0,
+                    "remaining_cost_usd": 0.0,
+                    "reserved_action_cost_usd": 1.0,
+                }
+            },
+        }
+    )
+
+    assert budget is not None
+    context, action_maximum, run_key, run_maximum = budget
+    assert context.action_key == "run-1:run-1:cleanup:nonce-1"
+    assert action_maximum == 0.0
+    assert run_key == "run-1"
+    assert run_maximum == 10.0
+
+
+def test_provider_budget_headers_require_a_cross_process_scope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("VERA_EVAL_SCOPE_ID", raising=False)
+    token = adapter.set_provider_budget_context(adapter.ProviderBudgetContext("action-key"))
+    try:
+        with pytest.raises(adapter.AdapterBlocked, match="cannot cross process"):
+            adapter._provider_budget_headers()
+    finally:
+        adapter.reset_provider_budget_context(token)
+
+
+def test_rollout_attestation_rejects_tampered_evidence() -> None:
+    transition = "role_enforcement_off_to_on"
+    definition = adapter.TRANSITIONS[transition]
+    environments = {
+        service: normalize_control_environment({definition.environment_key: definition.rollout})
+        for service in definition.services
+    }
+    evidence: dict[str, Any] = {
+        "transition": transition,
+        "direction": "rollout",
+        "group_id": "p:canary",
+        "before_revision": 1,
+        "after_revision": 2,
+        "process_ids": {
+            "before": {service: f"old-{service}" for service in definition.services},
+            "after": {service: f"new-{service}" for service in definition.services},
+        },
+        "service_environments": environments,
+        "effective_state": {definition.environment_key: definition.rollout},
+        "configuration_sha256": configuration_sha256(environments),
+        "configuration_applied": True,
+        "process_restarted": True,
+        "state_changed": True,
+        "invariants_preserved": True,
+        "baseline_restored": False,
+    }
+
+    assert adapter._rollout_attestation_verified(
+        evidence, transition=transition, direction="rollout", group_id="p:canary"
+    )
+    evidence["configuration_sha256"] = "0" * 64
+    assert not adapter._rollout_attestation_verified(
+        evidence, transition=transition, direction="rollout", group_id="p:canary"
+    )
+
+
+def test_rollout_preparation_is_fully_attested() -> None:
+    transition = "community_build_off_to_on"
+    definition = adapter.TRANSITIONS[transition]
+    environments = {
+        service: normalize_control_environment({definition.environment_key: definition.baseline})
+        for service in definition.services
+    }
+    evidence: dict[str, Any] = {
+        "operation": "prepare",
+        "transition": transition,
+        "group_id": "p:canary",
+        "before_revision": 1,
+        "after_revision": 2,
+        "process_ids": {
+            "before": {service: f"old-{service}" for service in definition.services},
+            "after": {service: f"new-{service}" for service in definition.services},
+        },
+        "service_environments": environments,
+        "effective_state": {definition.environment_key: definition.baseline},
+        "configuration_sha256": configuration_sha256(environments),
+        "configuration_applied": True,
+        "process_restarted": True,
+        "state_changed": False,
+        "invariants_preserved": True,
+    }
+
+    assert adapter._rollout_preparation_verified(
+        evidence, transition=transition, group_id="p:canary"
+    )
+    evidence["process_restarted"] = False
+    assert not adapter._rollout_preparation_verified(
+        evidence, transition=transition, group_id="p:canary"
+    )
+
+
+def test_authoritative_preservation_allows_additions_and_rejects_mutation() -> None:
+    before = {
+        "rows": {"facts": [{"id": "fact-1", "authority": 1.0}]},
+        "objects": {"artifact-1": {"sha256": "abc", "size": 3}},
+    }
+    extended = {
+        "rows": {
+            "facts": [
+                {"id": "fact-1", "authority": 1.0},
+                {"id": "fact-2", "authority": 1.0},
+            ]
+        },
+        "objects": {
+            "artifact-1": {"sha256": "abc", "size": 3},
+            "artifact-2": {"sha256": "def", "size": 3},
+        },
+    }
+    mutated = {
+        "rows": {"facts": [{"id": "fact-1", "authority": 0.1}]},
+        "objects": {"artifact-1": {"sha256": "changed", "size": 3}},
+    }
+
+    assert adapter._authoritative_preservation(before, extended)["preserved"] is True
+    report = adapter._authoritative_preservation(before, mutated)
+    assert report["preserved"] is False
+    assert report["missing_or_mutated_row_count"] == 1
+    assert report["missing_or_mutated_object_count"] == 1
+
+
+@pytest.mark.parametrize(
+    ("mode", "fact", "jobs", "edges"),
+    [
+        ("legacy", None, [], [{"published_episode_id": "episode-1"}]),
+        (
+            "dual",
+            {"id": "fact-1"},
+            [
+                {
+                    "artifact_version_id": "version-1",
+                    "job_kind": "ingest_graph",
+                    "status": "done",
+                }
+            ],
+            [{"published_episode_id": "episode-1"}],
+        ),
+        ("fabric", {"id": "fact-1"}, [], []),
+    ],
+)
+def test_rollout_mode_evidence_requires_real_write_path(
+    mode: str,
+    fact: dict[str, str] | None,
+    jobs: list[dict[str, str]],
+    edges: list[dict[str, str]],
+) -> None:
+    snapshot = {"jobs_state": jobs, "graph_edges_state": edges}
+    probe = {
+        "artifact_version_id": "version-1",
+        "episode_id": "episode-1",
+        "fact": fact,
+    }
+
+    assert adapter._rollout_mode_evidence(snapshot, probe, mode)["verified"] is True
 
 
 def test_curation_service_uses_active_voyage_embedding_identity(
@@ -143,6 +360,338 @@ def test_extractor_control_disables_and_restores_derivation() -> None:
     assert current == {"extractor_state": "enabled", "extractor_version": "recovered-v1"}
 
 
+def test_production_actions_dispatch_to_truthful_boundaries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    actions = {
+        "load.soak": "_production_load_soak",
+        "security.database_roles": "_production_database_roles",
+        "security.mcp_authorization": "_production_mcp_authorization",
+        "security.content_attacks": "_production_content_attacks",
+        "governance.retention_drill": "_production_retention_drill",
+        "recovery.backup_restore": "_production_backup_restore",
+        "observability.exercise": "_production_observability",
+        "incident.recovery_drill": "_production_incident_recovery",
+        "rollout.exercise": "_production_rollout",
+        "benchmark.production": "_production_benchmark",
+    }
+
+    for action, helper_name in actions.items():
+        called: list[str] = []
+
+        async def boundary(
+            *_args: Any,
+            helper: str = helper_name,
+            calls: list[str] = called,
+        ) -> adapter._Outcome:
+            calls.append(helper)
+            return adapter._Outcome(observations={"boundary": helper})
+
+        monkeypatch.setattr(adapter, helper_name, boundary)
+        outcome = asyncio.run(
+            adapter._handle_action(
+                object(),
+                {"action": action, "inputs": {}},
+                {},
+                {},
+            )
+        )
+
+        assert called == [helper_name]
+        assert outcome.observations == {"boundary": helper_name}
+
+
+def test_mcp_authorization_inserts_an_immutable_expired_pack(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+    saved: dict[str, Any] = {}
+
+    class ContextPacks:
+        async def save(self, **kwargs: Any) -> SimpleNamespace:
+            calls.append("save")
+            saved.update(kwargs)
+            return SimpleNamespace(id="00000000-0000-0000-0000-000000000123")
+
+    class UnitOfWork:
+        context_packs = ContextPacks()
+
+        async def __aenter__(self) -> UnitOfWork:
+            return self
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+        async def use_tenant(self, group_id: str) -> None:
+            calls.append(f"tenant:{group_id}")
+
+        async def commit(self) -> None:
+            calls.append("commit")
+
+    monkeypatch.setattr(adapter, "SqlAlchemyUnitOfWork", lambda _sessionmaker: UnitOfWork())
+    started_at = datetime.now(UTC)
+
+    pack_id = asyncio.run(
+        adapter._insert_expired_context_pack(
+            SimpleNamespace(sessionmaker=object()),  # type: ignore[arg-type]
+            group_id="p:case",
+        )
+    )
+
+    assert pack_id == "00000000-0000-0000-0000-000000000123"
+    assert calls == ["tenant:p:case", "save", "commit"]
+    assert saved["group_id"] == "p:case"
+    assert saved["expires_at"] < started_at
+    assert saved["assembler_version"] == "context-assembler-v3"
+    assert len(saved["request_hash"]) == 64
+
+
+def test_production_retention_drill_persists_frozen_context_pack(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class StopAfterContext(Exception):
+        pass
+
+    facts = iter(
+        [
+            {"principal": {"api_key": "key", "group_id": "group"}},
+            {"fact": {}},
+            {"fact": {}, "episode_source_id": "deleted-source"},
+            {"fact": {}, "episode_source_id": "held-source"},
+        ]
+    )
+    context_bodies: list[dict[str, Any]] = []
+
+    async def production_fact(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        return next(facts)
+
+    async def api_json(_method: str, path: str, **kwargs: Any) -> tuple[int, dict[str, Any]]:
+        if path == "/v2/knowledge/snapshots":
+            return 200, {"snapshot_id": "snapshot"}
+        context_bodies.append(kwargs["body"])
+        raise StopAfterContext
+
+    monkeypatch.setattr(adapter, "_production_fact", production_fact)
+    monkeypatch.setattr(adapter, "_api_json", api_json)
+
+    with pytest.raises(StopAfterContext):
+        asyncio.run(
+            adapter._production_retention_drill(
+                SimpleNamespace(),  # type: ignore[arg-type]
+                {
+                    "inputs": {
+                        "matrix_ref": {
+                            "clock_advance_seconds": 1,
+                            "states": ["active", "expired", "deleted", "legal_hold"],
+                            "stores": [
+                                "postgres",
+                                "object_store",
+                                "graph",
+                                "valkey",
+                                "snapshot",
+                                "context_pack",
+                                "audit",
+                            ],
+                        },
+                        "targets_ref": {},
+                    }
+                },
+                {},
+            )
+        )
+
+    assert context_bodies[0]["persist"] is True
+
+
+def test_production_benchmark_uses_uniquely_answerable_queries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    aliases = [f"scope-{index:02d}" for index in range(20)]
+    perf_state = {
+        "load_fixture": {
+            "scope_count": 20,
+            "facts_per_scope": 200,
+            "query_count": 200,
+            "seed": 20260828,
+            "aliases": aliases,
+        },
+        "observations": {},
+        "principals": {
+            alias: {"api_key": f"key-{alias}", "group_id": f"group-{alias}"} for alias in aliases
+        },
+    }
+    queries: list[str] = []
+
+    async def search_http(**kwargs: Any) -> tuple[int, dict[str, Any]]:
+        query = str(kwargs["query"])
+        queries.append(query)
+        return 200, {
+            "facts": [
+                {
+                    "fact": query,
+                    "citation": {"structured_record": {"subject": query}},
+                }
+            ],
+            "latency_ms": 10.0,
+        }
+
+    monkeypatch.setattr(adapter, "_search_http", search_http)
+    outcome = asyncio.run(
+        adapter._production_benchmark(
+            SimpleNamespace(),  # type: ignore[arg-type]
+            {
+                "inputs": {
+                    "matrix_ref": {
+                        "corpus_size": 4000,
+                        "query_count": 200,
+                        "scope_distribution": [1, 5, 20],
+                    },
+                    "targets_ref": {
+                        "search_p95_ms": 800,
+                        "search_p99_ms": 3000,
+                        "search_error_rate": 0.01,
+                    },
+                }
+            },
+            {"cases": {"PERF-001": perf_state}},
+        )
+    )
+
+    assert len(queries) == 200
+    expected_queries = []
+    for index in range(200):
+        selected_scope_count = [1, 5, 20][index % 3]
+        scope_index = (index // 3) % selected_scope_count
+        triple = adapter.load_fact(scope_index, (index * 17) % 200, 20260828, 200)["triple"]
+        expected_queries.append(
+            " ".join(str(triple[key]) for key in ("subject", "predicate", "object"))
+        )
+    assert Counter(queries) == Counter(expected_queries)
+    assert outcome.observations["quality"]["critical_miss_count"] == 0
+    assert outcome.observations["decision"]["value"] == "GO"
+
+
+def test_production_load_soak_persists_context_pack(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class StopAfterContext(Exception):
+        pass
+
+    production = json.loads((ROOT / "fixtures" / "production.json").read_text())
+    profile = {
+        "p99_ms": 1.0,
+        "error_rate": 0.0,
+        "sample_count": 1,
+    }
+    search_case = {
+        "observations": {
+            "profiles": {
+                "matrix": [
+                    {**profile, "scope_count": 1, "cache_state": "cold", "virtual_users": 1},
+                    {**profile, "scope_count": 5, "cache_state": "warm", "virtual_users": 8},
+                    {**profile, "scope_count": 20, "cache_state": "warm", "virtual_users": 32},
+                ],
+                "http_reference": {"p95_ms": 1.0, "sample_count": 1},
+            }
+        },
+        "principals": {
+            "scope-00": {
+                "api_key": "key",
+                "principal_id": "principal",
+                "group_id": "p:case",
+            }
+        },
+    }
+    ingestion_case = {
+        "observations": {
+            "profiles": {
+                "matrix": [
+                    {
+                        "concurrency": 1,
+                        "record_count": 1,
+                        "records_per_second": 2.0,
+                        "queue_wait_p95_ms": 1.0,
+                        "time_to_searchable_p95_ms": 1.0,
+                    }
+                ],
+                "expected_fixture": [],
+                "final_state": [],
+            }
+        }
+    }
+    seen: dict[str, Any] = {}
+
+    async def call_mcp_tool(
+        _settings_value: Any,
+        *,
+        principal_id: str,
+        name: str,
+        arguments: dict[str, Any],
+        extra_scopes: tuple[str, ...] = (),
+    ) -> tuple[dict[str, Any], float]:
+        seen.update(
+            principal_id=principal_id,
+            name=name,
+            arguments=arguments,
+            extra_scopes=extra_scopes,
+        )
+        raise StopAfterContext
+
+    monkeypatch.setattr(adapter, "_call_mcp_tool", call_mcp_tool)
+
+    with pytest.raises(StopAfterContext):
+        asyncio.run(
+            adapter._production_load_soak(
+                SimpleNamespace(settings=_settings()),  # type: ignore[arg-type]
+                {
+                    "inputs": {
+                        "matrix_ref": production["load_soak"],
+                        "targets_ref": production["targets"],
+                    }
+                },
+                {"cases": {"PERF-001": search_case, "PERF-002": ingestion_case}},
+            )
+        )
+
+    assert seen == {
+        "principal_id": "principal",
+        "name": "knowledge_get_context",
+        "arguments": {
+            "query": "service-00-0000",
+            "project": "p:case",
+            "limit": 5,
+            "token_budget": 1000,
+            "persist": True,
+        },
+        "extra_scopes": ("memory:snapshot",),
+    }
+
+
+def test_production_search_soak_measures_the_declared_duration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = iter((0.0, 0.5, 1.0))
+
+    async def search_http(**_kwargs: Any) -> tuple[int, dict[str, Any]]:
+        return 200, {"facts": [{}], "latency_ms": 2.0}
+
+    async def sleep(_delay: float) -> None:
+        return None
+
+    monkeypatch.setattr(adapter, "_monotonic", lambda: next(clock))
+    monkeypatch.setattr(adapter.asyncio, "sleep", sleep)
+    monkeypatch.setattr(adapter, "_search_http", search_http)
+    monkeypatch.setattr(adapter, "_text_hit", lambda *_args: True)
+
+    profile = asyncio.run(
+        adapter._production_search_soak({"api_key": "key", "group_id": "p:case"}, duration_s=1.0)
+    )
+
+    assert profile["duration_seconds"] == 1.0
+    assert profile["sample_count"] == 2
+    assert profile["error_rate"] == 0.0
+
+
 def test_disabled_extractor_derives_no_claims() -> None:
     extracted = asyncio.run(
         adapter._DisabledExtractor().extract(
@@ -160,6 +709,183 @@ def test_exception_summary_preserves_nested_leaf_types_without_messages() -> Non
     )
 
     assert adapter._exception_type_summary(nested) == "ExceptionGroup[TimeoutError,ValueError]"
+
+    blocked = adapter.AdapterBlocked("sensitive boundary message")
+    blocked.__cause__ = adapter.httpx2.ReadTimeout("sensitive timeout detail")
+    grouped = ExceptionGroup("sensitive group message", [blocked])
+    summary = adapter._closed_failure_summary(grouped)
+
+    assert summary == "ExceptionGroup[AdapterBlocked]; boundary_category=timeout"
+    assert "sensitive" not in summary
+
+
+def test_mcp_failure_categories_are_stable_and_redacted() -> None:
+    request = adapter.httpx2.Request("GET", "https://mcp.test/secret")
+    unauthorized = adapter.httpx2.HTTPStatusError(
+        "sensitive auth response",
+        request=request,
+        response=adapter.httpx2.Response(401, request=request),
+    )
+    unavailable = adapter.httpx2.HTTPStatusError(
+        "sensitive service response",
+        request=request,
+        response=adapter.httpx2.Response(503, request=request),
+    )
+
+    assert adapter._mcp_failure_category(adapter.httpx2.ReadTimeout("secret")) == "timeout"
+    assert adapter._mcp_failure_category(adapter.httpx2.ConnectError("secret")) == "transport"
+    assert adapter._mcp_failure_category(unauthorized) == "authentication"
+    assert adapter._mcp_failure_category(unavailable) == "http"
+    assert (
+        adapter._mcp_failure_category(
+            adapter.MCPError(code=-32000, message="secret", data={"token": "secret"})
+        )
+        == "protocol"
+    )
+    assert (
+        adapter._mcp_failure_category(
+            adapter.MCPError(
+                code=-32003,
+                message="secret",
+                data={"code": "quota_exceeded", "token": "secret"},
+            )
+        )
+        == "quota"
+    )
+
+
+def test_mcp_call_reports_category_without_exception_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    @asynccontextmanager
+    async def failing_transport(_url: str, *, http_client: Any) -> Any:
+        del http_client
+        raise adapter.httpx2.ReadTimeout("sensitive transport detail")
+        yield
+
+    monkeypatch.setenv("VERA_EVAL_MCP_URL", "https://mcp.test/mcp")
+    monkeypatch.setenv("VERA_EVAL_MCP_JWT_SECRET", "mcp-secret-for-tests-at-least-32-bytes")
+    monkeypatch.setattr(adapter, "streamable_http_client", failing_transport)
+
+    meter = adapter._ActionCostMeter()
+    token = adapter._ACTION_COST_METER.set(meter)
+    try:
+        with pytest.raises(adapter.AdapterBlocked, match="timeout boundary") as raised:
+            asyncio.run(
+                adapter._call_mcp_tool(
+                    _settings(),
+                    principal_id="00000000-0000-0000-0000-000000000123",
+                    name="knowledge_search",
+                    arguments={"query": "owner", "limit": 5},
+                )
+            )
+    finally:
+        adapter._ACTION_COST_METER.reset(token)
+
+    assert "sensitive transport detail" not in str(raised.value)
+    assert meter.complete is False
+
+
+def test_mcp_call_preserves_out_of_scope_denial(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    @asynccontextmanager
+    async def denied_transport(_url: str, *, http_client: Any) -> Any:
+        del http_client
+        raise ExceptionGroup(
+            "MCP transport cleanup",
+            [
+                adapter.MCPError(
+                    code=-32005,
+                    message="project is out of scope",
+                    data={"code": "project_out_of_scope"},
+                )
+            ],
+        )
+        yield
+
+    monkeypatch.setenv("VERA_EVAL_MCP_URL", "https://mcp.test/mcp")
+    monkeypatch.setenv("VERA_EVAL_MCP_JWT_SECRET", "mcp-secret-for-tests-at-least-32-bytes")
+    monkeypatch.setattr(adapter, "streamable_http_client", denied_transport)
+
+    with pytest.raises(adapter._McpProjectOutOfScope):
+        asyncio.run(
+            adapter._call_mcp_tool(
+                _settings(),
+                principal_id="00000000-0000-0000-0000-000000000123",
+                name="knowledge_search",
+                arguments={"query": "owner", "limit": 5, "project": "p:other"},
+            )
+        )
+
+
+def test_production_mcp_probes_block_on_transport_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    @asynccontextmanager
+    async def failing_transport(_url: str, *, http_client: Any) -> Any:
+        del http_client
+        raise adapter.httpx2.ReadTimeout("sensitive transport detail")
+        yield
+
+    monkeypatch.setenv("VERA_EVAL_MCP_URL", "https://mcp.test/mcp")
+    monkeypatch.setattr(adapter, "streamable_http_client", failing_transport)
+
+    with pytest.raises(adapter.AdapterBlocked, match="timeout boundary") as raised:
+        asyncio.run(
+            adapter._production_mcp_probes(
+                token=None,
+                calls=[("knowledge_search", {"query": "owner", "limit": 5})],
+            )
+        )
+
+    assert "sensitive transport detail" not in str(raised.value)
+
+
+def test_production_mcp_probes_accept_structured_policy_denial(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    @asynccontextmanager
+    async def transport(_url: str, *, http_client: Any) -> Any:
+        del http_client
+        yield object()
+
+    class DeniedClient:
+        def __init__(self, _transport: Any, **_kwargs: Any) -> None:
+            pass
+
+        async def __aenter__(self) -> DeniedClient:
+            return self
+
+        async def __aexit__(self, *_args: Any) -> None:
+            pass
+
+        async def call_tool(self, _name: str, _arguments: dict[str, Any], **_kwargs: Any) -> Any:
+            raise adapter.MCPError(
+                code=-32602,
+                message="invalid limit",
+                data={"code": "invalid_input", "field": "limit"},
+            )
+
+    monkeypatch.setenv("VERA_EVAL_MCP_URL", "https://mcp.test/mcp")
+    monkeypatch.setattr(adapter, "streamable_http_client", transport)
+    monkeypatch.setattr(adapter, "Client", DeniedClient)
+
+    result = asyncio.run(
+        adapter._production_mcp_probes(
+            token=None,
+            calls=[("knowledge_search", {"query": "owner", "limit": 51})],
+        )
+    )
+
+    assert result == [
+        {
+            "tool": "knowledge_search",
+            "allowed": False,
+            "error_type": "policy",
+            "latency_ms": result[0]["latency_ms"],
+        }
+    ]
 
 
 def test_adapter_source_has_no_repository_search_or_deterministic_extractor() -> None:
@@ -205,6 +931,105 @@ def test_graph_fault_scenarios_restore_the_dependency_during_cleanup() -> None:
         assert cleanup[0]["action"] == "dependency.configure"
         assert cleanup[0]["input"] == {"dependency": "graph", "state": "available"}
         assert cleanup[0]["observe"] == ["graph.state"]
+
+
+@pytest.mark.parametrize("database_count", [0, 1])
+def test_cleanup_reconciles_requested_resource_ids_only_after_empty_store_verification(
+    monkeypatch: pytest.MonkeyPatch, database_count: int
+) -> None:
+    requested = ["source:rolled-back", "group:p:removed-by-cascade"]
+
+    async def mcp_ready(_settings: Any, _principal_id: str) -> int:
+        return 20
+
+    async def inventory(_container: Any) -> list[str]:
+        return ["source:discovered"]
+
+    async def wait_for_worker(_container: Any) -> None:
+        return None
+
+    async def clear_database(_container: Any) -> tuple[dict[str, int], float, bool]:
+        return {"facts": database_count}, 0.25, True
+
+    async def clear_graph(_settings: Any) -> dict[str, int]:
+        return {"nodes": 0, "edges": 0}
+
+    async def clear_count(_settings: Any) -> int:
+        return 0
+
+    async def api_ready() -> dict[str, str]:
+        return {"status": "ok"}
+
+    async def reset_producers(_path: str, _payload: dict[str, str]) -> dict[str, bool]:
+        return {
+            "release_baseline_restored": True,
+            "process_restarted": True,
+            "invariants_preserved": True,
+        }
+
+    monkeypatch.setenv("VERA_EVAL_SCOPE_ID", "scope-1")
+    monkeypatch.setenv("VERA_EVAL_ROLLOUT_CONTROLLER_URL", "http://rollout-controller")
+    monkeypatch.setenv("VERA_EVAL_ROLLOUT_CONTROLLER_TOKEN", "test-token")
+    monkeypatch.delenv("VERA_EVAL_DEPENDENCY_CONTROL_URL", raising=False)
+    monkeypatch.setattr(adapter, "_settings_fingerprint", lambda *_args: "fingerprint")
+    monkeypatch.setattr(adapter, "_assert_disposable_endpoints", lambda _settings: None)
+    monkeypatch.setattr(adapter, "_mcp_readiness", mcp_ready)
+    monkeypatch.setattr(adapter, "_wait_for_worker_quiescence", wait_for_worker)
+    monkeypatch.setattr(adapter, "_database_inventory", inventory)
+    monkeypatch.setattr(adapter, "_clear_database_with_provider_cost", clear_database)
+    monkeypatch.setattr(adapter, "_clear_graph", clear_graph)
+    monkeypatch.setattr(adapter, "_clear_objects", clear_count)
+    monkeypatch.setattr(adapter, "_clear_valkey", clear_count)
+    monkeypatch.setattr(adapter, "_api_readiness", api_ready)
+    monkeypatch.setattr(adapter, "_rollout_controller_post", reset_producers)
+    request = {
+        "run_id": "run-1",
+        "inputs": {"created_resource_ids": requested},
+        "run_context": {
+            "evaluation_scope": {
+                "kind": "ephemeral_stack",
+                "run_owned": True,
+                "production_writable": False,
+                "id": "scope-1",
+            }
+        },
+    }
+    state = {
+        "preflight": {
+            "run_id": "run-1",
+            "scope_id": "scope-1",
+            "disposable_full_store": True,
+            "settings_fingerprint": "fingerprint",
+            "mcp_principal_id": "principal-1",
+        }
+    }
+
+    outcome = asyncio.run(
+        adapter._cleanup(SimpleNamespace(settings=object()), request, state)  # type: ignore[arg-type]
+    )
+
+    ledger = sorted([*requested, "source:discovered"])
+    cleanup = outcome.observations["cleanup"]
+    assert cleanup["created_resource_ids"] == ledger
+    assert outcome.durable_cost_usd == 0.25
+    assert outcome.durable_cost_complete is True
+    if database_count == 0:
+        assert outcome.status == "PASS"
+        assert cleanup["removed_resource_ids"] == ledger
+        assert cleanup["remaining_resource_ids"] == []
+        assert outcome.removed == ledger
+    else:
+        assert outcome.status == "FAIL"
+        assert cleanup["removed_resource_ids"] == []
+        assert cleanup["remaining_resource_ids"] == ledger
+        assert outcome.removed == []
+
+
+def test_p95_tail_samples_cover_recent_observation_history() -> None:
+    assert adapter._p95_tail_sample_count(0) == 2
+    assert adapter._p95_tail_sample_count(18) == 2
+    assert adapter._p95_tail_sample_count(19) == 3
+    assert adapter._p95_tail_sample_count(40) == 4
 
 
 def test_http_search_uses_public_api_and_only_normalizes_actual_fields(
@@ -541,6 +1366,130 @@ def test_search_equivalence_ignores_volatile_scores_but_keeps_provenance() -> No
     assert adapter._search_equivalence_key(left) != adapter._search_equivalence_key(right)
 
 
+def test_matching_search_equivalence_ignores_unrelated_ranked_results() -> None:
+    expected = {
+        "subject": "Production Service rollout 1",
+        "predicate": "RUNS_ON",
+        "object": "production-cluster-rollout-1",
+    }
+    seeded = {
+        "id": "fact-1",
+        "kind": "fact",
+        "fact": "Production Service rollout 1 RUNS_ON production-cluster-rollout-1",
+        "citation": {
+            "artifact_version_id": "version-1",
+            "assertion_id": "assertion-1",
+            "evidence_id": "evidence-1",
+        },
+    }
+    baseline = adapter._matching_search_equivalence_keys([seeded], expected)
+    after_probe = [
+        {
+            "id": "fact-2",
+            "kind": "fact",
+            "fact": "OPS-009 dual_to_fabric rollout write-path probe",
+            "citation": {"artifact_version_id": "version-2"},
+        },
+        seeded,
+    ]
+
+    assert adapter._matching_search_equivalence_keys(after_probe, expected) == baseline
+
+    after_probe[1] = {
+        **seeded,
+        "citation": {**seeded["citation"], "evidence_id": "evidence-changed"},
+    }
+    assert adapter._matching_search_equivalence_keys(after_probe, expected) != baseline
+
+
+def test_security_scope_probe_accepts_only_mcp_out_of_scope_denial(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def denied(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        raise adapter._McpProjectOutOfScope("out of scope")
+
+    monkeypatch.setattr(adapter, "_search_mcp", denied)
+    current: dict[str, Any] = {
+        "principals": {
+            "a": {
+                "api_key": "case-key-a",
+                "group_id": "p:a",
+                "principal_id": "00000000-0000-0000-0000-000000000123",
+            },
+            "b": {
+                "api_key": "case-key-b",
+                "group_id": "p:b",
+                "principal_id": "00000000-0000-0000-0000-000000000456",
+            },
+        },
+        "searches": {},
+    }
+
+    outcome = asyncio.run(
+        adapter._handle_search(
+            SimpleNamespace(settings=_settings()),  # type: ignore[arg-type]
+            {
+                "case_id": "SEC-001",
+                "action": "search.mcp",
+                "inputs": {"principal": "a", "attempted_scope": "b", "query": "canary"},
+                "observe": ["a.mcp"],
+            },
+            current,
+        )
+    )
+
+    assert outcome.status == "PASS"
+    assert outcome.observations["a"]["mcp"] == {
+        "results": [],
+        "facts": [],
+        "answerable_result_count": 0,
+        "bounded_outcome": "authorization_error",
+        "error": "_McpProjectOutOfScope",
+    }
+
+
+def test_security_scope_probe_does_not_accept_other_mcp_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def malformed(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        raise adapter.AdapterFailed("malformed MCP response")
+
+    monkeypatch.setattr(adapter, "_search_mcp", malformed)
+    current: dict[str, Any] = {
+        "principals": {
+            "a": {
+                "api_key": "case-key-a",
+                "group_id": "p:a",
+                "principal_id": "00000000-0000-0000-0000-000000000123",
+            },
+            "b": {
+                "api_key": "case-key-b",
+                "group_id": "p:b",
+                "principal_id": "00000000-0000-0000-0000-000000000456",
+            },
+        },
+        "searches": {},
+    }
+
+    with pytest.raises(adapter.AdapterFailed, match="malformed MCP response"):
+        asyncio.run(
+            adapter._handle_search(
+                SimpleNamespace(settings=_settings()),  # type: ignore[arg-type]
+                {
+                    "case_id": "SEC-001",
+                    "action": "search.mcp",
+                    "inputs": {
+                        "principal": "a",
+                        "attempted_scope": "b",
+                        "query": "canary",
+                    },
+                    "observe": ["a.mcp"],
+                },
+                current,
+            )
+        )
+
+
 def test_labeled_search_joins_product_fact_keys_to_fixture_ids(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -582,6 +1531,7 @@ def test_labeled_search_joins_product_fact_keys_to_fixture_ids(
         adapter._handle_search(
             SimpleNamespace(settings=None),  # type: ignore[arg-type]
             {
+                "case_id": "E2E-001",
                 "action": "search.http",
                 "inputs": {
                     "queries_ref": [{"query_id": "q-owner", "text": "Who owns Payment API?"}],
@@ -594,6 +1544,91 @@ def test_labeled_search_joins_product_fact_keys_to_fixture_ids(
 
     assert outcome.observations["ranked_results"] == {"q-owner": ["f-payment-owner"]}
     assert outcome.observations["retrieval"]["events"][0]["result_ids"] == ["product-fact-key"]
+
+
+def test_feedback_search_persists_distinct_attribution_packs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[bool, int]] = []
+    sleeps: list[float] = []
+    clock = 0.0
+
+    async def search(_settings: Any, **kwargs: Any) -> dict[str, Any]:
+        nonlocal clock
+        persist = bool(kwargs["persist"])
+        token_budget = int(kwargs["token_budget"])
+        calls.append((persist, token_budget))
+        clock += 0.5
+        return {
+            "facts": [
+                {
+                    "id": "product-fact-key",
+                    "citation": {
+                        "structured_record": {
+                            "subject": "Platform Team",
+                            "predicate": "OWNS",
+                            "object": "Payment API",
+                        }
+                    },
+                }
+            ],
+            "context_pack_id": f"pack-{token_budget}",
+            "latency_ms": 1.0,
+        }
+
+    async def sleep(delay: float) -> None:
+        nonlocal clock
+        sleeps.append(delay)
+        clock += delay
+
+    monkeypatch.setattr(adapter, "_search_mcp", search)
+    monkeypatch.setattr(adapter.asyncio, "sleep", sleep)
+    monkeypatch.setattr(adapter.time, "monotonic", lambda: clock)
+    current: dict[str, Any] = {
+        "principals": {
+            "default": {
+                "api_key": "case-key",
+                "group_id": "p:case",
+                "principal_id": "00000000-0000-0000-0000-000000000123",
+            }
+        },
+        "fixture_facts": [
+            {
+                "fact_id": "f-payment-owner",
+                "triple": {
+                    "subject": "Platform Team",
+                    "predicate": "OWNS",
+                    "object": "Payment API",
+                },
+            }
+        ],
+        "queries": [],
+    }
+
+    outcome = asyncio.run(
+        adapter._handle_search(
+            SimpleNamespace(
+                settings=SimpleNamespace(
+                    mcp=SimpleNamespace(quota_enabled=True, quota_context_per_minute=2)
+                )
+            ),  # type: ignore[arg-type]
+            {
+                "case_id": "LEARN-001",
+                "action": "search.mcp",
+                "inputs": {
+                    "queries_ref": [{"query_id": "q-owner-en-1", "text": "Who owns Payment API?"}],
+                    "limit": 5,
+                },
+            },
+            current,
+        )
+    )
+
+    assert calls == [(True, 2000 + index) for index in range(5)]
+    assert [event["context_pack_id"] for event in outcome.observations["retrieval"]["events"]] == [
+        f"pack-{2000 + index}" for index in range(5)
+    ]
+    assert sleeps == pytest.approx([59.75, 59.75])
 
 
 def test_visibility_poll_waits_for_the_ingested_artifact(
@@ -646,6 +1681,7 @@ def test_mcp_search_uses_streamable_http_sdk_and_actual_tool_result(
         seen["url"] = url
         seen["http_client_type"] = type(http_client).__name__
         seen["host"] = http_client.headers.get("host")
+        seen["authorization"] = http_client.headers.get("authorization")
         yield object()
 
     class FakeClient:
@@ -669,6 +1705,7 @@ def test_mcp_search_uses_streamable_http_sdk_and_actual_tool_result(
             return SimpleNamespace(
                 is_error=False,
                 structured_content={
+                    "pack_id": "00000000-0000-0000-0000-000000000456",
                     "results": [
                         {
                             "kind": "fact",
@@ -676,7 +1713,7 @@ def test_mcp_search_uses_streamable_http_sdk_and_actual_tool_result(
                             "text": "Platform Team OWNS Payment API",
                             "citation": {"evidence_id": "evidence-1"},
                         }
-                    ]
+                    ],
                 },
                 content=[],
             )
@@ -704,6 +1741,44 @@ def test_mcp_search_uses_streamable_http_sdk_and_actual_tool_result(
     assert seen["arguments"] == {"query": "owner", "limit": 5, "project": "p:case"}
     assert result["facts"][0]["id"] == "fact-key-1"
     assert "trace_id" not in result
+    read_claims = adapter.jwt.decode(
+        str(seen["authorization"]).removeprefix("Bearer "),
+        "mcp-secret-for-tests-at-least-32-bytes",
+        algorithms=["HS256"],
+        audience="https://mcp.vera.local",
+        issuer="https://auth.vera.local",
+    )
+    assert read_claims["scope"] == "memory:read"
+
+    persisted = asyncio.run(
+        adapter._search_mcp(
+            _settings(),
+            principal_id="00000000-0000-0000-0000-000000000123",
+            query="owner",
+            limit=5,
+            project="p:case",
+            persist=True,
+            token_budget=2004,
+        )
+    )
+
+    assert seen["tool"] == "knowledge_get_context"
+    assert seen["arguments"] == {
+        "query": "owner",
+        "limit": 5,
+        "project": "p:case",
+        "persist": True,
+        "token_budget": 2004,
+    }
+    assert persisted["context_pack_id"] == "00000000-0000-0000-0000-000000000456"
+    persisted_claims = adapter.jwt.decode(
+        str(seen["authorization"]).removeprefix("Bearer "),
+        "mcp-secret-for-tests-at-least-32-bytes",
+        algorithms=["HS256"],
+        audience="https://mcp.vera.local",
+        issuer="https://auth.vera.local",
+    )
+    assert persisted_claims["scope"].split() == ["memory:read", "memory:snapshot"]
 
 
 def test_mcp_token_uses_the_frozen_runtime_secret_without_a_duplicate_env(
@@ -723,8 +1798,18 @@ def test_mcp_token_uses_the_frozen_runtime_secret_without_a_duplicate_env(
     assert claims["sub"] == "00000000-0000-0000-0000-000000000123"
 
 
-def test_model_call_records_provider_model_latency_and_usage_without_fake_cost(
+@pytest.mark.parametrize(
+    ("requested_model", "actual_model", "expected_cost"),
+    [
+        ("candidate-model", "candidate-model", None),
+        ("gpt-4.1-mini", "gpt-4.1-mini", None),
+    ],
+)
+def test_model_call_records_provider_model_latency_usage_and_cost(
     monkeypatch: pytest.MonkeyPatch,
+    requested_model: str,
+    actual_model: str,
+    expected_cost: float | None,
 ) -> None:
     seen: dict[str, Any] = {}
 
@@ -735,7 +1820,7 @@ def test_model_call_records_provider_model_latency_and_usage_without_fake_cost(
         return httpx.Response(
             200,
             json={
-                "model": "candidate-model-2026-08-01",
+                "model": actual_model,
                 "choices": [
                     {
                         "message": {
@@ -762,32 +1847,79 @@ def test_model_call_records_provider_model_latency_and_usage_without_fake_cost(
 
     monkeypatch.setattr(adapter, "_http_client", client)
 
-    result = asyncio.run(
-        adapter._call_model(
-            _settings(),
-            model="candidate-model",
-            messages=[{"role": "user", "content": "question"}],
+    meter = adapter._ActionCostMeter()
+    token = adapter._ACTION_COST_METER.set(meter)
+    try:
+        result = asyncio.run(
+            adapter._call_model(
+                _settings(),
+                model=requested_model,
+                messages=[{"role": "user", "content": "question"}],
+            )
         )
-    )
+    finally:
+        adapter._ACTION_COST_METER.reset(token)
 
     assert seen["url"] == "https://model.test/v1/chat/completions"
     assert seen["authorization"] == "Bearer model-secret"
-    assert seen["body"]["model"] == "candidate-model"
+    assert seen["body"]["model"] == requested_model
     assert seen["body"]["stream"] is False
-    assert result.model_id == "candidate-model-2026-08-01"
+    assert result.model_id == actual_model
     assert result.latency_ms >= 0
     assert result.usage == {"prompt_tokens": 12, "completion_tokens": 5, "total_tokens": 17}
-    assert result.cost_usd is None
+    if expected_cost is None:
+        assert result.cost_usd is None
+        assert meter.complete is False
+    else:
+        assert result.cost_usd == pytest.approx(expected_cost)
+        assert meter.cost_usd == pytest.approx(expected_cost)
+        assert meter.complete is True
+
+
+def test_model_call_rejects_provider_model_substitution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    transport = httpx.MockTransport(
+        lambda _request: httpx.Response(
+            200,
+            json={
+                "model": "more-expensive-model",
+                "choices": [{"message": {"content": "{}"}}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+            },
+        )
+    )
+
+    def client(**kwargs: Any) -> httpx.AsyncClient:
+        timeout = kwargs.pop("timeout_s", None)
+        return httpx.AsyncClient(transport=transport, timeout=timeout, **kwargs)
+
+    monkeypatch.setattr(adapter, "_http_client", client)
+    meter = adapter._ActionCostMeter()
+    token = adapter._ACTION_COST_METER.set(meter)
+    try:
+        with pytest.raises(adapter.AdapterBlocked, match="provider substituted model"):
+            asyncio.run(
+                adapter._call_model(
+                    _settings(),
+                    model="candidate-model",
+                    messages=[{"role": "user", "content": "question"}],
+                )
+            )
+    finally:
+        adapter._ACTION_COST_METER.reset(token)
+
+    assert meter.complete is False
 
 
 def test_model_call_decodes_actual_sse_chunks(monkeypatch: pytest.MonkeyPatch) -> None:
     events = [
         {
-            "model": "candidate-model-2026-08-01",
+            "model": "candidate-model",
             "choices": [{"index": 0, "delta": {"role": "assistant"}}],
         },
         {
-            "model": "candidate-model-2026-08-01",
+            "model": "candidate-model",
             "choices": [
                 {
                     "index": 0,
@@ -805,9 +1937,14 @@ def test_model_call_decodes_actual_sse_chunks(monkeypatch: pytest.MonkeyPatch) -
             ],
         },
         {
-            "model": "candidate-model-2026-08-01",
+            "model": "candidate-model",
             "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
-            "usage": {"prompt_tokens": 12, "completion_tokens": 5, "total_tokens": 17},
+            "usage": {
+                "prompt_tokens": 12,
+                "completion_tokens": 5,
+                "total_tokens": 17,
+                "cost_usd": 0.004,
+            },
         },
     ]
     body = "".join(f"data: {json.dumps(event)}\n\n" for event in events) + "data: [DONE]\n\n"
@@ -825,18 +1962,190 @@ def test_model_call_decodes_actual_sse_chunks(monkeypatch: pytest.MonkeyPatch) -
 
     monkeypatch.setattr(adapter, "_http_client", client)
 
-    result = asyncio.run(
-        adapter._call_model(
-            _settings(),
-            model="candidate-model",
-            messages=[{"role": "user", "content": "question"}],
+    meter = adapter._ActionCostMeter()
+    token = adapter._ACTION_COST_METER.set(meter)
+    try:
+        result = asyncio.run(
+            adapter._call_model(
+                _settings(),
+                model="candidate-model",
+                messages=[{"role": "user", "content": "question"}],
+            )
+        )
+    finally:
+        adapter._ACTION_COST_METER.reset(token)
+
+    assert result.payload["answer"] == "Grounded answer"
+    assert result.model_id == "candidate-model"
+    assert result.usage == {"prompt_tokens": 12, "completion_tokens": 5, "total_tokens": 17}
+    assert result.cost_usd == pytest.approx(0.004)
+    assert meter.cost_usd == pytest.approx(0.004)
+    assert meter.complete is True
+
+
+def test_sse_response_rejects_ambiguous_cost_field() -> None:
+    event = {
+        "model": "candidate-model",
+        "choices": [{"index": 0, "delta": {"content": "answer"}}],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "cost": 25},
+    }
+    response = httpx.Response(
+        200,
+        headers={"Content-Type": "text/event-stream"},
+        text=f"data: {json.dumps(event)}\n\ndata: [DONE]\n\n",
+    )
+
+    assert "cost_usd" not in adapter._model_response_payload(response)
+
+
+def test_agent_reported_cost_requires_every_repetition() -> None:
+    assert adapter._agent_reported_cost(
+        {"runs": [{"cost_usd": 0.1}, {"cost_usd": 0.2}]}
+    ) == pytest.approx(0.3)
+    assert adapter._agent_reported_cost({"runs": [{"cost_usd": 0.1}, {}]}) is None
+
+
+def test_action_cost_is_incomplete_when_durable_usage_is_incomplete(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    saved: list[dict[str, Any]] = []
+
+    async def handle(*_args: Any) -> adapter._Outcome:
+        return adapter._Outcome()
+
+    async def daily_metrics(*_args: Any) -> list[dict[str, Any]]:
+        return []
+
+    async def durable_meter(_container: Any) -> tuple[float, bool]:
+        return 0.25, False
+
+    async def dispose(_container: Any) -> None:
+        return None
+
+    monkeypatch.setattr(adapter, "_load_state", lambda _run_id: {})
+    monkeypatch.setattr(adapter, "_save_state", lambda _run_id, state: saved.append(state.copy()))
+    monkeypatch.setattr(adapter, "get_settings", object)
+    monkeypatch.setattr(adapter, "build_container", lambda _settings: object())
+    monkeypatch.setattr(adapter, "_case_state", lambda *_args: {})
+    monkeypatch.setattr(adapter, "_handle_action", handle)
+    monkeypatch.setattr(adapter, "_daily_metrics", daily_metrics)
+    monkeypatch.setattr(adapter, "_evidence", lambda *_args: [])
+    monkeypatch.setattr(adapter, "_durable_provider_meter", durable_meter)
+    monkeypatch.setattr(adapter, "dispose_container", dispose)
+
+    response = asyncio.run(
+        adapter._run(
+            {
+                "run_id": "run-1",
+                "case_id": "CASE-1",
+                "action": "fixture.seed",
+                "request_nonce": "nonce",
+                "observe": [],
+            }
         )
     )
 
-    assert result.payload["answer"] == "Grounded answer"
-    assert result.model_id == "candidate-model-2026-08-01"
-    assert result.usage == {"prompt_tokens": 12, "completion_tokens": 5, "total_tokens": 17}
-    assert result.cost_usd is None
+    assert response["cost_usd"] is None
+    assert saved[-1]["metered_provider_cost_usd"] == 0.25
+
+
+def test_cost_metering_requires_durable_tracking_and_priced_provider_models() -> None:
+    settings = _settings()
+    settings.observability.cost_tracking_enabled = False
+    assert adapter._cost_metering_errors(settings, {"candidate": "gpt-4.1-mini"}) == [
+        "durable provider cost tracking is disabled"
+    ]
+
+    settings.observability.cost_tracking_enabled = True
+    assert adapter._cost_metering_errors(settings, {"candidate": "unpriced-model"}) == [
+        "active provider models have no configured price: unpriced-model"
+    ]
+    assert adapter._cost_metering_errors(settings, {"embedding": "unpriced-model"}) == [
+        "active provider models have no configured price: unpriced-model"
+    ]
+    settings.rerank.cross_encoder_provider = "llm"
+    assert adapter._cost_metering_errors(settings, {"reranker": "unpriced-model"}) == [
+        "active provider models have no configured price: unpriced-model"
+    ]
+
+    settings.memory.embedder = "openai"
+    assert adapter._cost_metering_errors(settings, {"embedding": "text-embedding-3-small"}) == [
+        "the OpenAI embedder does not expose exact provider token usage"
+    ]
+
+    settings.memory.embedder = "voyage"
+    settings.voyage.base_url = "https://compatible.test/v1"
+    assert adapter._cost_metering_errors(settings, {"embedding": "voyage-4-lite"}) == [
+        "custom Voyage endpoints do not have an authoritative local tariff"
+    ]
+
+
+def test_provider_preflight_rejects_an_unpriced_model_without_exact_cost(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def model(*_args: Any, **kwargs: Any) -> adapter._ModelResult:
+        return adapter._ModelResult(
+            payload={"ok": True},
+            model_id=str(kwargs["model"]),
+            latency_ms=1.0,
+            usage={"prompt_tokens": 1, "completion_tokens": 1},
+            cost_usd=None,
+        )
+
+    monkeypatch.setattr(adapter, "_call_model", model)
+    settings = _settings()
+    settings.memory.embedder = "openai"
+    container = SimpleNamespace(
+        settings=settings,
+        extractor=SimpleNamespace(provider="openai-compatible", model="extractor-model"),
+        judge=object(),
+        entity_judge=object(),
+        embedder=object(),
+        reranker=object(),
+        usage_sink=None,
+    )
+
+    with pytest.raises(adapter.AdapterBlocked, match="did not report complete exact"):
+        asyncio.run(adapter._provider_preflight(container))
+
+
+def test_cancelled_recovery_command_waits_for_harness_acknowledgement(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    polled = threading.Event()
+    acknowledged = threading.Event()
+
+    def status(_exchange: Path) -> tuple[str, str] | None:
+        polled.set()
+        return ("done", "restored") if acknowledged.is_set() else None
+
+    async def exercise() -> None:
+        task = asyncio.create_task(adapter._production_recovery_command("restore", "abcdef"))
+        assert await asyncio.to_thread(polled.wait, 1)
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
+        acknowledged.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    monkeypatch.setenv("VERA_EVAL_RECOVERY_ROOT", str(tmp_path))
+    monkeypatch.setenv("VERA_EVAL_RECOVERY_TIMEOUT_S", "2")
+    monkeypatch.setattr(adapter, "_recovery_status", status)
+
+    asyncio.run(exercise())
+
+
+def test_recovery_retries_use_isolated_exchange_directories(tmp_path: Path) -> None:
+    first = adapter._prepare_recovery_request(tmp_path, "restore", "abcdef")
+    (first / "request").unlink()
+    (first / "failed").write_text("failed", encoding="utf-8")
+
+    second = adapter._prepare_recovery_request(tmp_path, "restore", "abcdef")
+
+    assert first != second
+    assert (first / "failed").read_text(encoding="utf-8") == "failed"
+    assert (second / "request").read_text(encoding="utf-8") == "restore\n"
 
 
 def test_agent_uses_only_mcp_product_ids_and_citations(
@@ -899,6 +2208,7 @@ def test_agent_uses_only_mcp_product_ids_and_citations(
                 "group_id": "p:case",
             },
             question="Who owns Payment API?",
+            evaluation_time="2026-08-28T17:05:00Z",
         )
     )
 
@@ -915,6 +2225,9 @@ def test_agent_uses_only_mcp_product_ids_and_citations(
     assert result["unsupported_claim_count"] == 0
     assert "cost_usd" not in result
     assert "later evidence may qualify or supersede earlier evidence" in answer_system_prompt
+    assert "Treat relative time expressions as source-relative" in answer_system_prompt
+    assert "source collection cutoff is 2026-08-28T17:05:00Z" in answer_system_prompt
+    assert result["evaluation_time"] == "2026-08-28T17:05:00Z"
 
 
 def test_agent_uses_task_specific_retrieval_coverage(
@@ -925,11 +2238,19 @@ def test_agent_uses_task_specific_retrieval_coverage(
     async def fake_answer(
         _settings: Any,
         *,
+        usage_sink: Any,
         principal: dict[str, Any],
         question: str,
         retrieval_limit: int = 10,
         token_budget: int = 4000,
+        context_call_pacer: Any = None,
+        as_of: str | None = None,
+        evaluation_time: str | None = None,
     ) -> dict[str, Any]:
+        assert usage_sink is None
+        assert context_call_pacer is not None
+        assert as_of is None
+        assert evaluation_time == "2026-08-28T17:05:00Z"
         arguments_seen.append(
             {
                 "principal": principal,
@@ -941,24 +2262,29 @@ def test_agent_uses_task_specific_retrieval_coverage(
         return {"answer": "brief"}
 
     monkeypatch.setattr(adapter, "_agent_answer", fake_answer)
-    container = SimpleNamespace(settings=_settings())
+    container = SimpleNamespace(settings=_settings(), usage_sink=None)
     request = {
         "inputs": {
             "question_ref": {
-                "prompt": "Review all documents.",
+                "prompt": (
+                    "Compare the changes at 2026-08-28T08:05:00Z and "
+                    "2026-08-28T17:05:00Z, then summarize the current state."
+                ),
+                "expected": "summary",
                 "retrieval_limit": 25,
                 "token_budget": 8000,
             }
         }
     }
     current = {
+        "source_reference_times": ["2026-08-28T08:05:00Z", "2026-08-28T17:05:00Z"],
         "principals": {
             "default": {
                 "principal_id": "00000000-0000-0000-0000-000000000123",
                 "group_id": "p:case",
                 "api_key": "test-key",
-            }
-        }
+            },
+        },
     }
 
     result = asyncio.run(adapter._agent(container, request, current))  # type: ignore[arg-type]
@@ -967,7 +2293,10 @@ def test_agent_uses_task_specific_retrieval_coverage(
     assert arguments_seen == [
         {
             "principal": current["principals"]["default"],
-            "question": "Review all documents.",
+            "question": (
+                "Compare the changes at 2026-08-28T08:05:00Z and "
+                "2026-08-28T17:05:00Z, then summarize the current state."
+            ),
             "retrieval_limit": 25,
             "token_budget": 8000,
         }
@@ -992,6 +2321,7 @@ def test_weekly_drift_inspection_uses_bound_panel_and_human_label() -> None:
     ActionResponse.from_dict(response, expected_request_nonce="inspection-nonce")
 
     assert response["status"] == "PASS"
+    assert response["cost_usd"] == 0.0
     assert response["observations"]["check"]["passed"] is True
     assert response["observations"]["slices"]["source"]["sample_size"] == 53
     assert response["observations"]["slices"]["language"]["counts"] == {
@@ -1028,6 +2358,7 @@ def test_weekly_drift_inspection_blocks_without_versioned_artifact() -> None:
 
     assert response["status"] == "BLOCKED"
     assert response["message"] == "LEARN-004 requires a versioned drift artifact"
+    assert response["cost_usd"] == 0.0
 
 
 def test_weekly_drift_metrics_must_match_bound_source_records(tmp_path: Path) -> None:
@@ -1056,7 +2387,7 @@ def test_weekly_drift_metrics_must_match_bound_source_records(tmp_path: Path) ->
         )
 
 
-def test_agent_passes_explicit_question_time_to_mcp(
+def test_agent_passes_explicit_as_of_to_mcp(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     seen: list[dict[str, Any]] = []
@@ -1101,11 +2432,51 @@ def test_agent_passes_explicit_question_time_to_mcp(
                 "group_id": "p:case",
             },
             question="Where did it run at 2026-04-01T12:00:00Z?",
+            as_of="2026-04-01T12:00:00Z",
         )
     )
 
     assert len(seen) == 2
     assert all(call["as_of"] == "2026-04-01T12:00:00Z" for call in seen)
+
+
+def test_agent_does_not_infer_as_of_from_event_time_text(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[dict[str, Any]] = []
+    model_calls = 0
+
+    async def fake_mcp(*_args: Any, **kwargs: Any) -> tuple[dict[str, Any], float]:
+        seen.append(kwargs["arguments"])
+        return {"pack_id": "pack-1", "result_references": [], "results": []}, 1.0
+
+    async def fake_model(*_args: Any, **_kwargs: Any) -> adapter._ModelResult:
+        nonlocal model_calls
+        model_calls += 1
+        payload = (
+            {"queries": []}
+            if model_calls == 1
+            else {"answer": "Unknown.", "used_result_ids": [], "citations": [], "abstained": True}
+        )
+        return adapter._ModelResult(
+            payload=payload,
+            model_id="actual-model",
+            latency_ms=1.0,
+            usage={"total_tokens": 1},
+            cost_usd=None,
+        )
+
+    monkeypatch.setattr(adapter, "_call_mcp_tool", fake_mcp)
+    monkeypatch.setattr(adapter, "_call_model", fake_model)
+
+    asyncio.run(
+        adapter._agent_answer(
+            _settings(),
+            principal={"principal_id": "principal", "group_id": "p:case"},
+            question="Given the deployment at 2026-04-01T12:00:00Z, where does it run now?",
+        )
+    )
+
+    assert len(seen) == 1
+    assert "as_of" not in seen[0]
 
 
 def test_agent_fails_closed_when_mcp_is_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1141,6 +2512,8 @@ def test_preflight_requires_exact_configured_ephemeral_scope(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("VERA_EVAL_SCOPE_ID", "eval-owned")
+    monkeypatch.setenv("VERA_EVAL_ROLLOUT_CONTROLLER_URL", "http://rollout-controller")
+    monkeypatch.setenv("VERA_EVAL_ROLLOUT_CONTROLLER_TOKEN", "test-token")
     request = {
         "request_nonce": "nonce",
         "inputs": {
@@ -1157,6 +2530,235 @@ def test_preflight_requires_exact_configured_ephemeral_scope(
 
     assert response["status"] == "FAIL"
     assert response["observations"]["safety"]["scope_run_owned"] is False
+
+
+def test_preflight_registers_the_principal_used_for_mcp_readiness(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    principal_id = "00000000-0000-0000-0000-000000000123"
+    saved: list[dict[str, Any]] = []
+
+    async def database_counts(_container: Any) -> dict[str, int]:
+        return {}
+
+    async def graph_counts(_settings: Settings) -> dict[str, int]:
+        return {"nodes": 0, "edges": 0}
+
+    async def zero_count(_settings: Settings) -> int:
+        return 0
+
+    async def zero_meter(_container: Any) -> tuple[float, bool]:
+        return 0.0, True
+
+    async def clear_database(_container: Any) -> dict[str, int]:
+        return {}
+
+    async def api_readiness() -> dict[str, str]:
+        return {"status": "ok"}
+
+    async def register_principal() -> str:
+        return principal_id
+
+    async def mcp_readiness(_settings: Settings, actual_principal_id: str) -> int:
+        assert saved[0]["preflight"]["mcp_principal_id"] == actual_principal_id
+        assert actual_principal_id == principal_id
+        return 12
+
+    async def provider_preflight(_container: Any) -> dict[str, str]:
+        return {"candidate-model": "candidate-model"}
+
+    monkeypatch.setenv("VERA_EVAL_SCOPE_ID", "eval-owned")
+    monkeypatch.setenv("VERA_EVAL_ROLLOUT_CONTROLLER_URL", "http://rollout-controller")
+    monkeypatch.setenv("VERA_EVAL_ROLLOUT_CONTROLLER_TOKEN", "test-token")
+    monkeypatch.setattr(adapter, "_assert_disposable_endpoints", lambda _settings: None)
+    monkeypatch.setattr(adapter, "_runtime_manifest_errors", lambda *_args: ([], {}))
+    monkeypatch.setattr(adapter, "_database_counts", database_counts)
+    monkeypatch.setattr(adapter, "_graph_counts", graph_counts)
+    monkeypatch.setattr(adapter, "_object_count", zero_count)
+    monkeypatch.setattr(adapter, "_valkey_count", zero_count)
+    monkeypatch.setattr(adapter, "_durable_provider_meter", zero_meter)
+    monkeypatch.setattr(adapter, "_clear_database", clear_database)
+    monkeypatch.setattr(adapter, "_clear_valkey", zero_count)
+    monkeypatch.setattr(adapter, "_api_readiness", api_readiness)
+    monkeypatch.setattr(adapter, "_register_mcp_readiness_principal", register_principal)
+    monkeypatch.setattr(adapter, "_mcp_readiness", mcp_readiness)
+    monkeypatch.setattr(adapter, "_provider_preflight", provider_preflight)
+    monkeypatch.setattr(adapter, "_save_state", lambda _run_id, state: saved.append(state.copy()))
+    state: dict[str, Any] = {}
+    request = {
+        "run_id": "preflight-run",
+        "request_nonce": "nonce",
+        "inputs": {
+            "evaluation_scope": {
+                "id": "eval-owned",
+                "kind": "ephemeral_stack",
+                "run_owned": True,
+                "production_writable": False,
+            }
+        },
+        "run_context": {},
+    }
+
+    response = asyncio.run(
+        adapter._preflight(SimpleNamespace(settings=_settings()), request, state)  # type: ignore[arg-type]
+    )
+
+    assert response["status"] == "PASS"
+    assert response["observations"]["safety"]["mcp_tool_count"] == 12
+    assert state["preflight"]["mcp_principal_id"] == principal_id
+
+
+def test_preflight_cancellation_clears_registered_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cleared: list[str] = []
+
+    async def database_counts(_container: Any) -> dict[str, int]:
+        return {}
+
+    async def graph_counts(_settings: Settings) -> dict[str, int]:
+        return {"nodes": 0, "edges": 0}
+
+    async def zero_count(_settings: Settings) -> int:
+        return 0
+
+    async def zero_meter(_container: Any) -> tuple[float, bool]:
+        return 0.0, True
+
+    async def api_readiness() -> dict[str, str]:
+        return {"status": "ok"}
+
+    async def provider_preflight(_container: Any) -> dict[str, str]:
+        return {"candidate-model": "candidate-model"}
+
+    async def register_principal() -> str:
+        return "principal"
+
+    async def cancelled_readiness(_settings: Settings, _principal_id: str) -> int:
+        raise asyncio.CancelledError
+
+    async def clear_database(_container: Any) -> dict[str, int]:
+        cleared.append("database")
+        return {}
+
+    async def clear_valkey(_settings: Settings) -> int:
+        cleared.append("valkey")
+        return 0
+
+    monkeypatch.setenv("VERA_EVAL_SCOPE_ID", "eval-owned")
+    monkeypatch.setenv("VERA_EVAL_ROLLOUT_CONTROLLER_URL", "http://rollout-controller")
+    monkeypatch.setenv("VERA_EVAL_ROLLOUT_CONTROLLER_TOKEN", "test-token")
+    monkeypatch.setattr(adapter, "_assert_disposable_endpoints", lambda _settings: None)
+    monkeypatch.setattr(adapter, "_runtime_manifest_errors", lambda *_args: ([], {}))
+    monkeypatch.setattr(adapter, "_database_counts", database_counts)
+    monkeypatch.setattr(adapter, "_graph_counts", graph_counts)
+    monkeypatch.setattr(adapter, "_object_count", zero_count)
+    monkeypatch.setattr(adapter, "_valkey_count", zero_count)
+    monkeypatch.setattr(adapter, "_durable_provider_meter", zero_meter)
+    monkeypatch.setattr(adapter, "_api_readiness", api_readiness)
+    monkeypatch.setattr(adapter, "_provider_preflight", provider_preflight)
+    monkeypatch.setattr(adapter, "_register_mcp_readiness_principal", register_principal)
+    monkeypatch.setattr(adapter, "_mcp_readiness", cancelled_readiness)
+    monkeypatch.setattr(adapter, "_clear_database", clear_database)
+    monkeypatch.setattr(adapter, "_clear_valkey", clear_valkey)
+    monkeypatch.setattr(adapter, "_save_state", lambda *_args: None)
+    state: dict[str, Any] = {}
+    request = {
+        "run_id": "preflight-run",
+        "request_nonce": "nonce",
+        "inputs": {
+            "evaluation_scope": {
+                "id": "eval-owned",
+                "kind": "ephemeral_stack",
+                "run_owned": True,
+                "production_writable": False,
+            }
+        },
+        "run_context": {},
+    }
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(
+            adapter._preflight(SimpleNamespace(settings=_settings()), request, state)  # type: ignore[arg-type]
+        )
+
+    assert cleared == ["database", "valkey"]
+    assert "preflight" not in state
+
+
+def test_preflight_checks_providers_before_registering_a_principal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registered = False
+    saved = False
+
+    async def database_counts(_container: Any) -> dict[str, int]:
+        return {}
+
+    async def graph_counts(_settings: Settings) -> dict[str, int]:
+        return {"nodes": 0, "edges": 0}
+
+    async def zero_count(_settings: Settings) -> int:
+        return 0
+
+    async def zero_meter(_container: Any) -> tuple[float, bool]:
+        return 0.0, True
+
+    async def clear_database(_container: Any) -> dict[str, int]:
+        return {}
+
+    async def api_readiness() -> dict[str, str]:
+        return {"status": "ok"}
+
+    async def register_principal() -> str:
+        nonlocal registered
+        registered = True
+        return "principal"
+
+    async def provider_preflight(_container: Any) -> dict[str, str]:
+        raise adapter.AdapterBlocked("provider unavailable")
+
+    def save_state(_run_id: str, _state: dict[str, Any]) -> None:
+        nonlocal saved
+        saved = True
+
+    monkeypatch.setenv("VERA_EVAL_SCOPE_ID", "eval-owned")
+    monkeypatch.setenv("VERA_EVAL_ROLLOUT_CONTROLLER_URL", "http://rollout-controller")
+    monkeypatch.setenv("VERA_EVAL_ROLLOUT_CONTROLLER_TOKEN", "test-token")
+    monkeypatch.setattr(adapter, "_assert_disposable_endpoints", lambda _settings: None)
+    monkeypatch.setattr(adapter, "_runtime_manifest_errors", lambda *_args: ([], {}))
+    monkeypatch.setattr(adapter, "_database_counts", database_counts)
+    monkeypatch.setattr(adapter, "_graph_counts", graph_counts)
+    monkeypatch.setattr(adapter, "_object_count", zero_count)
+    monkeypatch.setattr(adapter, "_valkey_count", zero_count)
+    monkeypatch.setattr(adapter, "_durable_provider_meter", zero_meter)
+    monkeypatch.setattr(adapter, "_clear_database", clear_database)
+    monkeypatch.setattr(adapter, "_clear_valkey", zero_count)
+    monkeypatch.setattr(adapter, "_api_readiness", api_readiness)
+    monkeypatch.setattr(adapter, "_register_mcp_readiness_principal", register_principal)
+    monkeypatch.setattr(adapter, "_provider_preflight", provider_preflight)
+    monkeypatch.setattr(adapter, "_save_state", save_state)
+    request = {
+        "run_id": "preflight-run",
+        "request_nonce": "nonce",
+        "inputs": {
+            "evaluation_scope": {
+                "id": "eval-owned",
+                "kind": "ephemeral_stack",
+                "run_owned": True,
+                "production_writable": False,
+            }
+        },
+        "run_context": {},
+    }
+
+    with pytest.raises(adapter.AdapterBlocked, match="provider unavailable"):
+        asyncio.run(
+            adapter._preflight(SimpleNamespace(settings=_settings()), request, {})  # type: ignore[arg-type]
+        )
+
+    assert registered is False
+    assert saved is True
 
 
 def test_routing_joins_published_episode_durable_source_to_claim() -> None:
@@ -1236,7 +2838,9 @@ def test_decision_includes_review_attached_to_the_conflicting_slot() -> None:
     assert decision["review_ids"] == ["review-1"]
 
 
-def test_runtime_manifest_covers_every_active_model_and_embedding_setting() -> None:
+def test_runtime_manifest_covers_active_models_runtime_and_build(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     settings = _settings()
     settings = settings.model_copy(
         update={
@@ -1262,10 +2866,32 @@ def test_runtime_manifest_covers_every_active_model_and_embedding_setting() -> N
         "embedding_dimension": "1536",
         "reranker": "rerank-2.5",
     }
+    git_sha = "a" * 40
+    metadata = tmp_path / "build-metadata.json"
+    metadata.write_text(json.dumps({"git_sha": git_sha, "git_dirty": False}), encoding="utf-8")
+    monkeypatch.setattr(adapter, "_EVALUATOR_BUILD_METADATA_PATH", metadata)
+    agent_runtime = {
+        "concurrency": 4,
+        "quota_enabled": True,
+        "context_per_minute": 20,
+        "window_seconds": 60,
+        "backend": "valkey" if settings.resilience.valkey_url else "in_process",
+    }
     request = {
         "run_context": {
-            "manifest": {"graph_backend": "graphiti/neo4j", "models": models},
-            "quality_config": {"fabric_write_mode": "fabric"},
+            "profile": "release",
+            "manifest": {
+                "git_sha": git_sha,
+                "git_dirty": False,
+                "app_image_digest": "sha256:" + "c" * 64,
+                "service_version": adapter.__version__,
+                "graph_backend": "graphiti/neo4j",
+                "models": models,
+            },
+            "quality_config": {
+                "fabric_write_mode": "fabric",
+                "agent_context_runtime": agent_runtime,
+            },
         }
     }
 
@@ -1277,6 +2903,89 @@ def test_runtime_manifest_covers_every_active_model_and_embedding_setting() -> N
     request["run_context"]["manifest"]["models"]["embedding_dimension"] = "3072"
     errors, _actual = adapter._runtime_manifest_errors(container, request)  # type: ignore[arg-type]
     assert errors == ["manifest model 'embedding_dimension' does not match the active runtime"]
+
+    request["run_context"]["manifest"]["models"]["embedding_dimension"] = "1536"
+    request["run_context"]["manifest"]["git_sha"] = "b" * 40
+    errors, _actual = adapter._runtime_manifest_errors(container, request)  # type: ignore[arg-type]
+    assert errors == ["evaluator image git_sha does not match the release manifest"]
+
+    request["run_context"]["manifest"]["git_sha"] = git_sha
+    request["run_context"]["manifest"]["service_version"] = "0.0.0"
+    errors, _actual = adapter._runtime_manifest_errors(container, request)  # type: ignore[arg-type]
+    assert errors == ["manifest service_version does not match the evaluator runtime"]
+
+
+def test_stack_image_attestation_covers_every_release_service(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    git_sha = "a" * 40
+    image_id = "sha256:" + "b" * 64
+    attestation = tmp_path / "stack-attestation.json"
+    attestation.write_text(
+        json.dumps(
+            {
+                "schema_version": "1.0",
+                "git_sha": git_sha,
+                "app_image_ref": "ghcr.io/kkloudtarus/vera@sha256:" + "c" * 64,
+                "app_image_digest": "sha256:" + "c" * 64,
+                "app_image_id": image_id,
+                "database_provision_image_id": image_id,
+                "prometheus_image_id": image_id,
+                "recovery_image_id": image_id,
+                "evaluator_image_id": image_id,
+                "verified_services": [
+                    "migrate",
+                    "api",
+                    "worker",
+                    "mcp",
+                    "database-provision",
+                    "prometheus",
+                    "recovery-harness",
+                    "rollout-state-init",
+                    "rollout-controller",
+                    "evaluator-state-init",
+                    "evaluator",
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(adapter, "_STACK_ATTESTATION_PATH", attestation)
+
+    result = adapter._stack_image_attestation(
+        {"git_sha": git_sha, "app_image_digest": "sha256:" + "c" * 64}
+    )
+
+    assert result["app_image_id"] == image_id
+
+
+def test_stack_image_attestation_rejects_incomplete_services(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    attestation = tmp_path / "stack-attestation.json"
+    attestation.write_text(
+        json.dumps(
+            {
+                "schema_version": "1.0",
+                "git_sha": "a" * 40,
+                "app_image_ref": "ghcr.io/kkloudtarus/vera@sha256:" + "c" * 64,
+                "app_image_digest": "sha256:" + "c" * 64,
+                "app_image_id": "sha256:" + "b" * 64,
+                "database_provision_image_id": "sha256:" + "b" * 64,
+                "prometheus_image_id": "sha256:" + "b" * 64,
+                "recovery_image_id": "sha256:" + "b" * 64,
+                "evaluator_image_id": "sha256:" + "b" * 64,
+                "verified_services": ["api"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(adapter, "_STACK_ATTESTATION_PATH", attestation)
+
+    with pytest.raises(adapter.AdapterBlocked, match="attestation is invalid"):
+        adapter._stack_image_attestation(
+            {"git_sha": "a" * 40, "app_image_digest": "sha256:" + "c" * 64}
+        )
 
 
 def test_provider_preflight_rejects_non_model_extraction() -> None:
@@ -1419,6 +3128,84 @@ def test_decision_seed_does_not_require_pending_claims_in_current_search(
     assert outcome.status == "PASS"
     assert visibility_requirements == [False, False]
     assert outcome.observations["pending_claims"] == ["claim-1", "claim-2"]
+
+
+def test_seed_retains_bounded_redacted_per_record_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def ensure_scope(*_args: Any) -> None:
+        return None
+
+    async def ingest(
+        _container: Any,
+        _request: dict[str, Any],
+        _current: dict[str, Any],
+        record: dict[str, Any],
+        **_kwargs: Any,
+    ) -> tuple[Any, str, dict[str, int]]:
+        if record["external_id"] == "blocked-record":
+            raise adapter.AdapterBlocked("sensitive blocked detail")
+        raise adapter.AdapterFailed("sensitive failed detail")
+
+    async def snapshot(*_args: Any) -> dict[str, Any]:
+        return {
+            "claims_state": [],
+            "facts_state": [],
+            "episodes_state": [],
+            "graph_edges_state": [],
+            "reviews_state": [],
+        }
+
+    monkeypatch.setattr(adapter, "_ensure_scope", ensure_scope)
+    monkeypatch.setattr(adapter, "_ingest", ingest)
+    monkeypatch.setattr(adapter, "_database_snapshot", snapshot)
+    current = {
+        "group_id": "p:case",
+        "ingest_count": 0,
+        "principals": {
+            "default": {
+                "principal_id": "00000000-0000-0000-0000-000000000123",
+                "group_id": "p:case",
+            }
+        },
+    }
+    request = {
+        "case_id": "REAL-002",
+        "inputs": {
+            "fixture": [
+                {"external_id": "blocked-record", "body": "private blocked body"},
+                {"external_id": "failed-record", "body": "private failed body"},
+            ]
+        },
+    }
+
+    outcome = asyncio.run(
+        adapter._seed(SimpleNamespace(), request, current)  # type: ignore[arg-type]
+    )
+
+    ingestion = outcome.observations["ingestion"]
+    diagnostics = ingestion["failure_diagnostics"]
+    serialized = json.dumps(diagnostics, sort_keys=True)
+    assert outcome.status == "FAIL"
+    assert ingestion["accepted_document_count"] == 0
+    assert ingestion["failed_document_count"] == 2
+    assert ingestion["failure_diagnostic_count"] == 2
+    assert diagnostics == [
+        {
+            "record_index": 0,
+            "external_id_sha256": hashlib.sha256(b"blocked-record").hexdigest(),
+            "status": "BLOCKED",
+            "exception_type": "AdapterBlocked",
+        },
+        {
+            "record_index": 1,
+            "external_id_sha256": hashlib.sha256(b"failed-record").hexdigest(),
+            "status": "FAIL",
+            "exception_type": "AdapterFailed",
+        },
+    ]
+    assert "private" not in serialized
+    assert "sensitive" not in serialized
 
 
 def test_ingest_observation_exposes_the_retractable_published_source_id() -> None:
@@ -1632,9 +3419,14 @@ def test_feedback_joins_blinded_queries_to_every_returned_fixture_fact(
                 "events": [
                     {
                         "query_id": "q-owner-en-1",
+                        "context_pack_id": "00000000-0000-0000-0000-000000000789",
                         "results": [owner_result, runtime_result],
                     },
-                    {"query_id": "q-negative-salary", "results": []},
+                    {
+                        "query_id": "q-negative-salary",
+                        "context_pack_id": "00000000-0000-0000-0000-000000000790",
+                        "results": [],
+                    },
                 ]
             }
         },
@@ -1699,10 +3491,18 @@ def test_feedback_joins_blinded_queries_to_every_returned_fixture_fact(
         "rate": 1.0,
         "ambiguity_count": 0,
     }
-    assert len(submitted) == 10
-    assert [body["signal"] for body in submitted] == ["up"] * 5 + ["down"] * 5
-    assert submitted[0]["signals"] == {"relevance": 1.0, "authority": 1.0}
-    assert submitted[-1]["result_ref"] == "runtime-result"
+    assert submitted == [
+        {
+            "context_pack_id": "00000000-0000-0000-0000-000000000789",
+            "result_ref": "owner-result",
+            "signal": "up",
+        },
+        {
+            "context_pack_id": "00000000-0000-0000-0000-000000000789",
+            "result_ref": "runtime-result",
+            "signal": "down",
+        },
+    ]
 
 
 def test_load_search_validates_matrix_and_uses_only_boundary_samples(
@@ -1852,6 +3652,12 @@ def test_load_ingestion_builds_expected_and_actual_canonical_facts(
         completed = datetime.now(UTC) - timedelta(milliseconds=10)
         return dict.fromkeys(artifact_ids, completed)
 
+    async def projection_times(
+        _container: Any, _group_id: str, artifact_ids: list[str]
+    ) -> dict[str, datetime]:
+        completed = datetime.now(UTC)
+        return dict.fromkeys(artifact_ids, completed)
+
     async def search_http(**kwargs: Any) -> tuple[int, dict[str, Any]]:
         visibility_queries.append(str(kwargs["query"]))
         return 200, {"facts": [{"id": "actual-result", "fact": "visible"}]}
@@ -1872,6 +3678,7 @@ def test_load_ingestion_builds_expected_and_actual_canonical_facts(
     monkeypatch.setattr(adapter, "_ingest", ingest)
     monkeypatch.setattr(adapter, "_wait_for_group_jobs", settle)
     monkeypatch.setattr(adapter, "_artifact_durable_times", durable_times)
+    monkeypatch.setattr(adapter, "_artifact_projection_times", projection_times)
     monkeypatch.setattr(adapter, "_search_http", search_http)
     monkeypatch.setattr(adapter, "_text_hit", lambda facts, expected: bool(facts and expected))
     monkeypatch.setattr(adapter, "_database_snapshot", snapshot)
@@ -1931,10 +3738,28 @@ def test_agent_repetitions_use_bounded_concurrency(monkeypatch: pytest.MonkeyPat
     active = 0
     maximum_active = 0
     answer_count = 0
+    limits_seen: dict[str, tuple[int, int]] = {}
 
-    async def answer(_settings: Any, *, principal: dict[str, Any], question: str) -> dict[str, Any]:
+    async def answer(
+        _settings: Any,
+        *,
+        usage_sink: Any,
+        principal: dict[str, Any],
+        question: str,
+        retrieval_limit: int,
+        token_budget: int,
+        context_call_pacer: Any,
+        as_of: str | None,
+        evaluation_time: str | None,
+    ) -> dict[str, Any]:
         nonlocal active, answer_count, maximum_active
+        assert usage_sink is None
         assert principal["group_id"] == "group-case"
+        limits_seen[question] = (retrieval_limit, token_budget)
+        assert as_of is None
+        assert evaluation_time is None
+        async with context_call_pacer.permit():
+            pass
         answer_count += 1
         usage_ref = f"run-{answer_count}"
         active += 1
@@ -1960,16 +3785,20 @@ def test_agent_repetitions_use_bounded_concurrency(monkeypatch: pytest.MonkeyPat
         assert request_kind == "search"
         return dict.fromkeys(refs, 5)
 
-    monkeypatch.setenv("VERA_EVAL_AGENT_CONCURRENCY", "2")
     monkeypatch.setattr(adapter, "_agent_answer", answer)
     monkeypatch.setattr(adapter, "_usage_tokens_by_ref", usage_by_ref)
-    questions = [{"text": "one"}, {"text": "two"}, {"text": "three"}]
+    questions = [
+        {"text": "one", "retrieval_limit": 7, "token_budget": 1200},
+        {"text": "two"},
+        {"text": "three"},
+    ]
     result = asyncio.run(
         adapter._agent(
-            SimpleNamespace(settings=SimpleNamespace()),  # type: ignore[arg-type]
+            SimpleNamespace(settings=SimpleNamespace(), usage_sink=None),  # type: ignore[arg-type]
             {
                 "case_id": "PERF-003",
                 "inputs": {"questions_ref": questions, "repetitions": 4},
+                "run_context": {"quality_config": {"agent_context_runtime": {"concurrency": 2}}},
             },
             {
                 "principals": {
@@ -2005,8 +3834,132 @@ def test_agent_repetitions_use_bounded_concurrency(monkeypatch: pytest.MonkeyPat
         3,
     ]
     assert maximum_active == 2
+    assert limits_seen == {"one": (7, 1200), "two": (10, 4000), "three": (10, 4000)}
     assert result["mcp_token_usage"] == {"total_tokens": 60, "source": "llm_usage"}
     assert all(run["token_usage"]["total_tokens"] == 15 for run in result["runs"])
+
+
+def test_agent_repetitions_pace_context_calls_to_product_quota(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = 0.0
+    call_times: list[float] = []
+    sleeps: list[float] = []
+    answer_count = 0
+
+    async def answer(
+        _settings: Any,
+        *,
+        usage_sink: Any,
+        principal: dict[str, Any],
+        question: str,
+        retrieval_limit: int,
+        token_budget: int,
+        context_call_pacer: Any,
+        as_of: str | None,
+        evaluation_time: str | None,
+    ) -> dict[str, Any]:
+        nonlocal answer_count
+        assert usage_sink is None
+        assert principal["group_id"] == "group-case"
+        assert retrieval_limit == 10
+        assert token_budget == 4000
+        assert as_of is None
+        assert evaluation_time is None
+        for _ in range(2):
+            async with context_call_pacer.permit():
+                call_times.append(clock)
+        answer_count += 1
+        return {
+            "answer": question,
+            "tool_calls": [],
+            "used_result_ids": [],
+            "citations": [],
+            "latency_ms": 1.0,
+            "abstained": False,
+            "unsupported_claim_count": 0,
+            "usage_ref": f"run-{answer_count}",
+            "token_usage": {"total_tokens": 10},
+        }
+
+    async def usage_by_ref(
+        _container: Any, *, group_id: str, request_kind: str, refs: list[str]
+    ) -> dict[str, int]:
+        assert group_id == "group-case"
+        assert request_kind == "search"
+        return dict.fromkeys(refs, 5)
+
+    async def sleep(delay: float) -> None:
+        nonlocal clock
+        sleeps.append(delay)
+        clock += delay
+
+    monkeypatch.setattr(adapter, "_agent_answer", answer)
+    monkeypatch.setattr(adapter, "_usage_tokens_by_ref", usage_by_ref)
+    monkeypatch.setattr(adapter.asyncio, "sleep", sleep)
+    monkeypatch.setattr(adapter.time, "monotonic", lambda: clock)
+
+    result = asyncio.run(
+        adapter._agent(
+            SimpleNamespace(
+                settings=SimpleNamespace(
+                    mcp=SimpleNamespace(quota_enabled=True, quota_context_per_minute=2)
+                ),
+                usage_sink=None,
+            ),  # type: ignore[arg-type]
+            {
+                "case_id": "PERF-003",
+                "inputs": {
+                    "questions_ref": [{"text": "one"}, {"text": "two"}],
+                    "repetitions": 2,
+                },
+                "run_context": {"quality_config": {"agent_context_runtime": {"concurrency": 2}}},
+            },
+            {
+                "principals": {
+                    "default": {
+                        "api_key": "key",
+                        "principal_id": "principal",
+                        "group_id": "group-case",
+                    }
+                }
+            },
+        )
+    )
+
+    assert len(result["runs"]) == 4
+    assert call_times == pytest.approx([0.0, 0.0, 60.25, 60.25, 120.5, 120.5, 180.75, 180.75])
+    assert sleeps == pytest.approx([60.25, 60.25, 60.25])
+
+
+def test_context_quota_pacer_anchors_reuse_after_call_completion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = 0.0
+    starts: list[float] = []
+    sleeps: list[float] = []
+
+    async def sleep(delay: float) -> None:
+        nonlocal clock
+        sleeps.append(delay)
+        clock += delay
+
+    async def run() -> None:
+        nonlocal clock
+        pacer = adapter._ContextQuotaPacer(limit=1, window_seconds=60)
+        async with pacer.permit():
+            starts.append(clock)
+            clock += 0.75
+        async with pacer.permit():
+            starts.append(clock)
+
+    monkeypatch.setattr(adapter.asyncio, "sleep", sleep)
+    monkeypatch.setattr(adapter.time, "monotonic", lambda: clock)
+
+    asyncio.run(run())
+
+    assert starts == pytest.approx([0.0, 61.0])
+    assert sleeps == pytest.approx([60.25])
 
 
 def test_evidence_references_large_observations_by_digest() -> None:
@@ -2040,6 +3993,46 @@ def test_evidence_references_large_observations_by_digest() -> None:
     assert all(descriptor["observation_roots"] == ["profiles"] for descriptor in descriptors)
     assert all(descriptor["observations_sha256"] == expected_digest for descriptor in descriptors)
     assert len(json.dumps(descriptors).encode()) < 10_000
+
+
+def test_evidence_maps_infrastructure_boundaries_to_protocol_kinds() -> None:
+    descriptors = adapter._evidence(
+        {
+            "action": "observability.exercise",
+            "case_id": "OPS-007",
+            "evidence_labels": ["boundary_report"],
+        },
+        adapter._Outcome(
+            boundaries=(
+                "valkey",
+                "model",
+                "object_store",
+                "worker",
+                "metrics",
+                "tracing",
+                "configuration",
+                "retrieval",
+            )
+        ),
+        {"signals": {}},
+    )
+
+    assert [descriptor["kind"] for descriptor in descriptors] == [
+        "database",
+        "api",
+        "file",
+        "log",
+        "metric",
+        "trace",
+    ]
+    ActionResponse.from_dict(
+        {
+            "schema_version": "1.0",
+            "status": "PASS",
+            "observations": {"signals": {}},
+            "evidence": descriptors,
+        }
+    )
 
 
 def test_perf_003_metrics_use_run_latencies_and_measured_tokens() -> None:

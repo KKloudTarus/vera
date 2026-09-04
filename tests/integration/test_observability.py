@@ -7,6 +7,7 @@ a plain SQL aggregate, and the API exposes the same counters on /metrics.
 
 from __future__ import annotations
 
+import asyncio
 import os
 from collections.abc import AsyncIterator, Callable
 
@@ -29,6 +30,7 @@ from vera.bootstrap import Container
 from vera.entrypoints.api.main import create_app
 from vera.entrypoints.worker.lane_pool import LanePool
 from vera.entrypoints.worker.main import run_until_empty
+from vera.observability.cost import UsageEvent
 from vera.shared.ids import uuid7
 from vera.shared.types import GroupId
 
@@ -129,7 +131,8 @@ async def test_ingest_and_search_record_llm_usage(
     )
     sink = SqlAlchemyUsageSink(sessionmaker)
 
-    # Ingest embedded the entities and the fact, so cost is attributed to the episode.
+    # Ingest embedded the entities and the fact, so estimated cost is attributed to
+    # the episode but remains incomplete because the offline embedder has no usage.
     assert await sink.total_cost_for_group(group) > 0
     async with sessionmaker() as s:
         ingest_rows = await s.scalar(
@@ -142,8 +145,13 @@ async def test_ingest_and_search_record_llm_usage(
         prompt_tokens = await s.scalar(
             text("SELECT sum(prompt_tokens) FROM llm_usage WHERE group_id = :g"), {"g": group}
         )
+        cost_complete = await s.scalar(
+            text("SELECT bool_and(cost_complete) FROM llm_usage WHERE group_id = :g"),
+            {"g": group},
+        )
     assert ingest_rows and ingest_rows >= 1
     assert prompt_tokens and prompt_tokens > 0
+    assert cost_complete is False
 
     # A novel query text misses the embedding cache, so search cost is recorded too.
     handler = SearchMemoryHandler(container.memory, container.retrieval_read)
@@ -175,3 +183,129 @@ async def test_metrics_endpoint_exposes_vera_metrics(
     assert "vera_ingestion_jobs_total" in body
     assert "vera_queue_depth" in body
     assert "vera_llm_tokens_total" in body
+
+
+async def test_old_usage_writer_defaults_to_incomplete(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    async with sessionmaker() as session, session.begin():
+        complete = await session.scalar(
+            text(
+                "INSERT INTO llm_usage "
+                "(model, operation, request_kind, prompt_tokens, completion_tokens, cost_usd) "
+                "VALUES ('legacy-model', 'llm', 'unknown', 1, 1, 0) "
+                "RETURNING cost_complete"
+            )
+        )
+
+    assert complete is False
+
+
+async def test_disabled_cost_recording_does_not_remove_the_sink(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    ref = f"disabled:{uuid7().hex}"
+    sink = SqlAlchemyUsageSink(sessionmaker, record_enabled=False)
+
+    await sink.record(
+        UsageEvent(
+            model="gpt-4.1-mini",
+            operation="llm",
+            prompt_tokens=1,
+            completion_tokens=1,
+            cost_usd=0.000002,
+            request_kind="search",
+            group_id=None,
+            ref=ref,
+        )
+    )
+
+    async with sessionmaker() as session:
+        count = await session.scalar(
+            text("SELECT count(*) FROM llm_usage WHERE ref=:ref"), {"ref": ref}
+        )
+    assert count == 0
+
+
+async def test_provider_budget_reservation_is_atomic_and_fail_closed(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    sink = SqlAlchemyUsageSink(sessionmaker)
+    run_key = f"run:{uuid7()}"
+    action_keys = [f"{run_key}:action:{index}" for index in range(2)]
+    for action_key in action_keys:
+        await sink.initialize_provider_budget(
+            action_key, 1.0, run_key=run_key, run_max_cost_usd=1.0
+        )
+
+    results = await asyncio.gather(
+        *(
+            sink.reserve_provider_budget(action_keys[index % len(action_keys)], 0.25)
+            for index in range(8)
+        )
+    )
+
+    async with sessionmaker() as session:
+        action_reserved = await session.scalar(
+            text(
+                "SELECT sum(reserved_cost_usd) FROM provider_budget_reservations "
+                "WHERE run_key=:run_key"
+            ),
+            {"run_key": run_key},
+        )
+        run_reserved = await session.scalar(
+            text(
+                "SELECT reserved_cost_usd FROM provider_run_budget_reservations "
+                "WHERE run_key=:run_key"
+            ),
+            {"run_key": run_key},
+        )
+    assert results.count(True) == 4
+    assert results.count(False) == 4
+    assert action_reserved == 1.0
+    assert run_reserved == 1.0
+
+
+async def test_provider_budget_settlement_retains_actual_cost_and_releases_the_rest(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    sink = SqlAlchemyUsageSink(sessionmaker)
+    run_key = f"settle:{uuid7()}"
+    action_key = f"{run_key}:action"
+    await sink.initialize_provider_budget(action_key, 1.0, run_key=run_key, run_max_cost_usd=2.0)
+    assert await sink.reserve_provider_budget(action_key, 0.75) is True
+
+    assert await sink.settle_provider_budget(action_key, 0.75, 0.125) is True
+
+    async with sessionmaker() as session:
+        action_reserved = await session.scalar(
+            text(
+                "SELECT reserved_cost_usd FROM provider_budget_reservations "
+                "WHERE action_key=:action_key"
+            ),
+            {"action_key": action_key},
+        )
+        run_reserved = await session.scalar(
+            text(
+                "SELECT reserved_cost_usd FROM provider_run_budget_reservations "
+                "WHERE run_key=:run_key"
+            ),
+            {"run_key": run_key},
+        )
+    assert action_reserved == 0.125
+    assert run_reserved == 0.125
+
+
+@pytest.mark.parametrize("maximum", [0.0, -1.0, float("nan"), float("inf")])
+async def test_provider_budget_rejects_invalid_maximums(
+    sessionmaker: async_sessionmaker[AsyncSession], maximum: float
+) -> None:
+    sink = SqlAlchemyUsageSink(sessionmaker)
+
+    with pytest.raises(ValueError, match="finite and positive"):
+        await sink.initialize_provider_budget(
+            f"invalid:{uuid7()}",
+            maximum,
+            run_key=f"run:{uuid7()}",
+            run_max_cost_usd=1.0,
+        )

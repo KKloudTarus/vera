@@ -1,7 +1,7 @@
 {
   "profile": "weekly",
   "environment": "local-production-like",
-  "service_version": "0.1.0",
+  "service_version": "0.2.2",
   "git_sha": "44da8cffd92d5dba7f39c37579a45d2e7eb51fb9",
   "git_dirty": true,
   "graph_backend": "graphiti/neo4j",
@@ -24,7 +24,14 @@
   },
   "ontology_version": "2",
   "quality_config": {
-    "fabric_write_mode": "fabric"
+    "fabric_write_mode": "fabric",
+    "agent_context_runtime": {
+      "concurrency": 4,
+      "quota_enabled": true,
+      "context_per_minute": 20,
+      "window_seconds": 60,
+      "backend": "valkey"
+    }
   },
   "run_context": {
     "principal": "http-registered-evaluator",
@@ -36,7 +43,8 @@
     },
     "cost_budget": {
       "max_duration_s": 7200,
-      "max_cost_usd": 10
+      "max_cost_usd": 10,
+      "max_action_cost_usd": 1
     },
     "inspection_artifacts": {
       "LEARN-004": "/workspace/evals/fixtures/weekly_drift.json"

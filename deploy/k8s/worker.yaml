@@ -21,12 +21,23 @@ spec:
         runAsNonRoot: true
       containers:
         - name: worker
-          image: ghcr.io/kkloudtarus/vera:latest
+          image: ghcr.io/kkloudtarus/vera@sha256:0000000000000000000000000000000000000000000000000000000000000000
           command: ["python", "-m", "vera.entrypoints.worker.main"]
           ports: [{ containerPort: 9100, name: metrics }]
           envFrom:
             - configMapRef: { name: vera-config }
             - secretRef: { name: vera-secrets }
+          env:
+            - name: VERA_DB__DSN
+              valueFrom:
+                secretKeyRef:
+                  name: vera-worker-database
+                  key: VERA_DB__DSN
+            - name: VERA_KEDA_DB_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: vera-scaler-database
+                  key: VERA_KEDA_DB_DSN
           resources:
             requests: { cpu: "250m", memory: "512Mi" }
             limits: { cpu: "2", memory: "1Gi" }
@@ -46,6 +57,6 @@ spec:
   triggers:
     - type: postgresql
       metadata:
-        connectionFromEnv: VERA_DB__DSN
+        connectionFromEnv: VERA_KEDA_DB_DSN
         query: "SELECT count(*) FROM ingestion_jobs WHERE status = 'pending'"
         targetQueryValue: "50"

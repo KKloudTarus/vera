@@ -39,6 +39,7 @@ from vera.domain.ports.memory_engine import (
 )
 from vera.domain.ports.projection import FactProjection
 from vera.observability import span
+from vera.observability.cost import UsageAccountingError
 from vera.shared.ids import deterministic_id
 from vera.shared.time import utc_now
 from vera.shared.types import GroupId
@@ -152,15 +153,16 @@ def _records(result: Any) -> list[Any]:
 def _label_propagation_capped(
     projection: dict[str, list[tuple[str, int]]], *, max_iterations: int = 50
 ) -> list[list[str]]:
-    """Label-propagation clustering with an iteration cap. Graphiti's own version loops until
-    convergence with no bound, and oscillates forever on symmetric graphs; the cap makes it
-    terminate (taking the labeling reached at the cap), so community construction is reliable.
+    """Run deterministic label propagation with an iteration cap.
+
+    In-place updates prevent the two-cycle caused by Graphiti's synchronous implementation on
+    symmetric graphs. The cap still bounds unexpected non-convergence.
     """
     community_map = {uuid: i for i, uuid in enumerate(projection)}
     for _ in range(max_iterations):
         changed = False
-        next_map: dict[str, int] = {}
-        for uuid, neighbors in projection.items():
+        for uuid in sorted(projection):
+            neighbors = projection[uuid]
             tally: dict[int, int] = {}
             for neighbor_uuid, weight in neighbors:
                 label = community_map.get(neighbor_uuid, community_map[uuid])
@@ -172,10 +174,9 @@ def _label_propagation_capped(
                 if top_label != -1 and top_count > 1
                 else max(top_label, community_map[uuid])
             )
-            next_map[uuid] = chosen
             if chosen != community_map[uuid]:
+                community_map[uuid] = chosen
                 changed = True
-        community_map = next_map
         if not changed:
             break
     clusters: dict[int, list[str]] = {}
@@ -421,6 +422,8 @@ class GraphitiMemoryEngine:
             return None
         try:
             return await embedder.create(text)
+        except UsageAccountingError:
+            raise
         except Exception:  # the vector half is optional; degrade to fulltext-only on failure
             return None
 
@@ -497,13 +500,9 @@ class GraphitiMemoryEngine:
             now=utc_now().isoformat(),
         )
         await self._seed_entity_summaries(gid)
-        if self._falkordb:
-            # Graphiti's generic clustering issues a per-node neighbor query that returns no
-            # rows on FalkorDB, so its native build yields zero communities. Cluster here with a
-            # single edge query FalkorDB handles, then reuse Graphiti's LLM community builder.
-            return await self._build_communities_falkordb(gid)
-        nodes, edges = await self._client.build_communities(group_ids=[gid])
-        return await self._community_results(nodes, edges)
+        # Graphiti's unbounded label propagation can oscillate on symmetric projections.
+        # Use one backend-portable edge query and VERA's capped implementation instead.
+        return await self._build_communities_capped(gid)
 
     async def _seed_entity_summaries(self, gid: str) -> None:
         # Community summaries must be grounded in the projected active facts, not stale entity
@@ -548,9 +547,10 @@ class GraphitiMemoryEngine:
             for node in nodes
         )
 
-    async def _build_communities_falkordb(self, gid: str) -> tuple[GraphCommunity, ...]:
+    async def _build_communities_capped(self, gid: str) -> tuple[GraphCommunity, ...]:
         from graphiti_core.nodes import EntityNode
         from graphiti_core.utils.maintenance.community_operations import (
+            MAX_COMMUNITY_BUILD_CONCURRENCY,
             build_community,
             remove_communities,
         )
@@ -564,25 +564,51 @@ class GraphitiMemoryEngine:
                 gid=gid,
             ),
         )
-        rows = cast(
-            "list[dict[str, Any]]", result[0] if isinstance(result, tuple) and result else []
-        )
         projection: dict[str, list[tuple[str, int]]] = {}
-        for row in rows:
+        for row in _records(result):
             projection.setdefault(str(row["a"]), []).append((str(row["b"]), int(row["c"])))
+        semaphore = asyncio.Semaphore(MAX_COMMUNITY_BUILD_CONCURRENCY)
+
+        async def build_cluster(cluster: list[str]) -> tuple[Any, list[Any]] | None:
+            async with semaphore:
+                nodes = await EntityNode.get_by_uuids(self._client.driver, cluster)
+                if not nodes:
+                    return None
+                community, edges = await build_community(self._client.llm_client, nodes)
+                return community, list(edges)
+
+        tasks: list[asyncio.Task[tuple[Any, list[Any]] | None]] = []
+        async with asyncio.TaskGroup() as group:
+            for cluster in _label_propagation_capped(projection):
+                tasks.append(group.create_task(build_cluster(cluster)))
+
         communities: list[Any] = []
         community_edges: list[Any] = []
-        for cluster in _label_propagation_capped(projection):
-            nodes = await EntityNode.get_by_uuids(self._client.driver, cluster)
-            if not nodes:
+        built: list[tuple[Any, list[Any]]] = []
+        for task in tasks:
+            result = task.result()
+            if result is None:
                 continue
-            community, edges = await build_community(self._client.llm_client, nodes)
-            await community.generate_name_embedding(self._client.embedder)
-            await community.save(self._client.driver)
-            for edge in edges:
-                await edge.save(self._client.driver)
-            communities.append(community)
-            community_edges.extend(edges)
+            built.append(result)
+            communities.append(result[0])
+            community_edges.extend(result[1])
+
+        async def persist(community: Any, edges: list[Any]) -> None:
+            async with semaphore:
+                name = str(community.name).strip()
+                if not name:
+                    name = str(community.summary).strip()
+                    if not name:
+                        raise ValueError("Graphiti produced a community with no name or summary")
+                    community.name = name
+                await community.generate_name_embedding(self._client.embedder)
+                await community.save(self._client.driver)
+                for edge in edges:
+                    await edge.save(self._client.driver)
+
+        async with asyncio.TaskGroup() as group:
+            for community, edges in built:
+                group.create_task(persist(community, edges))
         return await self._community_results(communities, community_edges)
 
     async def annotate_community(

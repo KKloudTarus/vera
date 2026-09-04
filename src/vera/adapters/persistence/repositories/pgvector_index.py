@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import replace
 from datetime import datetime
 
@@ -22,8 +23,10 @@ from vera.domain.ports.retrieval_index import (
     FactHit,
     PassageHit,
     RetrievalFilters,
+    is_exact_fact_query_candidate,
 )
 from vera.observability import get_logger
+from vera.observability.cost import UsageAccountingError
 
 log = get_logger(__name__)
 
@@ -492,6 +495,8 @@ class PgVectorHybridFactCandidateSource:
         min_score: float,
         top_n: int,
         include_provenance: bool = True,
+        semantic_semaphore: asyncio.Semaphore | None = None,
+        exact_semaphore: asyncio.Semaphore | None = None,
     ) -> None:
         if dimension <= 0:
             raise ValueError("embedding dimension must be positive")
@@ -510,6 +515,8 @@ class PgVectorHybridFactCandidateSource:
         self._min_score = min_score
         self._top_n = top_n
         self._include_provenance = include_provenance
+        self._semantic_semaphore = semantic_semaphore
+        self._exact_semaphore = exact_semaphore
         self._live_query = (
             _combined_fact_query(dimension=dimension, snapshot=False)
             if include_provenance
@@ -534,6 +541,57 @@ class PgVectorHybridFactCandidateSource:
     ) -> FactCandidateSets:
         if restrict_fact_ids is not None and not restrict_fact_ids:
             return FactCandidateSets(lexical=(), semantic=())
+        if (
+            as_of is None
+            and known_as_of is None
+            and restrict_fact_ids is None
+            and snapshot_id is None
+            and filters is None
+            and is_exact_fact_query_candidate(query)
+        ):
+            exact_semaphore = self._exact_semaphore
+            if exact_semaphore is None:
+                exact = await self._lexical.search_exact_current(
+                    group_id=group_id, query=query, limit=limit
+                )
+            else:
+                async with exact_semaphore:
+                    exact = await self._lexical.search_exact_current(
+                        group_id=group_id, query=query, limit=limit
+                    )
+            if exact:
+                return FactCandidateSets(lexical=tuple(exact), semantic=(), hydrated=True)
+
+        semantic_semaphore = self._semantic_semaphore
+        if semantic_semaphore is not None:
+            await semantic_semaphore.acquire()
+        try:
+            return await self._search_semantic(
+                group_id=group_id,
+                query=query,
+                limit=limit,
+                as_of=as_of,
+                known_as_of=known_as_of,
+                restrict_fact_ids=restrict_fact_ids,
+                snapshot_id=snapshot_id,
+                filters=filters,
+            )
+        finally:
+            if semantic_semaphore is not None:
+                semantic_semaphore.release()
+
+    async def _search_semantic(
+        self,
+        *,
+        group_id: str,
+        query: str,
+        limit: int,
+        as_of: datetime | None,
+        known_as_of: datetime | None,
+        restrict_fact_ids: set[str] | None,
+        snapshot_id: str | None,
+        filters: RetrievalFilters | None,
+    ) -> FactCandidateSets:
         try:
             vector = await self._embedder.embed(query)
             if len(vector) != self._dimension:
@@ -576,6 +634,8 @@ class PgVectorHybridFactCandidateSource:
                     .mappings()
                     .all()
                 )
+        except UsageAccountingError:
+            raise
         except Exception as exc:
             log.warning("combined_fact_retrieval.failed", error=str(exc))
             lexical = await self._lexical.search(
@@ -594,6 +654,8 @@ class PgVectorHybridFactCandidateSource:
         semantic = fact_hits(row for row in rows if row["candidate_source"] == "semantic")
         try:
             scores = await self._reranker.rerank(query=query, facts=[hit.text for hit in semantic])
+        except UsageAccountingError:
+            raise
         except Exception as exc:
             log.warning("semantic_fact_retrieval.failed", error=str(exc))
             return FactCandidateSets(lexical=tuple(lexical), semantic=())
@@ -706,6 +768,8 @@ class PgVectorFactIndex:
                 for hit, score in zip(hits, scores, strict=True)
                 if score >= self._min_score
             ]
+        except UsageAccountingError:
+            raise
         except Exception as exc:
             log.warning("semantic_fact_retrieval.failed", error=str(exc))
             return []

@@ -14,9 +14,21 @@ from collections import OrderedDict
 from collections.abc import Sequence
 from typing import Any, cast
 
+import httpx
+
 from vera.domain.ports.reranker import RerankerUnavailableError
 from vera.observability import get_logger
-from vera.observability.cost import UsageSink, build_usage_event, current_usage_context, emit_usage
+from vera.observability.cost import (
+    UsageAccountingError,
+    UsageSink,
+    build_usage_event,
+    cost_usd,
+    current_usage_context,
+    emit_usage,
+    guard_provider_call,
+    maximum_prompt_tokens,
+    settle_provider_call,
+)
 from vera.shared.errors import VeraError
 
 log = get_logger(__name__)
@@ -49,7 +61,17 @@ class VoyageClient:
             )
         return self._client
 
-    async def _meter(self, payload: dict[str, Any], *, model: str, operation: str) -> None:
+    async def _meter(
+        self,
+        payload: dict[str, Any],
+        *,
+        model: str,
+        operation: str,
+        reserved_cost_usd: float,
+    ) -> None:
+        reported_model = payload.get("model")
+        if reported_model != model:
+            raise UsageAccountingError("voyage response model differs from reserved model")
         usage: object = payload.get("usage")
         total_tokens: object = (
             cast("dict[str, object]", usage).get("total_tokens")
@@ -57,16 +79,21 @@ class VoyageClient:
             else None
         )
         if isinstance(total_tokens, bool) or not isinstance(total_tokens, int) or total_tokens < 0:
-            raise VeraError("voyage response omitted usage.total_tokens")
-        await emit_usage(
-            self._usage_sink,
-            build_usage_event(
-                model=model,
-                operation=operation,
-                prompt_tokens=total_tokens,
-                completion_tokens=0,
-            ),
+            raise UsageAccountingError("voyage response omitted usage.total_tokens")
+        event = build_usage_event(
+            model=model,
+            operation=operation,
+            prompt_tokens=total_tokens,
+            completion_tokens=0,
+            usage_complete=self._base_url == "https://api.voyageai.com/v1",
         )
+        await emit_usage(self._usage_sink, event)
+        if event.cost_complete:
+            await settle_provider_call(
+                self._usage_sink,
+                reserved_cost_usd=reserved_cost_usd,
+                actual_cost_usd=event.cost_usd,
+            )
 
     async def embed(
         self,
@@ -81,10 +108,34 @@ class VoyageClient:
             body["output_dimension"] = dim
         if input_type is not None:
             body["input_type"] = input_type
-        response = await self._http().post("/embeddings", json=body)
-        response.raise_for_status()
-        payload = response.json()
-        await self._meter(payload, model=model, operation="embedding")
+
+        async def request() -> Any:
+            response = await self._http().post("/embeddings", json=body)
+            response.raise_for_status()
+            try:
+                payload = response.json()
+            except Exception as exc:
+                raise UsageAccountingError("voyage returned an invalid embedding response") from exc
+            if not isinstance(payload, dict):
+                raise UsageAccountingError("voyage returned a non-object embedding response")
+            payload = cast("dict[str, Any]", payload)
+            await self._meter(
+                payload,
+                model=model,
+                operation="embedding",
+                reserved_cost_usd=cost_usd(model, maximum_prompt_tokens(texts), 0),
+            )
+            return payload
+
+        payload = await guard_provider_call(
+            request,
+            self._usage_sink,
+            model=model,
+            operation="embedding",
+            prompt_token_limit=maximum_prompt_tokens(texts),
+            completion_token_limit=0,
+            timeout_exceptions=(httpx.TimeoutException,),
+        )
         data = payload["data"]
         # Return in input order regardless of the response ordering.
         ordered = sorted(data, key=lambda item: int(item["index"]))
@@ -101,10 +152,34 @@ class VoyageClient:
             "return_documents": False,
             "truncation": True,
         }
-        response = await self._http().post("/rerank", json=body)
-        response.raise_for_status()
-        payload = response.json()
-        await self._meter(payload, model=model, operation="llm")
+
+        async def request() -> Any:
+            response = await self._http().post("/rerank", json=body)
+            response.raise_for_status()
+            try:
+                payload = response.json()
+            except Exception as exc:
+                raise UsageAccountingError("voyage returned an invalid rerank response") from exc
+            if not isinstance(payload, dict):
+                raise UsageAccountingError("voyage returned a non-object rerank response")
+            payload = cast("dict[str, Any]", payload)
+            await self._meter(
+                payload,
+                model=model,
+                operation="llm",
+                reserved_cost_usd=cost_usd(model, maximum_prompt_tokens((query, *docs)), 0),
+            )
+            return payload
+
+        payload = await guard_provider_call(
+            request,
+            self._usage_sink,
+            model=model,
+            operation="llm",
+            prompt_token_limit=maximum_prompt_tokens((query, *docs)),
+            completion_token_limit=0,
+            timeout_exceptions=(httpx.TimeoutException,),
+        )
         results = payload["data"]
         scores = [0.0] * len(docs)
         for item in results:
@@ -171,6 +246,8 @@ class VoyageReranker:
         try:
             try:
                 scores = await self._client.rerank(query, list(facts), model=self._model)
+            except UsageAccountingError:
+                raise
             except Exception as exc:
                 log.warning("voyage_reranker.failed")
                 raise RerankerUnavailableError("voyage reranker failed") from exc

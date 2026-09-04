@@ -23,9 +23,7 @@ down_revision: str | None = "9e1f2a3b4c5d"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
-_CHUNKS_EXPR = (
-    "coalesce(heading_path,'') || ' ' || coalesce(symbol_name,'') || ' ' || text"
-)
+_CHUNKS_EXPR = "coalesce(heading_path,'') || ' ' || coalesce(symbol_name,'') || ' ' || text"
 _FACTS_EXPR = "predicate || ' ' || normalized_object || ' ' || coalesce(object_scalar,'')"
 
 

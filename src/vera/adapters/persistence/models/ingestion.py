@@ -7,6 +7,7 @@ from typing import Any
 from uuid import UUID
 
 from sqlalchemy import (
+    Boolean,
     CheckConstraint,
     DateTime,
     Index,
@@ -41,6 +42,10 @@ class IngestionJobRow(Base):
     status: Mapped[str] = mapped_column(String(16), nullable=False, server_default="pending")
     attempts: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     max_attempts: Mapped[int] = mapped_column(Integer, nullable=False, server_default="8")
+    provider_retry_fenced: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
+    claim_token: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True))
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     locked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     next_visible_at: Mapped[datetime] = mapped_column(
@@ -49,6 +54,7 @@ class IngestionJobRow(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=text("now()")
     )
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     __table_args__ = (
         UniqueConstraint("dedup_uuid", name="uq_jobs_dedup"),

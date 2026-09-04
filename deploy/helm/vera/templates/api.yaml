@@ -16,12 +16,13 @@ spec:
         vera.component: api
       annotations:
         checksum/config: {{ include (print $.Template.BasePath "/config.yaml") . | sha256sum }}
+        checksum/external-secrets: {{ .Values.secrets.externalRevision | quote }}
         prometheus.io/scrape: "true"
         prometheus.io/port: "8000"
         prometheus.io/path: "/metrics"
     spec:
       securityContext: {{- include "vera.podSecurityContext" . | nindent 8 }}
-      initContainers: {{- include "vera.waitForPostgres" . | nindent 8 }}
+      initContainers: {{- include "vera.waitForRuntimeDatabase" (dict "root" . "database" "runtime" "role" "vera_app") | nindent 8 }}
       containers:
         - name: api
           image: {{ include "vera.image" . }}
@@ -30,6 +31,9 @@ spec:
           ports:
             - containerPort: 8000
           envFrom: {{- include "vera.envFrom" . | nindent 12 }}
+          env:
+{{- include "vera.applicationSecretEnv" . | nindent 12 }}
+{{- include "vera.runtimeDatabaseEnv" . | nindent 12 }}
           readinessProbe:
             httpGet: { path: /health/ready, port: 8000 }
             initialDelaySeconds: 5

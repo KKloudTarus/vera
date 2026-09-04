@@ -27,6 +27,7 @@ data:
   VERA_OBSERVABILITY__MCP_METRICS_HOST: "0.0.0.0"
   VERA_OBSERVABILITY__MCP_METRICS_PORT: "9101"
   VERA_API__AUTH_REQUIRED: "true"
+  VERA_DB__ROLE_ENFORCEMENT: "true"
   VERA_MCP__ALLOWED_HOSTS: '["vera-mcp","vera-mcp:*","vera-mcp.vera.svc.cluster.local","vera-mcp.vera.svc.cluster.local:*","mcp.vera.local","mcp.vera.local:*"]'
   VERA_MCP__ALLOWED_ORIGINS: '["https://mcp.vera.local"]'
   # For browser OAuth, set AUTH_AUDIENCE to the public /mcp URL and uncomment the external
@@ -44,31 +45,67 @@ metadata:
   namespace: vera
 type: Opaque
 stringData:
-  VERA_DB__DSN: "postgresql+asyncpg://vera:CHANGEME@postgres:5432/vera"
+  VERA_DB__DSN: "postgresql+asyncpg://vera_runtime:CHANGEME@postgres:5432/vera"
   VERA_NEO4J__PASSWORD: "CHANGEME"
   VERA_MEMORY__OPENAI_API_KEY: "CHANGEME"
-  VERA_MCP__JWT_SECRET: "CHANGEME"
   VERA_OBJECTSTORE__ACCESS_KEY: "CHANGEME"
   VERA_OBJECTSTORE__SECRET_KEY: "CHANGEME"
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: vera-mcp-secret
+  namespace: vera
+type: Opaque
+stringData:
+  VERA_MCP__JWT_SECRET: "CHANGEME"
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: vera-worker-database
+  namespace: vera
+type: Opaque
+stringData:
+  VERA_DB__DSN: "postgresql+asyncpg://vera_worker_runtime:CHANGEME@postgres:5432/vera"
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: vera-scaler-database
+  namespace: vera
+type: Opaque
+stringData:
+  VERA_KEDA_DB_DSN: "postgresql://vera_scaler_runtime:CHANGEME@postgres:5432/vera"
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: vera-admin-database
+  namespace: vera
+type: Opaque
+stringData:
+  VERA_DB__DSN: "postgresql+asyncpg://vera:CHANGEME@postgres:5432/vera"
 ---
 # Run migrations once per release before rolling the deployments.
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: vera-migrate
+  name: vera-migrate-d4e5f6a7b8c9
   namespace: vera
 spec:
+  activeDeadlineSeconds: 600
   backoffLimit: 3
   template:
     spec:
       restartPolicy: Never
       containers:
         - name: migrate
-          image: ghcr.io/kkloudtarus/vera:latest
+          image: ghcr.io/kkloudtarus/vera@sha256:0000000000000000000000000000000000000000000000000000000000000000
           command: ["alembic", "upgrade", "head"]
           envFrom:
             - configMapRef: { name: vera-config }
-            - secretRef: { name: vera-secrets }
+            - secretRef: { name: vera-admin-database }
           resources:
             requests: { cpu: "100m", memory: "256Mi" }
             limits: { cpu: "500m", memory: "512Mi" }

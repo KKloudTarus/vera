@@ -517,7 +517,7 @@
     },
     {
       "name": "safety.preflight",
-      "effect": "read",
+      "effect": "write",
       "availability": "harness_required",
       "maps_to": [
         "Environment adapter scope, cost, and cleanup attestation"

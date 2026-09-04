@@ -20,7 +20,7 @@ spec:
         runAsNonRoot: true
       containers:
         - name: api
-          image: ghcr.io/kkloudtarus/vera:latest
+          image: ghcr.io/kkloudtarus/vera@sha256:0000000000000000000000000000000000000000000000000000000000000000
           command: ["uvicorn", "vera.entrypoints.api.main:app", "--host", "0.0.0.0", "--port", "8000"]
           ports: [{ containerPort: 8000 }]
           envFrom:

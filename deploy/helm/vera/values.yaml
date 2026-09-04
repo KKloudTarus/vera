@@ -7,11 +7,11 @@ nameOverride: ""
 fullnameOverride: ""
 
 image:
-  # Published to GHCR by the release workflow; the package is public so the cluster pulls it
-  # with no secret. For an air-gapped single-node cluster, build locally and import into the
-  # node's containerd, then set repository=vera.
+  # The release workflow promotes the evaluated digest to GHCR. Set repository and digest to
+  # that immutable release output; the public package needs no registry secret.
   repository: ghcr.io/kkloudtarus/vera
-  tag: "0.2.0"
+  # Replace the fail-closed placeholder with the digest approved by the release gate.
+  digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000"
   pullPolicy: IfNotPresent
   # Numeric UID of the non-root 'vera' user baked into the image (USER vera). kubelet needs
   # the number to enforce runAsNonRoot; keep it in sync with the Dockerfile.
@@ -19,13 +19,17 @@ image:
 
 secrets:
   # true: the chart renders the <release>-secrets Secret from the values below (pilot / local).
-  # false: the chart renders no Secret and expects an externally-created <release>-secrets to
-  # already exist (GitOps: keep credentials out of git, create the Secret with kubectl). It
-  # must carry VERA_DB__DSN, VERA_OBJECTSTORE__ACCESS_KEY/SECRET_KEY, POSTGRES_PASSWORD,
-  # MINIO_ROOT_USER, MINIO_ROOT_PASSWORD, and (when set) VERA_MCP__JWT_SECRET,
-  # VERA_MEMORY__OPENAI_API_KEY, VERA_NEO4J__PASSWORD, VERA_VOYAGE__API_KEY,
-  # VERA_BOOTSTRAP__ADMIN_API_KEY.
+  # false: the chart renders no Secrets and expects externally-created <release>-secrets,
+  # <release>-objectstore-admin, and <release>-database-{runtime,worker,admin} Secrets. The
+  # shared Secret must carry VERA_OBJECTSTORE__ACCESS_KEY/SECRET_KEY and, for Neo4j,
+  # VERA_NEO4J__PASSWORD plus NEO4J_AUTH=neo4j/<password>. Add optional provider,
+  # VERA_MCP__JWT_SECRET, and VERA_BOOTSTRAP__ADMIN_API_KEY values only when enabled.
   create: true
+  # Set only for the first upgrade from a chart that stored every credential in
+  # <release>-secrets. New chart-managed installs fail closed when split Secrets disappear.
+  allowLegacyUpgrade: false
+  # Bump after updating externally managed Secrets so their consuming pods restart.
+  externalRevision: ""
 
 ingress:
   enabled: false
@@ -146,14 +150,14 @@ graph:
   # driver is not in the published image, so it needs an image built with the falkordb extra.
   backend: neo4j              # neo4j | falkordb (needs the falkordb driver in the image)
   falkordb:
-    image: falkordb/falkordb:latest
+    image: falkordb/falkordb@sha256:adbddd418916c25618564ff8597a919b08bc76452ebeb74eb985c38d7281df62
     port: 6379
     storage: 5Gi
     resources:
       requests: { cpu: "100m", memory: "384Mi" }
       limits: { cpu: "1", memory: "1Gi" }
   neo4j:
-    image: neo4j:5.26
+    image: neo4j:5.26@sha256:037cf5756f0135cbfd66b739b6df7c7c4bb100f9ce11602f6f9538e17e02c74d
     password: vera-graph-pass
     storage: 5Gi
     resources:
@@ -161,9 +165,14 @@ graph:
       limits: { cpu: "1", memory: "2Gi" }
 
 postgres:
-  image: pgvector/pgvector:pg18
+  # user/password initialize a new data directory. Rotate an existing owner's password in
+  # PostgreSQL itself before updating its Secret. Runtime passwords initialize their login
+  # roles and are not changed by later Helm upgrades.
+  image: pgvector/pgvector:pg18@sha256:2ba9ca5f2e7daa0f0e7723cba1ee9167bab54efd3640516a44ac1a928dd67e7a
   user: vera
   password: vera-db-pass
+  runtimePassword: vera-runtime-pass
+  workerPassword: vera-worker-pass
   database: vera
   storage: 10Gi
   resources:
@@ -171,16 +180,21 @@ postgres:
     limits: { cpu: "2", memory: "1Gi" }
 
 valkey:
-  image: valkey/valkey:8
+  image: valkey/valkey:8@sha256:f0ba225266310efba5fb33383e21c64fbd07907304224786c780606e7ebd7327
   resources:
     requests: { cpu: "50m", memory: "128Mi" }
     limits: { cpu: "500m", memory: "512Mi" }
 
 minio:
-  image: minio/minio:latest
-  mcImage: minio/mc:latest
-  accessKey: minioadmin
-  secretKey: minioadmin
+  image: minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
+  mcImage: minio/mc@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727
+  # Root credentials initialize MinIO and are never given to application pods. Rotate them
+  # through MinIO before updating the Secret. Keep the application access-key name stable.
+  # The provisioning hook creates a missing app user but does not rotate an existing password.
+  rootUser: minioadmin
+  rootPassword: minioadmin
+  accessKey: vera-app
+  secretKey: vera-app-password
   bucket: vera-artifacts
   storage: 10Gi
   resources:

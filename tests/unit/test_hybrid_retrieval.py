@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 from dataclasses import replace
 from datetime import UTC, datetime
 
@@ -97,6 +96,15 @@ class _FactBatchSource:
         )
 
 
+class _ExactFactBatchSource:
+    async def search(self, **_kwargs: object) -> FactCandidateSets:
+        return FactCandidateSets(
+            lexical=(_fact("exact", 1.0),),
+            semantic=(),
+            hydrated=True,
+        )
+
+
 def _hit(chunk_id: str, score: float) -> PassageHit:
     return PassageHit(
         chunk_id=chunk_id,
@@ -158,19 +166,13 @@ async def test_fact_rrf_accepts_candidate_sets_from_one_batch() -> None:
 
 
 @pytest.mark.asyncio
-async def test_fact_batch_search_honors_shared_concurrency_limit() -> None:
-    source = _FactBatchSource()
-    semaphore = asyncio.Semaphore(0)
-    hybrid = HybridFactCandidateSource(batch_source=source, batch_semaphore=semaphore)
+async def test_fact_rrf_preserves_hydrated_exact_score() -> None:
+    hybrid = HybridFactCandidateSource(batch_source=_ExactFactBatchSource())
 
-    task = asyncio.create_task(hybrid.search(group_id="p:test", query="runtime", limit=3))
-    await asyncio.sleep(0)
+    hits = await hybrid.search(group_id="p:test", query="exact fact", limit=3)
 
-    assert source.calls == 0
-    semaphore.release()
-    hits = await task
-    assert source.calls == 1
-    assert [hit.fact_key for hit in hits] == ["shared", "lexical-only", "semantic-only"]
+    assert [hit.fact_key for hit in hits] == ["exact"]
+    assert hits[0].score == 1.0
 
 
 @pytest.mark.asyncio

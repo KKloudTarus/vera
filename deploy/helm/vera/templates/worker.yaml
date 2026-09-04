@@ -16,12 +16,13 @@ spec:
         vera.component: worker
       annotations:
         checksum/config: {{ include (print $.Template.BasePath "/config.yaml") . | sha256sum }}
+        checksum/external-secrets: {{ .Values.secrets.externalRevision | quote }}
         prometheus.io/scrape: "true"
         prometheus.io/port: "9100"
         prometheus.io/path: "/metrics"
     spec:
       securityContext: {{- include "vera.podSecurityContext" . | nindent 8 }}
-      initContainers: {{- include "vera.waitForPostgres" . | nindent 8 }}
+      initContainers: {{- include "vera.waitForRuntimeDatabase" (dict "root" . "database" "worker" "role" "vera_worker") | nindent 8 }}
       containers:
         - name: worker
           image: {{ include "vera.image" . }}
@@ -30,6 +31,9 @@ spec:
           ports:
             - { containerPort: 9100, name: metrics }
           envFrom: {{- include "vera.envFrom" . | nindent 12 }}
+          env:
+{{- include "vera.applicationSecretEnv" . | nindent 12 }}
+{{- include "vera.workerDatabaseEnv" . | nindent 12 }}
           resources: {{- toYaml .Values.worker.resources | nindent 12 }}
 {{- if .Values.calibrate.enabled }}
 ---
@@ -47,13 +51,16 @@ spec:
       template:
         spec:
           restartPolicy: Never
-          initContainers: {{- include "vera.waitForPostgres" . | nindent 12 }}
+          initContainers: {{- include "vera.waitForRuntimeDatabase" (dict "root" . "database" "worker" "role" "vera_worker") | nindent 12 }}
           containers:
             - name: calibrate
               image: {{ include "vera.image" . }}
               imagePullPolicy: {{ .Values.image.pullPolicy }}
               command: ["python", "-m", "vera.entrypoints.calibrate", "--apply"]
               envFrom: {{- include "vera.envFrom" . | nindent 16 }}
+              env:
+{{- include "vera.applicationSecretEnv" . | nindent 16 }}
+{{- include "vera.runtimeDatabaseEnv" . | nindent 16 }}
               resources:
                 requests: { cpu: "100m", memory: "256Mi" }
                 limits: { cpu: "1", memory: "512Mi" }

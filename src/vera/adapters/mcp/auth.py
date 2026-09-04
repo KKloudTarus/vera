@@ -91,10 +91,10 @@ class JwtTokenVerifier(TokenVerifier):
         if not self._required_scopes.issubset(scopes):
             return None
         subject = claims.get("sub")
-        if not subject:
+        if not isinstance(subject, str):
             return None
         try:
-            principal_id = UUID(str(subject))
+            principal_id = UUID(subject)
         except ValueError:
             return None
         if not await self._principal_exists(principal_id):

@@ -25,6 +25,7 @@ from vera.domain.ports.retrieval_index import (
     PassageHit,
     PassageIndex,
     RetrievalFilters,
+    is_exact_fact_query_candidate,
 )
 from vera.shared.time import utc_now
 from vera.shared.types import JsonDict
@@ -340,6 +341,16 @@ class ContextAssembler:
         available = ContentAvailability(passages=True, code=True)
         passages_task: asyncio.Task[list[PassageHit]] | None = None
         code_task: asyncio.Task[list[PassageHit]] | None = None
+        fact_hits: list[FactHit] | None = None
+        exact_fact_match = False
+        probe_exact_fact_first = (
+            as_of is None
+            and known_as_of is None
+            and snapshot_fact_ids is None
+            and snapshot_id is None
+            and filters is None
+            and is_exact_fact_query_candidate(query)
+        )
         async with asyncio.TaskGroup() as group:
             facts_task = group.create_task(
                 self._facts.search(
@@ -353,12 +364,27 @@ class ContextAssembler:
                     filters=filters,
                 )
             )
-            if self._content_availability is not None:
+            if self._content_availability is not None and not probe_exact_fact_first:
                 availability_task = group.create_task(
                     self._content_availability.get(group_id=group_id, snapshot_id=snapshot_id)
                 )
                 available = await availability_task
-            if available.passages:
+            if facts_task.done():
+                fact_hits = facts_task.result()
+                exact_fact_match = any(
+                    hit.exact_match and hit.lifecycle_state == "active" for hit in fact_hits
+                )
+            elif probe_exact_fact_first:
+                fact_hits = await facts_task
+                exact_fact_match = any(
+                    hit.exact_match and hit.lifecycle_state == "active" for hit in fact_hits
+                )
+                if self._content_availability is not None and not exact_fact_match:
+                    availability_task = group.create_task(
+                        self._content_availability.get(group_id=group_id, snapshot_id=snapshot_id)
+                    )
+                    available = await availability_task
+            if available.passages and not exact_fact_match:
                 passages_task = group.create_task(
                     self._passages.search(
                         group_id=group_id,
@@ -369,7 +395,7 @@ class ContextAssembler:
                         filters=filters,
                     )
                 )
-            if available.code:
+            if available.code and not exact_fact_match:
                 code_task = group.create_task(
                     self._code.search(
                         group_id=group_id,
@@ -380,9 +406,20 @@ class ContextAssembler:
                         filters=filters,
                     )
                 )
-        fact_hits = facts_task.result()
-        passage_hits = passages_task.result() if passages_task is not None else []
-        code_hits = code_task.result() if code_task is not None else []
+            if fact_hits is None:
+                fact_hits = await facts_task
+                exact_fact_match = any(
+                    hit.exact_match and hit.lifecycle_state == "active" for hit in fact_hits
+                )
+                if exact_fact_match:
+                    if passages_task is not None:
+                        passages_task.cancel()
+                    if code_task is not None:
+                        code_task.cancel()
+        passage_hits = (
+            passages_task.result() if passages_task is not None and not exact_fact_match else []
+        )
+        code_hits = code_task.result() if code_task is not None and not exact_fact_match else []
         candidates = [
             *(_from_fact(h) for h in fact_hits),
             *(_from_passage(h, "passage") for h in passage_hits),

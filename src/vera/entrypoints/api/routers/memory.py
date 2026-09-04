@@ -16,7 +16,7 @@ from pydantic import BaseModel, Field
 from vera.adapters.persistence.retraction import RetractionService
 from vera.application.queries.search_memory import SearchMemory
 from vera.entrypoints.api.deps import ContainerDep, PrincipalDep, ScopesDep, SearchHandlerDep
-from vera.shared.errors import Err
+from vera.shared.errors import Conflict, Err
 from vera.shared.types import GroupId
 
 router = APIRouter(prefix="/memory", tags=["memory"])
@@ -151,4 +151,9 @@ async def retract_source(
         erase_artifact=erase,
     )
     if isinstance(result, Err):
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=result.error.message)
+        status_code = (
+            status.HTTP_409_CONFLICT
+            if isinstance(result.error, Conflict)
+            else status.HTTP_404_NOT_FOUND
+        )
+        raise HTTPException(status_code=status_code, detail=result.error.message)

@@ -33,7 +33,8 @@
     },
     "cost_budget": {
       "max_duration_s": 3600,
-      "max_cost_usd": 10
+      "max_cost_usd": 10,
+      "max_action_cost_usd": 1
     }
   },
   "allowed_effects": [

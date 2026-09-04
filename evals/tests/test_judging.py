@@ -278,6 +278,16 @@ def test_confirmed_critical_failure_fails_quality_review(tmp_path: Path) -> None
     assert all(item["confirmed"] for item in result["critical_failures"])
 
 
+def test_critical_failure_aggregation_is_input_order_independent(tmp_path: Path) -> None:
+    packet, report, assignment, judgments = _panel_files(tmp_path, critical_failure_at={0, 1})
+
+    forward, forward_errors = aggregate(packet, report, judgments, assignment)
+    reverse, reverse_errors = aggregate(packet, report, list(reversed(judgments)), assignment)
+
+    assert forward_errors == reverse_errors == []
+    assert forward == reverse
+
+
 def test_always_applicable_dimension_cannot_be_omitted(tmp_path: Path) -> None:
     packet, report, assignment, judgments = _panel_files(tmp_path)
     judgment = json.loads(judgments[0].read_text(encoding="utf-8"))
@@ -421,6 +431,27 @@ def test_release_finalization_requires_clean_source(tmp_path: Path) -> None:
 
     assert result is None
     assert any("dirty source tree" in error for error in errors)
+
+
+def test_finalization_rejects_inputs_changed_during_aggregation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    report, panel_results, trusted = _finalization_files(tmp_path)
+    original_aggregate = aggregate_module.aggregate
+
+    def mutating_aggregate(
+        *args: object, **kwargs: object
+    ) -> tuple[dict[str, Any] | None, list[str]]:
+        result = original_aggregate(*args, **kwargs)  # type: ignore[arg-type]
+        panel_results[0].write_text("{}\n", encoding="utf-8")
+        return result
+
+    monkeypatch.setattr(aggregate_module, "aggregate", mutating_aggregate)
+
+    result, errors = finalize(report, panel_results, trusted_panel_result_sha256=trusted)
+
+    assert result is None
+    assert any("inputs changed" in error for error in errors)
 
 
 def test_finalizer_refuses_to_overwrite_quality_gate(

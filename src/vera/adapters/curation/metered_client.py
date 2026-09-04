@@ -12,12 +12,20 @@ from __future__ import annotations
 
 from typing import Any
 
+from openai import APITimeoutError
+
 from vera.adapters.resilience.policy import ResiliencePolicy
 from vera.observability.cost import (
+    UsageAccountingError,
     UsageSink,
     build_usage_event,
+    cost_usd,
     emit_usage,
     estimate_tokens,
+    guard_provider_call,
+    maximum_prompt_tokens,
+    provider_reported_cost,
+    settle_provider_call,
 )
 
 
@@ -33,23 +41,71 @@ class _MeteredCompletions:
         messages = kwargs.get("messages", [])
         prompt_estimate = sum(estimate_tokens(str(m.get("content", "") or "")) for m in messages)
         model = str(kwargs.get("model", "unknown"))
+        max_tokens = kwargs.setdefault("max_tokens", 16384)
+        completion_limit = (
+            max_tokens if isinstance(max_tokens, int) and not isinstance(max_tokens, bool) else -1
+        )
+        prompt_limit = maximum_prompt_tokens(
+            str(message.get("content", "") or "") for message in messages
+        )
 
-        async def _raw() -> Any:
-            return await self._inner.create(**kwargs)
+        async def attempt() -> Any:
+            return await guard_provider_call(
+                lambda: self._inner.create(**kwargs),
+                self._sink,
+                model=model,
+                operation="llm",
+                prompt_token_limit=prompt_limit,
+                completion_token_limit=completion_limit,
+                timeout_exceptions=(APITimeoutError,),
+            )
 
-        response = await self._policy.call(_raw, tokens=prompt_estimate)
+        response = await self._policy.call(attempt, tokens=prompt_estimate)
 
-        usage = getattr(response, "usage", None)
-        prompt_tokens = int(getattr(usage, "prompt_tokens", 0) or 0) or prompt_estimate
-        completion_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
-        event = build_usage_event(
+        async def record() -> Any:
+            if getattr(response, "model", None) != model:
+                raise UsageAccountingError("provider response model differs from reserved model")
+            usage = getattr(response, "usage", None)
+            prompt_value = getattr(usage, "prompt_tokens", None)
+            completion_value = getattr(usage, "completion_tokens", None)
+            if (
+                isinstance(prompt_value, int)
+                and not isinstance(prompt_value, bool)
+                and prompt_value >= 0
+                and isinstance(completion_value, int)
+                and not isinstance(completion_value, bool)
+                and completion_value >= 0
+            ):
+                prompt_tokens = prompt_value
+                completion_tokens = completion_value
+            else:
+                prompt_tokens = prompt_estimate
+                completion_tokens = 0
+            event = build_usage_event(
+                model=model,
+                operation="llm",
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                exact_cost_usd=provider_reported_cost(response),
+                # Aggregate token counts omit billing dimensions such as cached input.
+                usage_complete=False,
+            )
+            await emit_usage(self._sink, event)
+            if event.cost_complete:
+                await settle_provider_call(
+                    self._sink,
+                    reserved_cost_usd=cost_usd(model, prompt_limit, completion_limit),
+                    actual_cost_usd=event.cost_usd,
+                )
+            return response
+
+        return await guard_provider_call(
+            record,
+            self._sink,
             model=model,
             operation="llm",
-            prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens,
+            reserve_budget=False,
         )
-        await emit_usage(self._sink, event)
-        return response
 
 
 class _MeteredChat:
@@ -63,6 +119,12 @@ class MeteredChatClient:
     by the worker (ingest) or search handler (rerank) attributes the cost.
     """
 
-    def __init__(self, inner: Any, *, policy: ResiliencePolicy, sink: UsageSink | None) -> None:
+    def __init__(
+        self,
+        inner: Any,
+        *,
+        policy: ResiliencePolicy,
+        sink: UsageSink | None,
+    ) -> None:
         self._inner = inner
         self.chat = _MeteredChat(inner, policy, sink)

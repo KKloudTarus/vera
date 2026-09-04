@@ -1,0 +1,87 @@
+groups:
+  - name: vera-production-signals-v1
+    interval: 5s
+    rules:
+      - alert: VeraWriteFailure
+        expr: >-
+          increase(vera_write_failures_total[5m]) > 0
+        for: 0s
+        labels:
+          contract: OPS-007
+          owner: application-owner
+          severity: critical
+          signal_id: write_failure
+        annotations:
+          summary: VERA authoritative writes are failing
+          description: One or more authoritative write attempts failed in the last five minutes.
+          runbook_url: https://github.com/KKloudTarus/vera/blob/main/docs/runbooks.md#write_failure
+
+      - alert: VeraProjectionDrift
+        expr: >-
+          max(vera_projection_drift_items) > 0
+        for: 0s
+        labels:
+          contract: OPS-007
+          owner: operations
+          severity: critical
+          signal_id: projection_drift
+        annotations:
+          summary: A VERA graph projection differs from PostgreSQL
+          description: The latest verification found the derived graph inconsistent with authoritative facts.
+          runbook_url: https://github.com/KKloudTarus/vera/blob/main/docs/runbooks.md#projection_drift
+
+      - alert: VeraQueueLag
+        expr: >-
+          max(vera_queue_lag_seconds) > 300
+        for: 0s
+        labels:
+          contract: OPS-007
+          owner: operations
+          severity: critical
+          signal_id: queue_lag
+        annotations:
+          summary: VERA ingestion queue lag exceeds five minutes
+          description: The oldest pending ingestion job is over five minutes old.
+          runbook_url: https://github.com/KKloudTarus/vera/blob/main/docs/runbooks.md#queue_lag
+
+      - alert: VeraFreshness
+        expr: >-
+          histogram_quantile(0.95, sum by (le) (rate(vera_time_to_searchable_seconds_bucket[5m]))) > 900
+        for: 0s
+        labels:
+          contract: OPS-007
+          owner: application-owner
+          severity: critical
+          signal_id: freshness
+        annotations:
+          summary: VERA searchable knowledge is stale
+          description: Five-minute p95 time to searchable exceeds fifteen minutes.
+          runbook_url: https://github.com/KKloudTarus/vera/blob/main/docs/runbooks.md#freshness
+
+      - alert: VeraExtractionFailure
+        expr: >-
+          increase(vera_extraction_failures_total[5m]) > 0
+        for: 0s
+        labels:
+          contract: OPS-007
+          owner: application-owner
+          severity: critical
+          signal_id: extraction_failure
+        annotations:
+          summary: VERA knowledge extraction is failing
+          description: One or more extraction attempts failed in the last five minutes.
+          runbook_url: https://github.com/KKloudTarus/vera/blob/main/docs/runbooks.md#extraction_failure
+
+      - alert: VeraRetrievalLatency
+        expr: >-
+          histogram_quantile(0.95, sum by (le) (rate(vera_search_duration_seconds_bucket[5m]))) > 2
+        for: 0s
+        labels:
+          contract: OPS-007
+          owner: application-owner
+          severity: critical
+          signal_id: retrieval_latency
+        annotations:
+          summary: VERA retrieval p95 latency exceeds two seconds
+          description: Five-minute retrieval p95 exceeds two seconds.
+          runbook_url: https://github.com/KKloudTarus/vera/blob/main/docs/runbooks.md#retrieval_latency

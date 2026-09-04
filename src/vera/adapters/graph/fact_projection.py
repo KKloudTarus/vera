@@ -19,6 +19,7 @@ from typing import Any, cast
 
 from vera.domain.ports.projection import ProjectedFact
 from vera.shared.ids import deterministic_id
+from vera.shared.time import utc_now
 
 
 def _graphiti_group(group_id: str) -> str:
@@ -47,6 +48,7 @@ MERGE (o:Entity {group_id: $gid, name: $object})
   ON CREATE SET o.uuid = $object_uuid
 CREATE (s)-[e:RELATES_TO {group_id: $gid, fact_key: $fact_key}]->(o)
 SET e.uuid = $fact_key, e.name = $predicate, e.fact = $fact,
+    e.created_at = $created_at, e.episodes = $episodes,
     e.valid_at = $valid_at, e.invalid_at = $invalid_at,
     e.authority = $authority, e.confidence = $confidence,
     e.supporting = $supporting
@@ -84,6 +86,8 @@ class GraphitiFactProjection:
             object_uuid=str(deterministic_id(fact.group_id, "entity", fact.object_name)),
             predicate=fact.predicate.upper(),
             fact=fact.fact_text,
+            created_at=utc_now().isoformat(),
+            episodes=list(fact.supporting_episode_ids),
             valid_at=_iso(fact.valid_at),
             invalid_at=_iso(fact.invalid_at),
             authority=fact.authority,

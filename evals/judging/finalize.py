@@ -3,9 +3,14 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import json
 import sys
+import tempfile
+from collections.abc import Iterator
+from contextlib import ExitStack, contextmanager
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -22,12 +27,92 @@ def _load(path: Path) -> Any:
         return json.load(handle)
 
 
-def _sha256(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+@dataclass(frozen=True, slots=True)
+class _JsonSnapshot:
+    path: Path
+    data: bytes
+    value: Any
+    sha256: str
+
+
+def _snapshot(path: Path) -> _JsonSnapshot:
+    resolved = path.resolve()
+    data = resolved.read_bytes()
+    return _JsonSnapshot(
+        path=resolved,
+        data=data,
+        value=json.loads(data.decode("utf-8")),
+        sha256=hashlib.sha256(data).hexdigest(),
+    )
+
+
+@contextmanager
+def _materialize(snapshot: _JsonSnapshot, run_root: Path) -> Iterator[Path]:
+    with tempfile.NamedTemporaryFile(
+        dir=run_root, prefix=".finalize-snapshot-", suffix=".json", delete=False
+    ) as handle:
+        handle.write(snapshot.data)
+        temporary = Path(handle.name)
+    try:
+        yield temporary
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _changed_inputs(snapshots: dict[Path, _JsonSnapshot]) -> list[str]:
+    changed: list[str] = []
+    for path, snapshot in snapshots.items():
+        try:
+            if path.read_bytes() != snapshot.data:
+                changed.append(str(path))
+        except OSError:
+            changed.append(str(path))
+    return changed
 
 
 def _is_run_owned(path: Path, run_root: Path) -> bool:
     return path.resolve().is_relative_to(run_root)
+
+
+def _resolve_run_owned_ref(value: object, run_root: Path, run_id: str) -> Path | None:
+    if not isinstance(value, str) or not value:
+        return None
+    direct = Path(value).resolve()
+    if _is_run_owned(direct, run_root):
+        return direct
+    parts = Path(value).parts
+    positions = [index for index, part in enumerate(parts) if part == run_id]
+    if len(positions) != 1 or positions[0] == len(parts) - 1:
+        return None
+    archived = run_root.joinpath(*parts[positions[0] + 1 :]).resolve()
+    return archived if _is_run_owned(archived, run_root) else None
+
+
+def _remapped_report_snapshot(
+    report_snapshot: _JsonSnapshot, run_root: Path, run_id: str
+) -> _JsonSnapshot:
+    report = copy.deepcopy(report_snapshot.value)
+    evidence = report.get("evidence")
+    if isinstance(evidence, list):
+        for binding in evidence:
+            if isinstance(binding, dict):
+                path = _resolve_run_owned_ref(binding.get("ref"), run_root, run_id)
+                if path is not None:
+                    binding["ref"] = str(path)
+    judge_packets = report.get("judge_packets")
+    if isinstance(judge_packets, list):
+        for binding in judge_packets:
+            if isinstance(binding, dict):
+                path = _resolve_run_owned_ref(binding.get("ref"), run_root, run_id)
+                if path is not None:
+                    binding["ref"] = str(path)
+    data = (json.dumps(report, ensure_ascii=True, indent=2, sort_keys=True) + "\n").encode()
+    return _JsonSnapshot(
+        path=report_snapshot.path,
+        data=data,
+        value=report,
+        sha256=hashlib.sha256(data).hexdigest(),
+    )
 
 
 def _schema_errors(value: Any, schema_name: str, label: str) -> list[str]:
@@ -43,19 +128,53 @@ def finalize(
     *,
     trusted_panel_result_sha256: frozenset[str],
 ) -> tuple[dict[str, Any] | None, list[str]]:
+    report_path = report_path.resolve()
+    run_root = report_path.parent
+    snapshots: dict[Path, _JsonSnapshot] = {}
+
+    def snapshot(path: Path) -> _JsonSnapshot:
+        resolved = path.resolve()
+        existing = snapshots.get(resolved)
+        if existing is None:
+            existing = _snapshot(resolved)
+            snapshots[resolved] = existing
+        return existing
+
     try:
-        report = _load(report_path)
-    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        report_snapshot = snapshot(report_path)
+        report = report_snapshot.value
+    except (OSError, UnicodeDecodeError, ValueError, json.JSONDecodeError) as exc:
         return None, [f"unreadable execution report: {exc}"]
-    errors = [
-        f"execution report: {error}"
-        for error in aggregate_module._execution_report_errors(report_path)
-    ]
+    errors: list[str] = []
+    if not isinstance(report, dict):
+        return None, [*errors, "execution report is not an object"]
+    run_id = report.get("run_id")
+    if not isinstance(run_id, str) or not run_id:
+        return None, [*errors, "execution report run_id is invalid"]
+    for label in ("evidence", "judge_packets"):
+        bindings = report.get(label)
+        if not isinstance(bindings, list):
+            continue
+        for binding in bindings:
+            ref = binding.get("ref") if isinstance(binding, dict) else None
+            path = _resolve_run_owned_ref(ref, run_root, run_id)
+            if path is None:
+                continue
+            try:
+                snapshot(path)
+            except (OSError, UnicodeDecodeError, ValueError, json.JSONDecodeError):
+                errors.append(f"execution report {label} input is unavailable: {ref}")
+    remapped_report_snapshot = _remapped_report_snapshot(report_snapshot, run_root, run_id)
+    with _materialize(remapped_report_snapshot, run_root) as report_copy:
+        errors = [
+            f"execution report: {error}"
+            for error in aggregate_module._execution_report_errors(report_copy)
+        ]
     if report.get("quality_status") != "PENDING_JUDGMENT":
         errors.append("execution report is not pending external judgment")
-    if (
-        report.get("profile") == "release"
-        and report.get("manifest", {}).get("git_dirty") is not False
+    manifest = report.get("manifest")
+    if report.get("profile") == "release" and (
+        not isinstance(manifest, dict) or manifest.get("git_dirty") is not False
     ):
         errors.append("release quality cannot be finalized from a dirty source tree")
     packet_refs = report.get("judge_packets")
@@ -70,18 +189,17 @@ def finalize(
     if len(expected_packets) != len(packet_refs):
         errors.append("execution report has invalid or duplicate packet IDs")
 
-    report_path = report_path.resolve()
-    run_root = report_path.parent
-    report_sha256 = _sha256(report_path)
-    results_by_packet: dict[str, tuple[dict[str, Any], Path]] = {}
+    report_sha256 = report_snapshot.sha256
+    results_by_packet: dict[str, tuple[dict[str, Any], Path, str]] = {}
     for path in panel_result_paths:
         path = path.resolve()
         if not _is_run_owned(path, run_root):
             errors.append(f"{path}: panel result is outside the immutable run directory")
             continue
         try:
-            result = _load(path)
-        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            result_snapshot = snapshot(path)
+            result = result_snapshot.value
+        except (OSError, UnicodeDecodeError, ValueError, json.JSONDecodeError) as exc:
             errors.append(f"{path}: unreadable panel result: {exc}")
             continue
         schema_errors = _schema_errors(result, "panel-result.schema.json", str(path))
@@ -91,7 +209,7 @@ def finalize(
         if result.get("schema_version") != "1.1":
             errors.append(f"{path}: panel result lacks transitive input bindings")
             continue
-        panel_result_sha256 = _sha256(path)
+        panel_result_sha256 = result_snapshot.sha256
         if panel_result_sha256 not in trusted_panel_result_sha256:
             errors.append(f"{path}: panel result SHA-256 is not externally trusted")
         packet_id = result["packet_id"]
@@ -106,47 +224,71 @@ def finalize(
             errors.append(f"{packet_id}: execution report SHA-256 mismatch")
         if result["inputs"]["packet_sha256"] != packet_ref.get("sha256"):
             errors.append(f"{packet_id}: judge packet SHA-256 mismatch")
-        assignment_path = Path(result["inputs"]["assignment_ref"]).resolve()
+        assignment_path = _resolve_run_owned_ref(
+            result["inputs"]["assignment_ref"], run_root, run_id
+        )
         assignment_sha256 = result["inputs"]["assignment_sha256"]
-        if not _is_run_owned(assignment_path, run_root):
+        if assignment_path is None:
             errors.append(f"{packet_id}: assignment is outside the immutable run directory")
             continue
         try:
-            actual_assignment_sha256 = _sha256(assignment_path)
-        except OSError:
+            assignment_snapshot = snapshot(assignment_path)
+            actual_assignment_sha256 = assignment_snapshot.sha256
+        except (OSError, UnicodeDecodeError, ValueError, json.JSONDecodeError):
             errors.append(f"{packet_id}: assignment file is unavailable")
             continue
         if actual_assignment_sha256 != assignment_sha256:
             errors.append(f"{packet_id}: assignment SHA-256 mismatch")
-        judgment_paths: list[Path] = []
+        judgment_snapshots: list[_JsonSnapshot] = []
         for binding in result["inputs"]["judgments"]:
-            judgment_path = Path(binding["ref"]).resolve()
-            judgment_paths.append(judgment_path)
-            if not _is_run_owned(judgment_path, run_root):
+            judgment_path = _resolve_run_owned_ref(binding["ref"], run_root, run_id)
+            if judgment_path is None:
                 errors.append(
                     f"{packet_id}: judgment is outside the immutable run directory "
                     f"for {binding['actor_id']}"
                 )
                 continue
             try:
-                actual_judgment_sha256 = _sha256(judgment_path)
-            except OSError:
+                judgment_snapshot = snapshot(judgment_path)
+                actual_judgment_sha256 = judgment_snapshot.sha256
+                judgment_snapshots.append(judgment_snapshot)
+            except (OSError, UnicodeDecodeError, ValueError, json.JSONDecodeError):
                 errors.append(
                     f"{packet_id}: judgment file is unavailable for {binding['actor_id']}"
                 )
                 continue
             if actual_judgment_sha256 != binding["sha256"]:
                 errors.append(f"{packet_id}: judgment SHA-256 mismatch for {binding['actor_id']}")
-        packet_path = Path(str(packet_ref["ref"])).resolve()
-        if not _is_run_owned(packet_path, run_root):
+        packet_path = _resolve_run_owned_ref(packet_ref["ref"], run_root, run_id)
+        if packet_path is None:
             errors.append(f"{packet_id}: judge packet is outside the immutable run directory")
             continue
-        regenerated, aggregate_errors = aggregate_module.aggregate(
-            packet_path,
-            report_path,
-            judgment_paths,
-            assignment_path,
-        )
+        try:
+            packet_snapshot = snapshot(packet_path)
+        except (OSError, UnicodeDecodeError, ValueError, json.JSONDecodeError):
+            errors.append(f"{packet_id}: judge packet is unavailable")
+            continue
+        with ExitStack() as stack:
+            report_copy = stack.enter_context(_materialize(remapped_report_snapshot, run_root))
+            packet_copy = stack.enter_context(_materialize(packet_snapshot, run_root))
+            assignment_copy = stack.enter_context(_materialize(assignment_snapshot, run_root))
+            judgment_copies = [
+                stack.enter_context(_materialize(item, run_root)) for item in judgment_snapshots
+            ]
+            regenerated, aggregate_errors = aggregate_module.aggregate(
+                packet_copy,
+                report_copy,
+                judgment_copies,
+                assignment_copy,
+            )
+            if regenerated is not None:
+                regenerated["inputs"]["report_sha256"] = report_sha256
+                regenerated["inputs"]["assignment_ref"] = result["inputs"]["assignment_ref"]
+                original_judgments = {
+                    item["actor_id"]: item["ref"] for item in result["inputs"]["judgments"]
+                }
+                for binding in regenerated["inputs"]["judgments"]:
+                    binding["ref"] = original_judgments[binding["actor_id"]]
         if aggregate_errors:
             errors.extend(f"{packet_id}: {error}" for error in aggregate_errors)
         elif regenerated != result:
@@ -156,17 +298,20 @@ def finalize(
         )
         if result["status"] != expected_status:
             errors.append(f"{packet_id}: panel status is internally inconsistent")
-        results_by_packet[packet_id] = (result, path)
+        results_by_packet[packet_id] = (result, path, panel_result_sha256)
     missing_packets = sorted(set(expected_packets) - set(results_by_packet))
     if missing_packets:
         errors.append(f"missing panel results for {missing_packets}")
+    changed_inputs = _changed_inputs(snapshots)
+    if changed_inputs:
+        errors.append(f"finalization inputs changed while being verified: {changed_inputs}")
     if errors:
         return None, errors
 
     panel_results: list[dict[str, Any]] = []
     quality_status = "PASS"
     for packet_id in sorted(results_by_packet):
-        result, path = results_by_packet[packet_id]
+        result, path, panel_result_sha256 = results_by_packet[packet_id]
         if result["status"] == "FAIL" or result["quality_status"] == "FAIL":
             quality_status = "FAIL"
         elif quality_status == "PASS" and result["status"] != "PASS":
@@ -175,7 +320,7 @@ def finalize(
             {
                 "packet_id": packet_id,
                 "ref": str(path.resolve()),
-                "sha256": _sha256(path),
+                "sha256": panel_result_sha256,
                 "status": result["status"],
                 "quality_status": result["quality_status"],
                 "overall_score": result["overall_score"],
@@ -207,6 +352,9 @@ def finalize(
     schema_errors = _schema_errors(
         finalized, "final-quality-gate.schema.json", "final quality gate"
     )
+    changed_inputs = _changed_inputs(snapshots)
+    if changed_inputs:
+        return None, [f"finalization inputs changed while being finalized: {changed_inputs}"]
     return (None, schema_errors) if schema_errors else (finalized, [])
 
 

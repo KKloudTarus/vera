@@ -7,6 +7,7 @@ from collections.abc import Sequence
 import pytest
 
 from vera.adapters.graph.null import NullMemoryEngine
+from vera.application.queries import search_memory
 from vera.application.queries.search_memory import SearchMemory, SearchMemoryHandler
 from vera.domain.ports.memory_engine import GraphHit, GraphQuery
 from vera.domain.ports.retrieval import HitProvenance
@@ -115,3 +116,23 @@ async def test_search_preserves_parent_usage_ref() -> None:
         assert current_usage_context() == parent_context
     finally:
         reset_usage_context(token)
+
+
+@pytest.mark.asyncio
+async def test_failed_search_records_latency(monkeypatch: pytest.MonkeyPatch) -> None:
+    observed: list[dict[str, float | int]] = []
+    engine = _FakeEngine([])
+
+    async def fail(_query: GraphQuery) -> Sequence[GraphHit]:
+        raise TimeoutError
+
+    monkeypatch.setattr(engine, "search", fail)
+    monkeypatch.setattr(search_memory, "record_search", lambda **values: observed.append(values))
+    handler = SearchMemoryHandler(engine, _FakeReadModel({}))
+
+    with pytest.raises(TimeoutError):
+        await handler.handle(SearchMemory(text="x", group_ids=(GroupId("p:demo"),)))
+
+    assert len(observed) == 1
+    assert observed[0]["duration_s"] >= 0
+    assert observed[0]["hits"] == 0

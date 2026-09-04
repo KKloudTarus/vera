@@ -1,13 +1,17 @@
+{{- $adminSecret := lookup "v1" "Secret" .Release.Namespace (printf "%s-database-admin" (include "vera.fullname" .)) -}}
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: {{ include "vera.fullname" . }}-migrate
+  name: {{ include "vera.fullname" . }}-migrate-{{ .Release.Revision }}
   labels: {{- include "vera.labels" . | nindent 4 }}
+{{- if .Release.IsUpgrade }}
   annotations:
-    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook": pre-upgrade
     "helm.sh/hook-weight": "1"
-    "helm.sh/hook-delete-policy": before-hook-creation
+    "helm.sh/hook-delete-policy": hook-succeeded
+{{- end }}
 spec:
+  activeDeadlineSeconds: 600
   backoffLimit: 6
   template:
     metadata:
@@ -21,6 +25,16 @@ spec:
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           command: ["alembic", "upgrade", "head"]
           envFrom: {{- include "vera.envFrom" . | nindent 12 }}
+          env:
+{{- if and .Release.IsUpgrade .Values.secrets.create .Values.secrets.allowLegacyUpgrade (not $adminSecret) }}
+            - name: VERA_DB__DSN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "vera.fullname" . }}-secrets
+                  key: VERA_DB__DSN
+{{- else }}
+{{- include "vera.adminDatabaseEnv" . | nindent 12 }}
+{{- end }}
           resources:
             requests: { cpu: "100m", memory: "256Mi" }
             limits: { cpu: "500m", memory: "512Mi" }

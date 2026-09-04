@@ -42,6 +42,7 @@ class DatabaseSettings(BaseModel):
     pool_pre_ping: bool = True
     pool_recycle_s: int = 1800
     echo: bool = False
+    application_name: str = "vera"
     # When true, the read path assumes vera_trusted and the worker path vera_worker via
     # SET LOCAL ROLE, so a superuser login is never relied on. Off by default: the login role
     # must be a member of those roles (or a superuser) for the SET to succeed.
@@ -103,8 +104,12 @@ class WorkerSettings(BaseModel):
     poll_interval_ms: int = 500
     batch_size: int = 20
     visibility_timeout_s: int = 300
+    shutdown_grace_s: float = Field(default=15.0, gt=0)
     # Warn (and count a metric) when the pending backlog exceeds this; 0 disables it.
     queue_depth_alert_threshold: int = 1000
+    community_build_enabled: bool = False
+    community_build_group_id: str | None = None
+    community_build_interval_cycles: int = Field(default=1200, ge=1)
 
 
 class McpSettings(BaseModel):

@@ -16,12 +16,13 @@ spec:
         vera.component: mcp
       annotations:
         checksum/config: {{ include (print $.Template.BasePath "/config.yaml") . | sha256sum }}
+        checksum/external-secrets: {{ .Values.secrets.externalRevision | quote }}
         prometheus.io/scrape: "true"
         prometheus.io/port: "9101"
         prometheus.io/path: "/metrics"
     spec:
       securityContext: {{- include "vera.podSecurityContext" . | nindent 8 }}
-      initContainers: {{- include "vera.waitForPostgres" . | nindent 8 }}
+      initContainers: {{- include "vera.waitForRuntimeDatabase" (dict "root" . "database" "runtime" "role" "vera_app") | nindent 8 }}
       containers:
         - name: mcp
           image: {{ include "vera.image" . }}
@@ -31,6 +32,10 @@ spec:
             - { containerPort: 8080, name: http }
             - { containerPort: 9101, name: metrics }
           envFrom: {{- include "vera.envFrom" . | nindent 12 }}
+          env:
+{{- include "vera.applicationSecretEnv" . | nindent 12 }}
+{{- include "vera.mcpSecretEnv" . | nindent 12 }}
+{{- include "vera.runtimeDatabaseEnv" . | nindent 12 }}
           readinessProbe:
             tcpSocket: { port: 8080 }
             initialDelaySeconds: 5

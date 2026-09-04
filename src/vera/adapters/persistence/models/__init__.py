@@ -32,6 +32,7 @@ from vera.adapters.persistence.models.knowledge import (
     PublishedEpisodeRow,
     ReviewRow,
 )
+from vera.adapters.persistence.models.legal_hold import LegalHoldRow
 from vera.adapters.persistence.models.ops import (
     AuditEventRow,
     LlmUsageRow,
@@ -68,6 +69,7 @@ __all__ = [
     "IngestionJobRow",
     "KnowledgeEventRow",
     "KnowledgeSourceRow",
+    "LegalHoldRow",
     "LlmUsageRow",
     "MembershipRow",
     "OntologyVersionRow",

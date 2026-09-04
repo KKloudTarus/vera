@@ -13,12 +13,16 @@ WORKDIR /workspace
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends git libatomic1 nodejs \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --system vera \
+    && useradd --system --gid vera --home-dir /app vera
 
 COPY pyproject.toml constraints.lock README.md LICENSE NOTICE ./
 COPY src ./src
 COPY tests ./tests
 COPY evals ./evals
+COPY .github/workflows ./.github/workflows
+COPY deploy ./deploy
 COPY docs ./docs
 COPY examples ./examples
 COPY migrations ./migrations

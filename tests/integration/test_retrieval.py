@@ -4,6 +4,7 @@ fact candidate sources, and the ContextAssembler that fuses and cites them.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
@@ -64,6 +65,12 @@ class _SemanticEmbedder:
     async def embed(self, text: str) -> list[float]:
         del text
         return [1.0, 0.0]
+
+
+class _FailingEmbedder:
+    async def embed(self, text: str) -> list[float]:
+        del text
+        raise AssertionError("exact fact lookup must not call the embedder")
 
 
 class _SemanticReranker:
@@ -209,7 +216,16 @@ async def _chunk(
         return stored.id
 
 
-async def _fact(sessionmaker, group, subject_id, obj, *, valid_from=None, valid_to=None):
+async def _fact(
+    sessionmaker,
+    group,
+    subject_id,
+    obj,
+    *,
+    valid_from=None,
+    valid_to=None,
+    lifecycle=FactLifecycle.ACTIVE,
+):
     fk = fabric.fact_key(
         scope=group, subject_entity_id=subject_id, predicate="RUNS_ON", object_scalar=obj
     )
@@ -226,7 +242,7 @@ async def _fact(sessionmaker, group, subject_id, obj, *, valid_from=None, valid_
                 object_type=ObjectType.SCALAR,
                 normalized_object=fabric.normalize_object(object_scalar=obj),
                 object_scalar=obj,
-                lifecycle_state=FactLifecycle.ACTIVE,
+                lifecycle_state=lifecycle,
                 authority=1.0,
                 confidence=0.9,
                 valid_from=valid_from,
@@ -421,6 +437,41 @@ async def test_fact_candidate_source_matches_subject_and_object(
         h.subject_name == "paymentapi"
         for h in await source.search(group_id=group, query="paymentapi", limit=10)
     )
+
+
+@pytest.mark.parametrize("lifecycle", [FactLifecycle.ACTIVE, FactLifecycle.DISPUTED])
+async def test_exact_fact_query_bypasses_semantic_providers(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    lifecycle: FactLifecycle,
+) -> None:
+    group = f"p:r-{uuid7().hex[:12]}"
+    _, subject = await _setup(sessionmaker, group)
+    await _fact(sessionmaker, group, subject, "Payment API", lifecycle=lifecycle)
+    source = PgVectorHybridFactCandidateSource(
+        sessionmaker,
+        _FailingEmbedder(),
+        _FailingReranker(),
+        provider="test",
+        model="semantic-test",
+        model_version="1",
+        dimension=2,
+        min_score=0.35,
+        top_n=20,
+        semantic_semaphore=asyncio.Semaphore(0),
+        exact_semaphore=asyncio.Semaphore(1),
+    )
+
+    result = await source.search(
+        group_id=group,
+        query="paymentapi RUNS_ON Payment API",
+        limit=5,
+    )
+
+    assert [(hit.subject_name, hit.predicate, hit.object_name) for hit in result.lexical] == [
+        ("paymentapi", "RUNS_ON", "Payment API")
+    ]
+    assert result.lexical[0].exact_match is True
+    assert result.semantic == ()
 
 
 async def test_semantic_fact_candidates_require_cross_encoder_relevance(
