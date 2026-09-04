@@ -12,4 +12,4 @@ Architecture (imports point inward only, enforced by import-linter):
 by any layer.
 """
 
-__version__ = "0.2.1"
+__version__ = "0.2.2"
