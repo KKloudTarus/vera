@@ -26,6 +26,7 @@ from vera.domain.ports.retrieval_index import (
     is_exact_fact_query_candidate,
 )
 from vera.observability import get_logger
+from vera.observability.cost import UsageAccountingError
 
 log = get_logger(__name__)
 
@@ -633,6 +634,8 @@ class PgVectorHybridFactCandidateSource:
                     .mappings()
                     .all()
                 )
+        except UsageAccountingError:
+            raise
         except Exception as exc:
             log.warning("combined_fact_retrieval.failed", error=str(exc))
             lexical = await self._lexical.search(
@@ -651,6 +654,8 @@ class PgVectorHybridFactCandidateSource:
         semantic = fact_hits(row for row in rows if row["candidate_source"] == "semantic")
         try:
             scores = await self._reranker.rerank(query=query, facts=[hit.text for hit in semantic])
+        except UsageAccountingError:
+            raise
         except Exception as exc:
             log.warning("semantic_fact_retrieval.failed", error=str(exc))
             return FactCandidateSets(lexical=tuple(lexical), semantic=())
@@ -763,6 +768,8 @@ class PgVectorFactIndex:
                 for hit, score in zip(hits, scores, strict=True)
                 if score >= self._min_score
             ]
+        except UsageAccountingError:
+            raise
         except Exception as exc:
             log.warning("semantic_fact_retrieval.failed", error=str(exc))
             return []

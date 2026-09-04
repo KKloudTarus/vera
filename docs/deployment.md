@@ -6,12 +6,11 @@ rebuildable projection; Valkey is cache and rate limiter.
 
 ## The Image
 
-The release workflow publishes the image to GHCR as a public package, so most deployments
-just pull it:
+The release workflow promotes the exact digest exercised by the release evaluation. Deploy that
+digest rather than a movable tag:
 
 ```bash
-docker pull ghcr.io/kkloudtarus/vera:latest   # or a version tag, e.g. :0.2.1
-docker build -t vera:local .                  # or build locally
+docker pull ghcr.io/kkloudtarus/vera@sha256:<approved-64-character-digest>
 ```
 
 Multi-stage, non-root, runtime dependencies only. The base is pinned to
@@ -45,7 +44,7 @@ Manifests are in `deploy/k8s/`:
 
 | File | Contents |
 |------|----------|
-| `base.yaml` | namespace `vera`, `vera-config` ConfigMap, `vera-secrets` Secret, and the `vera-migrate` Job (`alembic upgrade head`) |
+| `base.yaml` | namespace `vera`, `vera-config` ConfigMap, `vera-secrets` Secret, and the revisioned migration Job (`alembic upgrade head`) |
 | `api.yaml` | API Deployment + Service, CPU HPA, liveness/readiness probes |
 | `mcp.yaml` | MCP Deployment + Service |
 | `worker.yaml` | worker Deployment, KEDA `ScaledObject` on ingestion queue depth (CPU HPA fallback) |
@@ -54,10 +53,10 @@ Manifests are in `deploy/k8s/`:
 Apply:
 
 ```bash
-# 1. Put real values in vera-config (non-secret) and vera-secrets (DSN, OpenAI key, JWT
-#    secret, Neo4j password) in base.yaml, or manage them with your secrets tooling.
+# 1. Put real values in vera-config and vera-secrets, and replace every all-zero VERA image
+#    digest with the release-gated digest.
 kubectl apply -f deploy/k8s/base.yaml        # namespace, config, secret, migrate Job
-kubectl -n vera wait --for=condition=complete job/vera-migrate
+kubectl -n vera wait --for=condition=complete job/vera-migrate-d4e5f6a7b8c9 --timeout=600s
 kubectl apply -f deploy/k8s/api.yaml -f deploy/k8s/mcp.yaml -f deploy/k8s/worker.yaml
 kubectl apply -f deploy/k8s/calibrate-cronjob.yaml
 ```
@@ -74,12 +73,14 @@ and the object store are provided externally (managed services or your own).
 For a single-cluster install of the whole stack, including the datastores, use the chart in
 `deploy/helm/vera` (see its README for the full walkthrough). It installs the API, MCP, and
 worker plus PostgreSQL, a graph backend (`neo4j` by default, `falkordb` with one flag),
-Valkey, and MinIO, with a post-install migrate hook, a MinIO bucket bootstrap, and
+Valkey, and MinIO, with install-time migration and provisioning Jobs, pre-upgrade hooks, and
 health-gated pods. It pulls the published image `ghcr.io/kkloudtarus/vera`, so no local build
 is needed.
 
 ```bash
-helm install vera deploy/helm/vera -n vera --create-namespace --set graph.backend=falkordb
+helm install vera deploy/helm/vera -n vera --create-namespace \
+  --set image.digest=sha256:<approved-64-character-digest> \
+  --set graph.backend=falkordb
 ```
 
 The defaults boot with no external credentials (a deterministic embedder and an unauthenticated
@@ -100,7 +101,21 @@ With `api.registrationOpen=false`, `POST /identity/register` returns `403`. The 
 `VERA_BOOTSTRAP__*`, idempotently, so a closed deployment still has a first principal; that
 admin provisions everyone else through `POST /identity/users`. For GitOps, keep the admin key
 out of git: leave `secrets.create=false` and put `VERA_BOOTSTRAP__ADMIN_API_KEY` in the
-externally created `vera-secrets` Secret instead of passing it on the command line.
+externally created `vera-secrets` Secret instead of passing it on the command line. Only the
+bootstrap Job receives that key. Only the MCP Deployment receives the MCP signing key.
+
+Database credentials are split by process. API, MCP, bootstrap, and calibration use
+`vera_runtime`; the worker uses `vera_worker_runtime`; migration and role provisioning use the
+schema owner. The Helm chart stores those DSNs in separate Secrets so runtime pods cannot read
+the worker or admin credential. Set `postgres.runtimePassword` and `postgres.workerPassword`
+alongside the schema-owner `postgres.password`, or supply the corresponding external Secrets.
+All PostgreSQL, MinIO, and Neo4j passwords initialize persisted identities. Provisioning creates
+missing runtime identities but does not change existing passwords during upgrades. The chart
+rejects changes to chart-managed datastore credentials after install, preventing a failed
+upgrade or rollback from stranding the previous workloads. Use externally managed Secrets for
+production rotation: quiesce consumers, rotate through the datastore's administrative
+interface, update the external Secret, bump `secrets.externalRevision`, and upgrade. Keep the
+MinIO application access-key name stable.
 
 The command above enables the API-key-to-JWT fallback. For browser OAuth, pair MCP with an
 external OIDC authorization server that supports authorization code + PKCE and either dynamic
@@ -135,7 +150,10 @@ flowchart TB
     MO[(MinIO / S3)]
   end
   DA & DM & DW --> PG & GR & VK & MO
-  SEC[(vera-secrets)] -. envFrom .-> DA & DM & DW & JB
+  SEC[(scoped application secrets)] -. explicit env .-> DA & DM & DW & JB
+  RDB[(runtime DB secret)] -.-> DA & DM & JB & CC
+  WDB[(worker DB secret)] -.-> DW
+  ADB[(admin DB secret)] -.-> JM
 ```
 
 Two services are meant to be exposed through an ingress: `vera-api` (:8000) and `vera-mcp`

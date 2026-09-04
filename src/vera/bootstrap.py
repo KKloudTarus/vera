@@ -109,10 +109,13 @@ def build_container(settings: Settings) -> Container:
     reads = read_sessionmaker or sessionmaker
     workers = worker_sessionmaker or sessionmaker
     queue: JobQueue = PostgresJobQueue(
-        workers, visibility_timeout_s=settings.worker.visibility_timeout_s
+        sessionmaker,
+        worker_session_factory=workers,
+        visibility_timeout_s=settings.worker.visibility_timeout_s,
     )
-    usage_sink: UsageSink | None = (
-        SqlAlchemyUsageSink(workers) if settings.observability.cost_tracking_enabled else None
+    usage_sink: UsageSink = SqlAlchemyUsageSink(
+        sessionmaker,
+        record_enabled=settings.observability.cost_tracking_enabled,
     )
     memory: MemoryEngine = build_memory_engine(settings, usage_sink)
     fact_projection = maybe_fact_projection(memory)
@@ -175,7 +178,7 @@ def build_container(settings: Settings) -> Container:
 
         key = settings.memory.openai_api_key.get_secret_value()
         curation_client = MeteredChatClient(
-            AsyncOpenAI(api_key=key, base_url=settings.memory.openai_base_url),
+            AsyncOpenAI(api_key=key, base_url=settings.memory.openai_base_url, max_retries=0),
             policy=build_resilience_policy(settings.resilience, name="openai-curation"),
             sink=usage_sink,
         )

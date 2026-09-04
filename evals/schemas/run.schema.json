@@ -37,6 +37,7 @@
     "manifest": {"$ref": "#/$defs/manifest"},
     "selection": {"$ref": "#/$defs/selection"},
     "gate": {"$ref": "#/$defs/gate"},
+    "budget": {"$ref": "#/$defs/budget"},
     "metrics": {
       "type": "array",
       "items": {"$ref": "#/$defs/metric"}
@@ -88,6 +89,7 @@
     {
       "if": {"properties": {"schema_version": {"const": "1.1"}}},
       "then": {
+        "required": ["budget"],
         "properties": {
           "case_results": {
             "items": {
@@ -109,6 +111,14 @@
           "manifest": {
             "required": ["source_tree_sha256"]
           }
+        }
+      }
+    },
+    {
+      "if": {"properties": {"profile": {"const": "release"}}},
+      "then": {
+        "properties": {
+          "manifest": {"required": ["app_image_digest"]}
         }
       }
     }
@@ -136,6 +146,28 @@
         "CROSS_CUTTING",
         null
       ]
+    },
+    "budget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "max_duration_s",
+        "elapsed_s",
+        "max_cost_usd",
+        "cost_usd",
+        "cost_complete",
+        "reason"
+      ],
+      "properties": {
+        "status": {"type": "string", "enum": ["PASS", "BLOCKED"]},
+        "max_duration_s": {"type": ["number", "null"], "exclusiveMinimum": 0},
+        "elapsed_s": {"type": "number", "minimum": 0},
+        "max_cost_usd": {"type": ["number", "null"], "exclusiveMinimum": 0},
+        "cost_usd": {"type": "number", "minimum": 0},
+        "cost_complete": {"type": "boolean"},
+        "reason": {"type": ["string", "null"]}
+      }
     },
     "baseline_ref": {
       "type": ["object", "null"],
@@ -183,6 +215,11 @@
         "service_version": {"type": "string", "minLength": 1},
         "git_sha": {"type": "string", "minLength": 7},
         "git_dirty": {"type": "boolean"},
+        "app_image_digest": {
+          "type": "string",
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "not": {"const": "sha256:0000000000000000000000000000000000000000000000000000000000000000"}
+        },
         "source_tree_sha256": {"$ref": "#/$defs/sha256"},
         "dataset_sha256": {"$ref": "#/$defs/sha256"},
         "checklist_sha256": {"$ref": "#/$defs/sha256"},

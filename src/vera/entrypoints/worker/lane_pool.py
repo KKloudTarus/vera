@@ -52,7 +52,15 @@ from vera.domain.ontology import is_edge_predicate
 from vera.domain.ports.job_queue import QueuedJob
 from vera.domain.ports.memory_engine import EpisodeSpec, IngestReceipt
 from vera.observability import bind_log_context, clear_log_context, get_logger, span
-from vera.observability.cost import UsageContext, reset_usage_context, set_usage_context
+from vera.observability.cost import (
+    ProviderBudgetContext,
+    UsageAccountingError,
+    UsageContext,
+    reset_provider_budget_context,
+    reset_usage_context,
+    set_provider_budget_context,
+    set_usage_context,
+)
 from vera.observability.metrics import record_ingestion, record_time_to_searchable
 from vera.shared.ids import deterministic_id, uuid7
 from vera.shared.time import utc_now
@@ -62,7 +70,8 @@ log = get_logger(__name__)
 
 _MARK_DONE = text(
     "UPDATE ingestion_jobs SET status = 'done', last_error = NULL, "
-    "completed_at = now() WHERE id = :id"
+    "completed_at = now(), locked_until = NULL, claim_token = NULL "
+    "WHERE id = :id AND claim_token = :claim_token"
 )
 _GROUP_LOCK = text("SELECT pg_advisory_xact_lock(hashtextextended(:g, 0))")
 _EPISODE_BY_SOURCE = text(
@@ -72,7 +81,10 @@ _REFERENCE_TIME_BY_SOURCE = text(
     "SELECT reference_time FROM published_episodes "
     "WHERE group_id = :group_id AND source_id = :source_id"
 )
-_JOB_IS_INFLIGHT = text("SELECT 1 FROM ingestion_jobs WHERE id=:job_id AND status='inflight'")
+_JOB_IS_INFLIGHT = text(
+    "SELECT 1 FROM ingestion_jobs "
+    "WHERE id=:job_id AND claim_token=:claim_token AND status='inflight'"
+)
 _FACTS_TO_EMBED = text(
     "SELECT f.id, cs.canonical_name AS subject_name, f.predicate, "
     "COALESCE(co.canonical_name, f.object_scalar, '') AS object_name, "
@@ -96,6 +108,10 @@ def lane_for(group_id: str, lanes: int) -> int:
 def _correlation(trace_context: JsonDict) -> dict[str, str]:
     cid = trace_context.get("correlation_id")
     return {"correlation_id": str(cid)} if cid else {}
+
+
+class _ClaimLeaseLost(RuntimeError):
+    pass
 
 
 async def _triple_needs_review(
@@ -187,6 +203,7 @@ class LanePool:
         queue_maxsize: int,
         backoff_base_s: float = 1.0,
         backoff_cap_s: float = 60.0,
+        lease_renew_interval_s: float | None = None,
     ) -> None:
         self._container = container
         self._lanes = lanes
@@ -194,6 +211,15 @@ class LanePool:
             asyncio.Queue(maxsize=queue_maxsize) for _ in range(lanes)
         ]
         self._workers: list[asyncio.Task[None]] = []
+        self._lease_tasks: dict[tuple[UUID, UUID], asyncio.Task[None]] = {}
+        self._lease_lost: dict[tuple[UUID, UUID], asyncio.Event] = {}
+        visibility_s = container.settings.worker.visibility_timeout_s
+        self._visibility_timeout_s = float(visibility_s)
+        self._lease_renew_interval_s = (
+            lease_renew_interval_s
+            if lease_renew_interval_s is not None
+            else max(0.1, visibility_s / 3)
+        )
         self._backoff_base_s = backoff_base_s
         self._backoff_cap_s = backoff_cap_s
         self._resolver = SemanticEntityResolver(
@@ -211,7 +237,17 @@ class LanePool:
         ]
 
     async def submit(self, job: QueuedJob) -> None:
-        await self._queues[lane_for(str(job.group_id), self._lanes)].put(job)
+        key = (job.id, job.claim_token)
+        lost = asyncio.Event()
+        self._lease_lost[key] = lost
+        self._lease_tasks[key] = asyncio.create_task(
+            self._renew_lease(job, lost), name=f"lease-{job.id}"
+        )
+        try:
+            await self._queues[lane_for(str(job.group_id), self._lanes)].put(job)
+        except BaseException:
+            await self._stop_lease(job)
+            raise
 
     async def join(self) -> None:
         """Wait until every queued job has been processed."""
@@ -225,8 +261,66 @@ class LanePool:
         for queue in self._queues:
             while not queue.empty():
                 job = queue.get_nowait()
-                await self._container.queue.release(job.id, reason="worker shutdown")
+                await self._stop_lease(job)
+                await self._container.queue.release(
+                    job.id, claim_token=job.claim_token, reason="worker shutdown"
+                )
                 queue.task_done()
+
+    async def _renew_lease(self, job: QueuedJob, lost: asyncio.Event) -> None:
+        lease_deadline = time.monotonic() + self._visibility_timeout_s
+        while True:
+            await asyncio.sleep(self._lease_renew_interval_s)
+            renew_by = lease_deadline - self._lease_renew_interval_s
+            remaining = renew_by - time.monotonic()
+            if remaining <= 0:
+                lost.set()
+                log.error("ingest.lease_lost", job_id=str(job.id))
+                return
+            try:
+                async with asyncio.timeout(remaining):
+                    renewed = await self._container.queue.renew(job.id, claim_token=job.claim_token)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.warning("ingest.lease_renew_failed", job_id=str(job.id))
+                if time.monotonic() >= renew_by:
+                    lost.set()
+                    log.error("ingest.lease_lost", job_id=str(job.id))
+                    return
+                continue
+            if not renewed:
+                lost.set()
+                log.error("ingest.lease_lost", job_id=str(job.id))
+                return
+            lease_deadline = time.monotonic() + self._visibility_timeout_s
+
+    async def _stop_lease(self, job: QueuedJob) -> None:
+        key = (job.id, job.claim_token)
+        task = self._lease_tasks.pop(key, None)
+        self._lease_lost.pop(key, None)
+        if task is not None:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    async def _process_while_owned(self, job: QueuedJob) -> None:
+        lost = self._lease_lost[(job.id, job.claim_token)]
+        process_task = asyncio.create_task(self._process(job), name=f"process-{job.id}")
+        lost_task = asyncio.create_task(lost.wait(), name=f"lease-watch-{job.id}")
+        try:
+            done, _ = await asyncio.wait(
+                (process_task, lost_task), return_when=asyncio.FIRST_COMPLETED
+            )
+            if lost_task in done and process_task not in done:
+                process_task.cancel()
+                await asyncio.gather(process_task, return_exceptions=True)
+                raise _ClaimLeaseLost(f"claim lease was lost for job {job.id}")
+            await process_task
+        finally:
+            lost_task.cancel()
+            if not process_task.done():
+                process_task.cancel()
+            await asyncio.gather(process_task, lost_task, return_exceptions=True)
 
     def _backoff(self, attempts: int) -> float:
         ceiling = min(self._backoff_cap_s, self._backoff_base_s * (2**attempts))
@@ -236,22 +330,61 @@ class LanePool:
         queue = self._queues[index]
         while True:
             job = await queue.get()
+            job_usage_token = set_usage_context(
+                UsageContext(
+                    request_kind="ingest",
+                    group_id=str(job.group_id),
+                    ref=str(job.source_id),
+                    job_id=str(job.id),
+                    claim_token=str(job.claim_token),
+                )
+            )
+            budget_key = job.trace_context.get("_provider_budget_key")
+            budget_token = (
+                set_provider_budget_context(ProviderBudgetContext(budget_key))
+                if isinstance(budget_key, str) and 0 < len(budget_key) <= 512
+                else None
+            )
             try:
-                await self._process(job)
+                await self._process_while_owned(job)
             except asyncio.CancelledError:
                 await asyncio.shield(
-                    self._container.queue.release(job.id, reason="worker shutdown")
+                    self._container.queue.release(
+                        job.id, claim_token=job.claim_token, reason="worker shutdown"
+                    )
                 )
                 raise
+            except _ClaimLeaseLost:
+                clear_log_context()
+                record_ingestion(result="failed", duration_s=0.0)
+            except UsageAccountingError as exc:
+                clear_log_context()
+                record_ingestion(result="failed", duration_s=0.0)
+                try:
+                    await self._container.queue.dead_letter(
+                        job.id, claim_token=job.claim_token, error=str(exc)
+                    )
+                except Exception:
+                    log.exception("ingest.dead_letter_failed", job_id=str(job.id), lane=index)
+                log.error("ingest.accounting_failed", job_id=str(job.id), lane=index)
             except Exception as exc:
                 clear_log_context()
                 record_ingestion(result="failed", duration_s=0.0)
                 retry_in = self._backoff(job.attempts)
-                await self._container.queue.fail(job.id, error=str(exc), retry_in_s=retry_in)
+                await self._container.queue.fail(
+                    job.id,
+                    claim_token=job.claim_token,
+                    error=str(exc),
+                    retry_in_s=retry_in,
+                )
                 log.warning(
                     "ingest.failed", job_id=str(job.id), lane=index, retry_in_s=round(retry_in, 2)
                 )
             finally:
+                await self._stop_lease(job)
+                if budget_token is not None:
+                    reset_provider_budget_context(budget_token)
+                reset_usage_context(job_usage_token)
                 queue.task_done()
 
     async def _process(self, job: QueuedJob) -> None:
@@ -281,7 +414,13 @@ class LanePool:
         )
         # Attribute any provider tokens spent during this ingest to the episode.
         usage_token = set_usage_context(
-            UsageContext(request_kind="ingest", group_id=str(job.group_id), ref=str(job.source_id))
+            UsageContext(
+                request_kind="ingest",
+                group_id=str(job.group_id),
+                ref=str(job.source_id),
+                job_id=str(job.id),
+                claim_token=str(job.claim_token),
+            )
         )
         started = time.perf_counter()
         episode_budget = self._container.settings.resilience.per_episode_timeout_s
@@ -294,8 +433,11 @@ class LanePool:
                     write_mode = self._container.settings.memory.effective_fabric_write_mode
                     async with self._container.workers() as session, session.begin():
                         await session.execute(_GROUP_LOCK, {"g": str(job.group_id)})
-                        if await session.scalar(_JOB_IS_INFLIGHT, {"job_id": job.id}) is None:
-                            await session.execute(_MARK_DONE, {"id": job.id})
+                        job_params = {"job_id": job.id, "claim_token": job.claim_token}
+                        if await session.scalar(_JOB_IS_INFLIGHT, job_params) is None:
+                            await session.execute(
+                                _MARK_DONE, {"id": job.id, "claim_token": job.claim_token}
+                            )
                             log.info("ingest.skipped_retracted", source_id=str(job.source_id))
                             return
                         fabric_meta = cast("dict[str, Any]", job.payload.get("_fabric") or {})
@@ -313,14 +455,18 @@ class LanePool:
                             await self._reconcile_to_fabric(session, job)
                             if not needs_review and not reconcile_only and write_mode != "fabric":
                                 await self._enqueue_graph_ingest(session, job)
-                            await session.execute(_MARK_DONE, {"id": job.id})
+                            await session.execute(
+                                _MARK_DONE, {"id": job.id, "claim_token": job.claim_token}
+                            )
                     if write_mode == "legacy":
                         if not needs_review and not reconcile_only:
                             episode_uuid = await self._ingest_graph(job)
                             if episode_uuid is None:
                                 return
                         async with self._container.workers() as session, session.begin():
-                            await session.execute(_MARK_DONE, {"id": job.id})
+                            await session.execute(
+                                _MARK_DONE, {"id": job.id, "claim_token": job.claim_token}
+                            )
             record_ingestion(result="done", duration_s=time.perf_counter() - started)
             record_time_to_searchable((utc_now() - job.created_at).total_seconds())
             log.info("ingest.done", episode_uuid=episode_uuid)
@@ -346,7 +492,13 @@ class LanePool:
             **_correlation(job.trace_context),
         )
         usage_token = set_usage_context(
-            UsageContext(request_kind="ingest", group_id=str(job.group_id), ref=str(job.source_id))
+            UsageContext(
+                request_kind="ingest",
+                group_id=str(job.group_id),
+                ref=str(job.source_id),
+                job_id=str(job.id),
+                claim_token=str(job.claim_token),
+            )
         )
         started = time.perf_counter()
         try:
@@ -358,7 +510,9 @@ class LanePool:
                     if episode_uuid is None:
                         return
                     async with self._container.workers() as session, session.begin():
-                        await session.execute(_MARK_DONE, {"id": job.id})
+                        await session.execute(
+                            _MARK_DONE, {"id": job.id, "claim_token": job.claim_token}
+                        )
             record_ingestion(result="done", duration_s=time.perf_counter() - started)
             record_time_to_searchable((utc_now() - job.created_at).total_seconds())
             log.info("ingest_graph.done", episode_uuid=episode_uuid)
@@ -370,7 +524,13 @@ class LanePool:
         group = str(job.group_id)
         async with self._container.workers() as session, session.begin():
             await session.execute(_GROUP_LOCK, {"g": group})
-            if await session.scalar(_JOB_IS_INFLIGHT, {"job_id": job.id}) is None:
+            if (
+                await session.scalar(
+                    _JOB_IS_INFLIGHT,
+                    {"job_id": job.id, "claim_token": job.claim_token},
+                )
+                is None
+            ):
                 log.info("ingest_graph.skipped_retracted", source_id=str(job.source_id))
                 return None
             published_reference_time = await session.scalar(
@@ -613,7 +773,7 @@ class LanePool:
                 )
                 projected = await service.project_group(group)
                 log.info("project_facts.done", group_id=group, projected=projected)
-            await session.execute(_MARK_DONE, {"id": job.id})
+            await session.execute(_MARK_DONE, {"id": job.id, "claim_token": job.claim_token})
 
     async def _process_community_build(self, job: QueuedJob) -> None:
         from vera.entrypoints.build_communities import build_group
@@ -621,7 +781,7 @@ class LanePool:
         group = str(job.group_id)
         communities = await build_group(self._container, group)
         async with self._container.workers() as session, session.begin():
-            await session.execute(_MARK_DONE, {"id": job.id})
+            await session.execute(_MARK_DONE, {"id": job.id, "claim_token": job.claim_token})
         log.info("build_communities.done", group_id=group, communities=communities)
 
     async def _process_embed_facts(self, job: QueuedJob) -> None:
@@ -629,7 +789,7 @@ class LanePool:
         embedder = self._container.embedder
         if not self._container.settings.memory.vector_search_enabled or embedder is None:
             async with self._container.workers() as session, session.begin():
-                await session.execute(_MARK_DONE, {"id": job.id})
+                await session.execute(_MARK_DONE, {"id": job.id, "claim_token": job.claim_token})
             return
         memory = self._container.settings.memory
         model, dimension = active_embedding(self._container.settings)
@@ -643,7 +803,13 @@ class LanePool:
         async with self._container.workers() as session:
             rows = (await session.execute(_FACTS_TO_EMBED, params)).mappings().all()
         usage_token = set_usage_context(
-            UsageContext(request_kind="ingest", group_id=group, ref=str(job.source_id))
+            UsageContext(
+                request_kind="ingest",
+                group_id=group,
+                ref=str(job.source_id),
+                job_id=str(job.id),
+                claim_token=str(job.claim_token),
+            )
         )
         embedded = 0
         try:
@@ -683,7 +849,7 @@ class LanePool:
         finally:
             reset_usage_context(usage_token)
         async with self._container.workers() as session, session.begin():
-            await session.execute(_MARK_DONE, {"id": job.id})
+            await session.execute(_MARK_DONE, {"id": job.id, "claim_token": job.claim_token})
         log.info("embed_facts.done", group_id=group, embedded=embedded)
 
     async def _process_retract_cleanup(self, job: QueuedJob) -> None:
@@ -710,7 +876,9 @@ class LanePool:
                         if erase:
                             for key in s3_keys:
                                 await self._container.object_store.delete(key=key)
-                        await session.execute(_MARK_DONE, {"id": job.id})
+                        await session.execute(
+                            _MARK_DONE, {"id": job.id, "claim_token": job.claim_token}
+                        )
             log.info(
                 "retract.cleanup.done",
                 group_id=str(job.group_id),

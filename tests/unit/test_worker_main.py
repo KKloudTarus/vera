@@ -118,16 +118,22 @@ async def test_transient_poll_failure_does_not_stop_worker(monkeypatch: pytest.M
 @pytest.mark.asyncio
 async def test_shutdown_releases_jobs_blocked_by_lane_backpressure() -> None:
     released: list[UUID] = []
-    submit_started = asyncio.Event()
+    all_submits_started = asyncio.Event()
 
     class _Queue:
-        async def release(self, job_id: UUID, *, reason: str) -> None:
+        async def release(self, job_id: UUID, *, claim_token: UUID, reason: str) -> None:
             assert reason == "worker shutdown"
+            assert claim_token.int > 0
             released.append(job_id)
 
     class _Pool:
+        def __init__(self) -> None:
+            self.started = 0
+
         async def submit(self, _job: QueuedJob) -> None:
-            submit_started.set()
+            self.started += 1
+            if self.started == len(jobs):
+                all_submits_started.set()
             await asyncio.Future[None]()
 
     jobs = [
@@ -139,21 +145,24 @@ async def test_shutdown_releases_jobs_blocked_by_lane_backpressure() -> None:
             payload={},
             attempts=0,
             created_at=datetime.now(UTC),
+            claim_token=UUID(int=value + 20),
         )
         for value in (1, 2)
     ]
     stop = asyncio.Event()
+    pool = _Pool()
     submitting = asyncio.create_task(
         worker_main._submit_claimed_jobs(
             cast("Container", SimpleNamespace(queue=_Queue())),
-            cast("LanePool", _Pool()),
+            cast("LanePool", pool),
             jobs,
             stop,
         )
     )
 
-    await submit_started.wait()
+    await all_submits_started.wait()
     stop.set()
 
     assert await asyncio.wait_for(submitting, timeout=1.0) is False
+    assert pool.started == len(jobs)
     assert released == [job.id for job in jobs]

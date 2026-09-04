@@ -10,6 +10,7 @@ from typing import Any
 from uuid import UUID
 
 from sqlalchemy import (
+    Boolean,
     CheckConstraint,
     DateTime,
     Float,
@@ -113,11 +114,78 @@ class LlmUsageRow(Base, UUIDPK):
     prompt_tokens: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     completion_tokens: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     cost_usd: Mapped[float] = mapped_column(Float, nullable=False, server_default="0")
+    cost_complete: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
 
     __table_args__ = (
         CheckConstraint("operation IN ('llm','embedding')", name="ck_llm_usage_operation"),
+        CheckConstraint("prompt_tokens >= 0", name="ck_llm_usage_prompt_tokens_nonnegative"),
+        CheckConstraint(
+            "completion_tokens >= 0", name="ck_llm_usage_completion_tokens_nonnegative"
+        ),
+        CheckConstraint(
+            "cost_usd >= 0 AND cost_usd < 'Infinity'::double precision",
+            name="ck_llm_usage_cost_finite_nonnegative",
+        ),
         Index("ix_llm_usage_group_time", "group_id", "occurred_at"),
         Index("ix_llm_usage_ref", "ref"),
+    )
+
+
+class ProviderRunBudgetReservationRow(Base):
+    __tablename__ = "provider_run_budget_reservations"
+
+    run_key: Mapped[str] = mapped_column(String(256), primary_key=True)
+    max_cost_usd: Mapped[float] = mapped_column(Float, nullable=False)
+    reserved_cost_usd: Mapped[float] = mapped_column(Float, nullable=False, server_default="0")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "max_cost_usd > 0 AND max_cost_usd < 'Infinity'::double precision",
+            name="ck_provider_run_budget_maximum",
+        ),
+        CheckConstraint(
+            "reserved_cost_usd >= 0 AND reserved_cost_usd < 'Infinity'::double precision",
+            name="ck_provider_run_budget_reserved",
+        ),
+        CheckConstraint(
+            "reserved_cost_usd <= max_cost_usd",
+            name="ck_provider_run_budget_within_maximum",
+        ),
+    )
+
+
+class ProviderBudgetReservationRow(Base):
+    __tablename__ = "provider_budget_reservations"
+
+    action_key: Mapped[str] = mapped_column(String(512), primary_key=True)
+    run_key: Mapped[str] = mapped_column(
+        String(256),
+        ForeignKey("provider_run_budget_reservations.run_key", ondelete="CASCADE"),
+        nullable=False,
+    )
+    max_cost_usd: Mapped[float] = mapped_column(Float, nullable=False)
+    reserved_cost_usd: Mapped[float] = mapped_column(Float, nullable=False, server_default="0")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "max_cost_usd > 0 AND max_cost_usd < 'Infinity'::double precision",
+            name="ck_provider_budget_maximum",
+        ),
+        CheckConstraint(
+            "reserved_cost_usd >= 0 AND reserved_cost_usd < 'Infinity'::double precision",
+            name="ck_provider_budget_reserved",
+        ),
+        CheckConstraint(
+            "reserved_cost_usd <= max_cost_usd",
+            name="ck_provider_budget_within_maximum",
+        ),
+        Index("ix_provider_budget_run_key", "run_key"),
     )
 
 

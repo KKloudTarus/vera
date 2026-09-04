@@ -1,0 +1,191 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "vera.fullname" . }}-database-provision-{{ .Release.Revision }}
+  labels: {{- include "vera.labels" . | nindent 4 }}
+spec:
+  activeDeadlineSeconds: 600
+  backoffLimit: 3
+  ttlSecondsAfterFinished: 300
+  template:
+    metadata:
+      labels: {{- include "vera.labels" . | nindent 8 }}
+    spec:
+      restartPolicy: Never
+      initContainers: {{- include "vera.waitForPostgres" . | nindent 8 }}
+      containers:
+        - name: database-provision
+          image: {{ .Values.postgres.image }}
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |
+              attempt=0
+              until [ "$(psql --tuples-only --no-align --command \
+                "SELECT to_regrole('vera_app') IS NOT NULL
+                  AND to_regrole('vera_trusted') IS NOT NULL
+                  AND to_regrole('vera_worker') IS NOT NULL")" = "t" ]; do
+                attempt=$((attempt + 1))
+                if [ "$attempt" -ge 100 ]; then
+                  echo "database roles were not created before the provisioning deadline" >&2
+                  exit 1
+                fi
+                echo "waiting for database roles"; sleep 3;
+              done
+              psql \
+                --set ON_ERROR_STOP=1 \
+                --set runtime_password="$VERA_RUNTIME_PASSWORD" \
+                --set worker_password="$VERA_WORKER_PASSWORD" \
+                --set deployment_name="$VERA_DEPLOYMENT_NAME" \
+                --set release_revision="$VERA_RELEASE_REVISION" <<'SQL'
+              BEGIN;
+              SELECT format(
+                  'CREATE ROLE vera_runtime LOGIN NOINHERIT NOSUPERUSER NOCREATEDB '
+                  'NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD %L',
+                  :'runtime_password'
+              )
+              WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'vera_runtime') \gexec
+
+              DO $$
+              DECLARE role_oid oid := (SELECT oid FROM pg_roles WHERE rolname = 'vera_runtime');
+              BEGIN
+                  IF EXISTS (
+                      SELECT FROM pg_shdepend
+                      WHERE refclassid = 'pg_authid'::regclass AND refobjid = role_oid
+                        AND deptype = 'o'
+                  ) THEN
+                      RAISE EXCEPTION 'vera_runtime owns database objects';
+                  END IF;
+              END
+              $$;
+              ALTER ROLE vera_runtime
+                  LOGIN NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS
+                  PASSWORD :'runtime_password';
+              SELECT format('REVOKE ALL PRIVILEGES ON DATABASE %I FROM vera_runtime', current_database()) \gexec
+              REVOKE ALL ON SCHEMA public FROM vera_runtime;
+              REVOKE ALL ON ALL TABLES IN SCHEMA public FROM vera_runtime;
+              SELECT format('REVOKE ALL PRIVILEGES (%I) ON TABLE %I.%I FROM vera_runtime',
+                            attribute.attname, namespace.nspname, relation.relname)
+              FROM pg_attribute attribute
+              JOIN pg_class relation ON relation.oid = attribute.attrelid
+              JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+              WHERE namespace.nspname = 'public' AND attribute.attnum > 0
+                AND NOT attribute.attisdropped AND attribute.attacl IS NOT NULL \gexec
+              REVOKE ALL ON ALL SEQUENCES IN SCHEMA public FROM vera_runtime;
+              REVOKE ALL ON ALL FUNCTIONS IN SCHEMA public FROM vera_runtime;
+              SELECT format('GRANT CONNECT ON DATABASE %I TO vera_runtime', current_database()) \gexec
+              SELECT format('REVOKE %I FROM vera_runtime CASCADE', granted.rolname)
+              FROM pg_auth_members membership
+              JOIN pg_roles granted ON granted.oid = membership.roleid
+              JOIN pg_roles member ON member.oid = membership.member
+              WHERE member.rolname = 'vera_runtime' \gexec
+              SELECT format('REVOKE vera_runtime FROM %I CASCADE', member.rolname)
+              FROM pg_auth_members membership
+              JOIN pg_roles granted ON granted.oid = membership.roleid
+              JOIN pg_roles member ON member.oid = membership.member
+              WHERE granted.rolname = 'vera_runtime' \gexec
+
+              SELECT format(
+                  'CREATE ROLE vera_worker_runtime LOGIN NOINHERIT NOSUPERUSER NOCREATEDB '
+                  'NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD %L',
+                  :'worker_password'
+              )
+              WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'vera_worker_runtime') \gexec
+
+              DO $$
+              DECLARE role_oid oid := (SELECT oid FROM pg_roles WHERE rolname = 'vera_worker_runtime');
+              BEGIN
+                  IF EXISTS (
+                      SELECT FROM pg_shdepend
+                      WHERE refclassid = 'pg_authid'::regclass AND refobjid = role_oid
+                        AND deptype = 'o'
+                  ) THEN
+                      RAISE EXCEPTION 'vera_worker_runtime owns database objects';
+                  END IF;
+              END
+              $$;
+              ALTER ROLE vera_worker_runtime
+                  LOGIN NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS
+                  PASSWORD :'worker_password';
+              SELECT format('REVOKE ALL PRIVILEGES ON DATABASE %I FROM vera_worker_runtime', current_database()) \gexec
+              REVOKE ALL ON SCHEMA public FROM vera_worker_runtime;
+              REVOKE ALL ON ALL TABLES IN SCHEMA public FROM vera_worker_runtime;
+              SELECT format('REVOKE ALL PRIVILEGES (%I) ON TABLE %I.%I FROM vera_worker_runtime',
+                            attribute.attname, namespace.nspname, relation.relname)
+              FROM pg_attribute attribute
+              JOIN pg_class relation ON relation.oid = attribute.attrelid
+              JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+              WHERE namespace.nspname = 'public' AND attribute.attnum > 0
+                AND NOT attribute.attisdropped AND attribute.attacl IS NOT NULL \gexec
+              REVOKE ALL ON ALL SEQUENCES IN SCHEMA public FROM vera_worker_runtime;
+              REVOKE ALL ON ALL FUNCTIONS IN SCHEMA public FROM vera_worker_runtime;
+              SELECT format('GRANT CONNECT ON DATABASE %I TO vera_worker_runtime', current_database()) \gexec
+              SELECT format('REVOKE %I FROM vera_worker_runtime CASCADE', granted.rolname)
+              FROM pg_auth_members membership
+              JOIN pg_roles granted ON granted.oid = membership.roleid
+              JOIN pg_roles member ON member.oid = membership.member
+              WHERE member.rolname = 'vera_worker_runtime' \gexec
+              SELECT format('REVOKE vera_worker_runtime FROM %I CASCADE', member.rolname)
+              FROM pg_auth_members membership
+              JOIN pg_roles granted ON granted.oid = membership.roleid
+              JOIN pg_roles member ON member.oid = membership.member
+              WHERE granted.rolname = 'vera_worker_runtime' \gexec
+
+              SELECT format('REVOKE vera_app FROM %I CASCADE', member.rolname)
+              FROM pg_auth_members membership
+              JOIN pg_roles granted ON granted.oid = membership.roleid
+              JOIN pg_roles member ON member.oid = membership.member
+              WHERE granted.rolname = 'vera_app' \gexec
+              SELECT format('REVOKE vera_trusted FROM %I CASCADE', member.rolname)
+              FROM pg_auth_members membership
+              JOIN pg_roles granted ON granted.oid = membership.roleid
+              JOIN pg_roles member ON member.oid = membership.member
+              WHERE granted.rolname = 'vera_trusted' \gexec
+              SELECT format('REVOKE vera_worker FROM %I CASCADE', member.rolname)
+              FROM pg_auth_members membership
+              JOIN pg_roles granted ON granted.oid = membership.roleid
+              JOIN pg_roles member ON member.oid = membership.member
+              WHERE granted.rolname = 'vera_worker' \gexec
+              GRANT vera_app, vera_trusted TO vera_runtime;
+              GRANT vera_app, vera_trusted, vera_worker TO vera_worker_runtime;
+              DO $$
+              BEGIN
+                  IF EXISTS (SELECT FROM pg_roles WHERE rolname = 'vera_legacy') THEN
+                      GRANT vera_app TO vera_legacy;
+                  END IF;
+              END
+              $$;
+              ALTER ROLE vera_runtime SET vera.provisioned_release TO :'deployment_name';
+              ALTER ROLE vera_runtime SET vera.provisioned_revision TO :'release_revision';
+              ALTER ROLE vera_worker_runtime SET vera.provisioned_release TO :'deployment_name';
+              ALTER ROLE vera_worker_runtime SET vera.provisioned_revision TO :'release_revision';
+              COMMIT;
+              SQL
+          env:
+            - name: PGHOST
+              value: {{ include "vera.postgresHost" . | quote }}
+            - name: PGUSER
+              value: {{ .Values.postgres.user | quote }}
+            - name: PGDATABASE
+              value: {{ .Values.postgres.database | quote }}
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "vera.fullname" . }}-database-admin
+                  key: POSTGRES_PASSWORD
+            - name: VERA_RUNTIME_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "vera.fullname" . }}-database-admin
+                  key: VERA_RUNTIME_PASSWORD
+            - name: VERA_WORKER_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "vera.fullname" . }}-database-admin
+                  key: VERA_WORKER_PASSWORD
+            - name: VERA_DEPLOYMENT_NAME
+              value: {{ include "vera.fullname" . | quote }}
+            - name: VERA_RELEASE_REVISION
+              value: {{ .Release.Revision | quote }}
+          resources:
+            requests: { cpu: "50m", memory: "64Mi" }
+            limits: { cpu: "250m", memory: "256Mi" }

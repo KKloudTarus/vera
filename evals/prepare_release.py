@@ -14,6 +14,8 @@ from vera.build_metadata import BuildMetadataError, load_build_metadata
 
 _DEFAULT_BUILD_METADATA_PATH = Path("/workspace/build-metadata.json")
 _SAFE_SCOPE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
+_IMAGE_DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
+_PLACEHOLDER_IMAGE_DIGEST = "sha256:" + "0" * 64
 
 
 class ReleasePreparationError(ValueError):
@@ -26,6 +28,7 @@ def prepare_release_config(
     *,
     metadata_path: Path = _DEFAULT_BUILD_METADATA_PATH,
     scope_id: str | None = None,
+    app_image_digest: str | None = None,
 ) -> Path:
     metadata = load_build_metadata(metadata_path)
     if metadata.git_dirty:
@@ -34,6 +37,13 @@ def prepare_release_config(
     selected_scope = scope_id or os.environ.get("VERA_EVAL_SCOPE_ID")
     if selected_scope is None or _SAFE_SCOPE_ID.fullmatch(selected_scope) is None:
         raise ReleasePreparationError("VERA_EVAL_SCOPE_ID is missing or unsafe")
+    selected_digest = app_image_digest or os.environ.get("VERA_RELEASE_APP_IMAGE_DIGEST")
+    if (
+        selected_digest is None
+        or _IMAGE_DIGEST.fullmatch(selected_digest) is None
+        or selected_digest == _PLACEHOLDER_IMAGE_DIGEST
+    ):
+        raise ReleasePreparationError("VERA_RELEASE_APP_IMAGE_DIGEST is missing or invalid")
 
     try:
         raw = json.loads(template_path.read_text(encoding="utf-8"))
@@ -56,6 +66,7 @@ def prepare_release_config(
     config["git_sha"] = metadata.git_sha
     config["git_dirty"] = metadata.git_dirty
     config["service_version"] = __version__
+    config["app_image_digest"] = selected_digest
     cast(dict[str, Any], evaluation_scope)["id"] = selected_scope
     output_path.parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -73,6 +84,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("output", type=Path)
     parser.add_argument("--metadata", type=Path, default=_DEFAULT_BUILD_METADATA_PATH)
     parser.add_argument("--scope-id")
+    parser.add_argument("--app-image-digest")
     return parser
 
 
@@ -85,6 +97,7 @@ def main() -> int:
             args.output,
             metadata_path=args.metadata,
             scope_id=args.scope_id,
+            app_image_digest=args.app_image_digest,
         )
     except (BuildMetadataError, ReleasePreparationError) as exc:
         parser.error(str(exc))

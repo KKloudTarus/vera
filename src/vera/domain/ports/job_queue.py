@@ -27,6 +27,7 @@ class QueuedJob:
     payload: JsonDict
     attempts: int
     created_at: datetime
+    claim_token: UUID
     trace_context: JsonDict = field(default_factory=empty_json)
 
 
@@ -47,15 +48,27 @@ class JobQueue(Protocol):
         """Claim a batch of ready jobs (oldest-pending, skipping groups in flight)."""
         ...
 
-    async def complete(self, job_id: UUID) -> None:
+    async def complete(self, job_id: UUID, *, claim_token: UUID) -> None:
         """Mark a job done."""
         ...
 
-    async def fail(self, job_id: UUID, *, error: str, retry_in_s: float) -> None:
+    async def renew(self, job_id: UUID, *, claim_token: UUID) -> bool:
+        """Extend a live claim. Returns False after ownership is lost."""
+        ...
+
+    async def fail(self, job_id: UUID, *, claim_token: UUID, error: str, retry_in_s: float) -> None:
         """Reschedule a transient failure, or dead-letter once attempts are exhausted."""
         ...
 
-    async def release(self, job_id: UUID, *, reason: str) -> None:
+    async def dead_letter(self, job_id: UUID, *, claim_token: UUID, error: str) -> None:
+        """Terminally fail a job that cannot be retried safely."""
+        ...
+
+    async def fence_provider_attempt(self, job_id: UUID, *, claim_token: UUID) -> None:
+        """Prevent reclaim from repeating a job once a paid provider may be called."""
+        ...
+
+    async def release(self, job_id: UUID, *, claim_token: UUID, reason: str) -> None:
         """Return a claimed job to pending without consuming an attempt."""
         ...
 

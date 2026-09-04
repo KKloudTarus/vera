@@ -1,9 +1,10 @@
 {
   "profile": "release",
   "environment": "local-production-like",
-  "service_version": "0.2.1",
+  "service_version": "0.2.2",
   "git_sha": "0000000000000000000000000000000000000000",
   "git_dirty": false,
+  "app_image_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
   "graph_backend": "graphiti/neo4j",
   "hardware_profile": "docker-linux-containerized",
   "cache_state": "cold",
@@ -43,7 +44,8 @@
     },
     "cost_budget": {
       "max_duration_s": 14400,
-      "max_cost_usd": 10
+      "max_cost_usd": 10,
+      "max_action_cost_usd": 1
     },
     "inspection_artifacts": {
       "LEARN-004": "/workspace/evals/fixtures/weekly_drift.json"

@@ -26,7 +26,8 @@ def test_package_chart_and_default_image_versions_match() -> None:
     assert project["project"]["version"] == __version__
     assert chart["version"] == __version__
     assert chart["appVersion"] == __version__
-    assert values["image"]["tag"] == __version__
+    assert "tag" not in values["image"]
+    assert values["image"]["digest"].startswith("sha256:")
     for name in (
         "run.local.json",
         "run.nightly.local.json",

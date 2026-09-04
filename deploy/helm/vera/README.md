@@ -13,34 +13,36 @@ unauthenticated local MCP principal. Add an LLM key and turn on auth for real us
 - A Kubernetes cluster and `kubectl` context, with a default StorageClass (k3s ships
   `local-path`).
 - Helm 3+ (Helm 4 works too).
-- The VERA image reachable by the cluster. On a single-node cluster you can build it locally
-  and import it into the node's container runtime (see below); otherwise push it to a
-  registry and set `image.repository`/`image.tag`.
+- The VERA image reachable by the cluster through an immutable registry digest. Set
+  `image.repository` and `image.digest` to the release-gated image.
 
 ## 1. The image
 
-The image is published to GHCR by the release workflow as a public package, so the cluster
-pulls `ghcr.io/kkloudtarus/vera:0.2.1` with no registry secret. Nothing to do here for a normal
-cluster.
-
-For an air-gapped single-node k3s cluster, build it locally and import it into containerd,
-then point the chart at the local tag:
+The release workflow promotes the exact candidate digest evaluated by the release gate. Obtain
+that digest from the release workflow summary, then install with the immutable reference:
 
 ```bash
-docker build -t vera:0.2.1 .
-docker save vera:0.2.1 | sudo k3s ctr images import -
-# then add: --set image.repository=vera
+helm install vera deploy/helm/vera -n vera --create-namespace \
+  --set image.digest=sha256:<approved-64-character-digest>
 ```
 
 ## 2. Install
 
 ```bash
-helm install vera deploy/helm/vera -n vera --create-namespace
+helm install vera deploy/helm/vera -n vera --create-namespace \
+  --set image.digest=sha256:<approved-64-character-digest>
 kubectl -n vera get pods -w
 ```
 
-The datastores start first; the `vera-migrate` post-install hook waits for PostgreSQL and
-runs `alembic upgrade head`; then the API, MCP, and worker become ready.
+On install, Kubernetes runs migration and role-provisioning Jobs alongside the datastores;
+provisioning waits for migration to create the application roles. Application init containers
+then wait for the chart's exact Alembic revision and both fixed runtime logins. On upgrades, the
+pre-upgrade migration runs before resources change, then an ordinary revisioned Job provisions
+roles from the newly applied admin Secret alongside the waiting workloads. Provisioning creates
+missing login roles and reapplies grants,
+but it never changes an existing password. Runtime pods wait for provisioning and never receive
+the schema-owner credential. All setup Jobs have bounded retries and execution deadlines. This
+ordering supports Helm's `--wait` and `--wait-for-jobs` flags.
 
 ## 3. Verify
 
@@ -64,12 +66,20 @@ helm upgrade vera deploy/helm/vera -n vera \
 
 ## 5. Harden for a real deployment
 
+Set datastore owner credentials on the first install. They initialize persistent data and a
+later values change alone cannot rotate them.
+
 ```bash
-helm upgrade vera deploy/helm/vera -n vera \
+helm install vera deploy/helm/vera -n vera --create-namespace \
+  --set image.digest=sha256:<approved-64-character-digest> \
   --set environment=prod \
   --set api.authRequired=true \
   --set mcp.jwtSecret=<a-long-random-secret> \
-  --set postgres.password=<strong> --set minio.secretKey=<strong>
+  --set postgres.password=<strong> \
+  --set postgres.runtimePassword=<strong> \
+  --set postgres.workerPassword=<strong> \
+  --set minio.rootPassword=<strong> \
+  --set minio.secretKey=<strong>
 ```
 
 With `environment=prod` and a JWT secret, the MCP is an OAuth 2.1 resource server and no
@@ -80,13 +90,51 @@ login. For browser OAuth, also set `mcp.authAudience`, `mcp.oauthIssuer`, and
 refresh pass end to end. Manage secrets with your secret store rather than `--set` in
 production.
 
+With `secrets.create=false`, create five Secrets before installing the chart:
+
+- `<release>-secrets` for application credentials. For Neo4j it must contain matching
+  `VERA_NEO4J__PASSWORD` and `NEO4J_AUTH=neo4j/<password>` values. MCP and bootstrap keys in
+  this Secret are injected only into their respective processes.
+- `<release>-objectstore-admin` with `MINIO_ROOT_USER` and `MINIO_ROOT_PASSWORD`. Application
+  pods receive a separate bucket-scoped identity from `<release>-secrets`.
+- `<release>-database-runtime` with `VERA_DB__DSN` for `vera_runtime`.
+- `<release>-database-worker` with `VERA_DB__DSN` for `vera_worker_runtime`.
+- `<release>-database-admin` with `VERA_DB__DSN`, `POSTGRES_PASSWORD`,
+  `VERA_RUNTIME_PASSWORD`, and `VERA_WORKER_PASSWORD` for migration and provisioning only.
+
+All PostgreSQL, MinIO, and Neo4j credentials belong to persisted datastores. The provisioning
+hooks create missing runtime identities but intentionally do not mutate passwords during an
+upgrade. This keeps a failed or rolled-back upgrade from invalidating credentials still used by
+the previous workloads. Keep `minio.accessKey` stable for the lifetime of the datastore.
+
+Chart-generated datastore credentials are immutable after the first successful deployment of
+this chart; Helm rejects an upgrade that changes them. Use `secrets.create=false` before a
+production install when credential rotation is required.
+
+For the first upgrade from a chart version that used only `<release>-secrets`, preserve every
+installed datastore credential and pass `--set secrets.allowLegacyUpgrade=true`. That one-time
+upgrade creates the split Secrets. Remove the flag on later upgrades so a missing split Secret
+fails closed.
+
+For externally managed Secrets, rotate credentials in an explicit maintenance operation:
+
+1. Quiesce the affected application processes.
+2. Change the password through PostgreSQL, MinIO, or Neo4j's administrative interface.
+3. Update the corresponding external Kubernetes Secrets without changing `minio.accessKey`.
+4. Bump `secrets.externalRevision` and run the Helm upgrade to restart consumers.
+
+Because Helm does not own those Secret objects, a chart rollback does not revert their values.
+Migration and provisioning hooks authenticate with the current external admin credentials.
+
 ## Choosing the graph backend
 
 `graph.backend` defaults to `neo4j`. FalkorDB is lighter (a Redis-module graph) and its driver
 ships in the published image, so it is a one-flag switch:
 
 ```bash
-helm install vera deploy/helm/vera -n vera --create-namespace --set graph.backend=falkordb
+helm install vera deploy/helm/vera -n vera --create-namespace \
+  --set image.digest=sha256:<approved-64-character-digest> \
+  --set graph.backend=falkordb
 ```
 
 ## Sizing

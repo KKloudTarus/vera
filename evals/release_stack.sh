@@ -29,6 +29,7 @@ fi
 
 : "${COMPOSE_PROJECT_NAME:?set a unique COMPOSE_PROJECT_NAME for this release run}"
 : "${VERA_EVAL_SCOPE_ID:?set a unique VERA_EVAL_SCOPE_ID for this release run}"
+: "${VERA_RELEASE_APP_IMAGE:?set the candidate application image by immutable digest}"
 
 git_sha=$(git -C "$repo_root" rev-parse --verify HEAD)
 if [ "${#git_sha}" -ne 40 ]; then
@@ -42,7 +43,23 @@ case "$git_sha" in
         ;;
 esac
 
-app_image="${COMPOSE_PROJECT_NAME}-app:${git_sha}"
+app_image=$VERA_RELEASE_APP_IMAGE
+app_image_digest=${app_image##*@}
+app_image_digest_hex=${app_image_digest#sha256:}
+if [ "$app_image" = "$app_image_digest" ] || [ "$app_image_digest" = "$app_image_digest_hex" ] || [ "${#app_image_digest_hex}" -ne 64 ]; then
+    printf '%s\n' "VERA_RELEASE_APP_IMAGE must use repository@sha256:<64 lowercase hex>" >&2
+    exit 1
+fi
+case "$app_image_digest_hex" in
+    *[!0-9a-f]*)
+        printf '%s\n' "VERA_RELEASE_APP_IMAGE must use repository@sha256:<64 lowercase hex>" >&2
+        exit 1
+        ;;
+esac
+if [ "$app_image_digest_hex" = "0000000000000000000000000000000000000000000000000000000000000000" ]; then
+    printf '%s\n' "VERA_RELEASE_APP_IMAGE must not use the fail-closed placeholder digest" >&2
+    exit 1
+fi
 database_provision_image="${COMPOSE_PROJECT_NAME}-database-provision:${git_sha}"
 prometheus_image="${COMPOSE_PROJECT_NAME}-prometheus:${git_sha}"
 recovery_image="${COMPOSE_PROJECT_NAME}-recovery:${git_sha}"
@@ -50,6 +67,12 @@ evaluator_image="${COMPOSE_PROJECT_NAME}-evaluator:${git_sha}"
 
 command=$1
 shift
+case "$command" in
+    -*)
+        printf '%s\n' "release stack rejects Docker Compose global options" >&2
+        exit 2
+        ;;
+esac
 if [ "$command" = "build" ]; then
     if [ "$#" -ne 0 ]; then
         printf '%s\n' "usage: $0 build" >&2
@@ -58,10 +81,13 @@ if [ "$command" = "build" ]; then
     archive=$(mktemp "${TMPDIR:-/tmp}/vera-release.XXXXXX.tar")
     trap 'rm -f "$archive"' EXIT HUP INT TERM
     git -C "$repo_root" archive --format=tar --output="$archive" "$git_sha"
-    docker build \
-        --build-arg VERA_BUILD_GIT_SHA="$git_sha" \
-        --build-arg VERA_BUILD_GIT_DIRTY=false \
-        --file Dockerfile --tag "$app_image" - < "$archive"
+    docker pull "$app_image"
+    app_build=$(docker run --rm --entrypoint python "$app_image" -c \
+        'import json; value=json.load(open("/app/build-metadata.json")); print(f"{value.get('"'"'git_sha'"'"')}:{str(value.get('"'"'git_dirty'"'"')).lower()}")')
+    if [ "$app_build" != "$git_sha:false" ]; then
+        printf '%s\n' "candidate application image was not built from this clean commit" >&2
+        exit 1
+    fi
     docker build --file deploy/postgres/Dockerfile \
         --tag "$database_provision_image" - < "$archive"
     docker build --file deploy/observability/Dockerfile \
@@ -95,6 +121,7 @@ trap 'rm -rf "$context_root"' EXIT HUP INT TERM
 git -C "$repo_root" archive --format=tar "$git_sha" | tar -xf - -C "$context_root"
 
 export VERA_APP_IMAGE="$app_image"
+export VERA_RELEASE_APP_IMAGE_DIGEST="$app_image_digest"
 export VERA_DB_PROVISION_IMAGE="$database_provision_image"
 export VERA_PROMETHEUS_IMAGE="$prometheus_image"
 export VERA_RECOVERY_IMAGE="$recovery_image"
@@ -173,6 +200,8 @@ if [ "$command" = "up" ]; then
         '{' \
         '  "schema_version": "1.0",' \
         "  \"git_sha\": \"$git_sha\"," \
+        "  \"app_image_ref\": \"$app_image\"," \
+        "  \"app_image_digest\": \"$app_image_digest\"," \
         "  \"app_image_id\": \"$app_image_id\"," \
         "  \"database_provision_image_id\": \"$database_provision_image_id\"," \
         "  \"prometheus_image_id\": \"$prometheus_image_id\"," \

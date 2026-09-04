@@ -92,16 +92,25 @@ class SyncScheduler:
         lease_lost: asyncio.Event,
         sync_task: asyncio.Task[SyncOutcome],
     ) -> None:
+        renewal_interval_s = self._lease_duration_s / 3
         while True:
             try:
-                async with asyncio.timeout(self._lease_duration_s / 3):
+                async with asyncio.timeout(renewal_interval_s):
                     await stop.wait()
                 return
             except TimeoutError:
-                if not await self._renew_lease(source_id, owner_token):
-                    lease_lost.set()
-                    sync_task.cancel()
-                    return
+                pass
+            try:
+                async with asyncio.timeout(renewal_interval_s):
+                    renewed = await self._renew_lease(source_id, owner_token)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                renewed = False
+            if not renewed:
+                lease_lost.set()
+                sync_task.cancel()
+                return
 
     async def _sync_with_lease(
         self, registration: SyncRegistration, owner_token: UUID
@@ -147,6 +156,15 @@ class SyncScheduler:
             # A competing worker may have completed after the first due check but before
             # this claim. Its checkpoint is newer than due_at, so skip the stale attempt.
             if not await self._is_due(registration, due_at):
+                return None
+            # The due check may block past the lease deadline. Renewing also proves this
+            # worker still owns the source before synchronization can create side effects.
+            try:
+                async with asyncio.timeout(self._lease_duration_s / 3):
+                    renewed = await self._renew_lease(registration.source_id, owner_token)
+            except TimeoutError:
+                return None
+            if not renewed:
                 return None
             return await self._sync_with_lease(registration, owner_token)
         finally:

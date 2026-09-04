@@ -14,17 +14,19 @@ concurrency:
 
 jobs:
   image:
-    name: Build and push to GHCR
+    name: Promote evaluated image
     runs-on: ubuntu-24.04
+    environment: release-evidence
+    env:
+      VERA_TRUSTED_PANEL_RESULT_SHA256: ${{ secrets.VERA_TRUSTED_PANEL_RESULT_SHA256 }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      - uses: docker/setup-buildx-action@v3
-      - name: Log in to GHCR
-        uses: docker/login-action@v3
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          python-version: "3.11"
+          cache: pip
+      - name: Install verifier dependencies
+        run: python -m pip install --disable-pip-version-check --constraint constraints.lock jsonschema==4.26.0
       - name: Resolve and verify version
         id: version
         run: |
@@ -34,18 +36,42 @@ jobs:
             exit 1
           fi
           echo "value=${project_version}" >> "$GITHUB_OUTPUT"
-      - name: Build and push
-        uses: docker/build-push-action@v6
+      - name: Verify commit-bound release evidence
+        id: evidence
+        run: |
+          set -euo pipefail
+          evidence_ref="refs/tags/release-evidence-${GITHUB_SHA}"
+          git fetch --no-tags origin "$evidence_ref"
+          evidence_commit="$(git rev-parse 'FETCH_HEAD^{commit}')"
+          evidence_root="$RUNNER_TEMP/release-evidence"
+          mkdir -p "$evidence_root"
+          git archive "$evidence_commit" | tar -xf - -C "$evidence_root"
+          image_digest="$(python -m evals.verify_release_gate "$evidence_root" "$GITHUB_SHA")"
+          echo "commit=${evidence_commit}" >> "$GITHUB_OUTPUT"
+          echo "image_digest=${image_digest}" >> "$GITHUB_OUTPUT"
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
-          context: .
-          push: true
-          tags: |
-            ghcr.io/kkloudtarus/vera:${{ steps.version.outputs.value }}
-            ghcr.io/kkloudtarus/vera:latest
-          labels: |
-            org.opencontainers.image.source=https://github.com/KKloudTarus/vera
-            org.opencontainers.image.version=${{ steps.version.outputs.value }}
-            org.opencontainers.image.revision=${{ github.sha }}
-          build-args: |
-            VERA_BUILD_GIT_SHA=${{ github.sha }}
-            VERA_BUILD_GIT_DIRTY=false
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - name: Promote evaluated digest
+        run: |
+          set -euo pipefail
+          repository="ghcr.io/kkloudtarus/vera"
+          digest="${{ steps.evidence.outputs.image_digest }}"
+          docker buildx imagetools create \
+            --tag "${repository}:${{ steps.version.outputs.value }}" \
+            --tag "${repository}:latest" \
+            "${repository}@${digest}"
+          promoted="sha256:$(docker buildx imagetools inspect \
+            "${repository}:${{ steps.version.outputs.value }}" --raw | sha256sum | cut -d ' ' -f 1)"
+          if [ "$promoted" != "$digest" ]; then
+            echo "promoted image digest ${promoted} differs from evaluated digest ${digest}" >&2
+            exit 1
+          fi
+          {
+            echo "Promoted ${repository}@${digest}"
+            echo "Evidence commit: ${{ steps.evidence.outputs.commit }}"
+          } >> "$GITHUB_STEP_SUMMARY"

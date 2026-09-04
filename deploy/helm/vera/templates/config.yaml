@@ -1,3 +1,55 @@
+{{- if and .Release.IsUpgrade .Values.secrets.create }}
+{{- $name := include "vera.fullname" . }}
+{{- $applicationSecret := lookup "v1" "Secret" .Release.Namespace (printf "%s-secrets" $name) }}
+{{- $runtimeSecret := lookup "v1" "Secret" .Release.Namespace (printf "%s-database-runtime" $name) }}
+{{- if $runtimeSecret }}
+{{- if ne ((index $runtimeSecret.data "VERA_DB__DSN") | default "" | b64dec) (include "vera.runtimeDsn" .) }}
+{{- fail "chart-managed PostgreSQL runtime credentials are immutable after install; use externally managed Secrets for rotation" }}
+{{- end }}
+{{- $workerSecret := lookup "v1" "Secret" .Release.Namespace (printf "%s-database-worker" $name) }}
+{{- if not $workerSecret }}
+{{- fail "chart-managed PostgreSQL worker Secret is missing during upgrade" }}
+{{- else if ne ((index $workerSecret.data "VERA_DB__DSN") | default "" | b64dec) (include "vera.workerDsn" .) }}
+{{- fail "chart-managed PostgreSQL worker credentials are immutable after install; use externally managed Secrets for rotation" }}
+{{- end }}
+{{- $adminSecret := lookup "v1" "Secret" .Release.Namespace (printf "%s-database-admin" $name) }}
+{{- if not $adminSecret }}
+{{- fail "chart-managed PostgreSQL owner Secret is missing during upgrade" }}
+{{- else if or (ne ((index $adminSecret.data "POSTGRES_PASSWORD") | default "" | b64dec) (.Values.postgres.password | toString)) (ne ((index $adminSecret.data "VERA_DB__DSN") | default "" | b64dec) (include "vera.adminDsn" .)) }}
+{{- fail "chart-managed PostgreSQL owner credentials are immutable after install; use externally managed Secrets for rotation" }}
+{{- end }}
+{{- else if not .Values.secrets.allowLegacyUpgrade }}
+{{- fail "chart-managed PostgreSQL runtime Secret is missing during upgrade" }}
+{{- else if not (and $applicationSecret (index $applicationSecret.data "VERA_DB__DSN") (index $applicationSecret.data "POSTGRES_PASSWORD")) }}
+{{- fail "legacy chart-managed PostgreSQL credentials are missing during upgrade" }}
+{{- else if or (ne ((index $applicationSecret.data "POSTGRES_PASSWORD") | b64dec) (.Values.postgres.password | toString)) (ne ((index $applicationSecret.data "VERA_DB__DSN") | b64dec) (include "vera.adminDsn" .)) }}
+{{- fail "legacy chart-managed PostgreSQL owner credentials are immutable during upgrade; preserve the installed values" }}
+{{- end }}
+{{- $objectAdminSecret := lookup "v1" "Secret" .Release.Namespace (printf "%s-objectstore-admin" $name) }}
+{{- if $objectAdminSecret }}
+{{- if not $applicationSecret }}
+{{- fail "chart-managed application Secret is missing during upgrade" }}
+{{- else if or (ne ((index $applicationSecret.data "VERA_OBJECTSTORE__ACCESS_KEY") | default "" | b64dec) (.Values.minio.accessKey | toString)) (ne ((index $applicationSecret.data "VERA_OBJECTSTORE__SECRET_KEY") | default "" | b64dec) (.Values.minio.secretKey | toString)) }}
+{{- fail "chart-managed MinIO application credentials are immutable after install; use externally managed Secrets for rotation" }}
+{{- end }}
+{{- if or (ne ((index $objectAdminSecret.data "MINIO_ROOT_USER") | default "" | b64dec) (.Values.minio.rootUser | toString)) (ne ((index $objectAdminSecret.data "MINIO_ROOT_PASSWORD") | default "" | b64dec) (.Values.minio.rootPassword | toString)) }}
+{{- fail "chart-managed MinIO root credentials are immutable after install; use externally managed Secrets for rotation" }}
+{{- end }}
+{{- else if or $runtimeSecret (not .Values.secrets.allowLegacyUpgrade) }}
+{{- fail "chart-managed MinIO owner Secret is missing during upgrade" }}
+{{- else if not (and $applicationSecret (index $applicationSecret.data "MINIO_ROOT_USER") (index $applicationSecret.data "MINIO_ROOT_PASSWORD")) }}
+{{- fail "legacy chart-managed MinIO credentials are missing during upgrade" }}
+{{- else if or (ne ((index $applicationSecret.data "VERA_OBJECTSTORE__ACCESS_KEY") | default "" | b64dec) (.Values.minio.accessKey | toString)) (ne ((index $applicationSecret.data "VERA_OBJECTSTORE__SECRET_KEY") | default "" | b64dec) (.Values.minio.secretKey | toString)) (ne ((index $applicationSecret.data "MINIO_ROOT_USER") | default "" | b64dec) (.Values.minio.rootUser | toString)) (ne ((index $applicationSecret.data "MINIO_ROOT_PASSWORD") | default "" | b64dec) (.Values.minio.rootPassword | toString)) }}
+{{- fail "legacy chart-managed MinIO credentials are immutable during upgrade; preserve the installed values" }}
+{{- end }}
+{{- if not $applicationSecret }}
+{{- fail "chart-managed application Secret is missing during upgrade" }}
+{{- else if and (or $runtimeSecret (not .Values.secrets.allowLegacyUpgrade)) (or (not (index $applicationSecret.data "VERA_NEO4J__PASSWORD")) (not (index $applicationSecret.data "NEO4J_AUTH"))) }}
+{{- fail "chart-managed Neo4j credential keys are missing during upgrade" }}
+{{- else if and (index $applicationSecret.data "VERA_NEO4J__PASSWORD") (or (ne ((index $applicationSecret.data "VERA_NEO4J__PASSWORD") | b64dec) (.Values.graph.neo4j.password | toString)) (and (or $runtimeSecret (not .Values.secrets.allowLegacyUpgrade)) (ne ((index $applicationSecret.data "NEO4J_AUTH") | default "" | b64dec) (printf "neo4j/%s" .Values.graph.neo4j.password)))) }}
+{{- fail "chart-managed Neo4j credentials are immutable after install; use externally managed Secrets for rotation" }}
+{{- end }}
+{{- end }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -35,6 +87,7 @@ data:
   VERA_OBJECTSTORE__BUCKET: {{ .Values.minio.bucket | quote }}
   VERA_API__AUTH_REQUIRED: {{ .Values.api.authRequired | quote }}
   VERA_API__REGISTRATION_OPEN: {{ .Values.api.registrationOpen | quote }}
+  VERA_DB__ROLE_ENFORCEMENT: "true"
 {{- if .Values.bootstrap.enabled }}
   VERA_BOOTSTRAP__ENABLED: "true"
   VERA_BOOTSTRAP__ADMIN_EMAIL: {{ .Values.bootstrap.adminEmail | quote }}
@@ -71,17 +124,15 @@ metadata:
   labels: {{- include "vera.labels" . | nindent 4 }}
 type: Opaque
 stringData:
-  VERA_DB__DSN: {{ include "vera.dsn" . | quote }}
   VERA_OBJECTSTORE__ACCESS_KEY: {{ .Values.minio.accessKey | quote }}
   VERA_OBJECTSTORE__SECRET_KEY: {{ .Values.minio.secretKey | quote }}
-  POSTGRES_PASSWORD: {{ .Values.postgres.password | quote }}
-  MINIO_ROOT_USER: {{ .Values.minio.accessKey | quote }}
-  MINIO_ROOT_PASSWORD: {{ .Values.minio.secretKey | quote }}
-{{- if eq .Values.graph.backend "neo4j" }}
   VERA_NEO4J__PASSWORD: {{ .Values.graph.neo4j.password | quote }}
-{{- end }}
+  NEO4J_AUTH: {{ printf "neo4j/%s" .Values.graph.neo4j.password | quote }}
 {{- if .Values.memory.openaiApiKey }}
   VERA_MEMORY__OPENAI_API_KEY: {{ .Values.memory.openaiApiKey | quote }}
+{{- end }}
+{{- if .Values.voyage.apiKey }}
+  VERA_VOYAGE__API_KEY: {{ .Values.voyage.apiKey | quote }}
 {{- end }}
 {{- if .Values.mcp.jwtSecret }}
   VERA_MCP__JWT_SECRET: {{ .Values.mcp.jwtSecret | quote }}
@@ -89,4 +140,44 @@ stringData:
 {{- if .Values.bootstrap.adminApiKey }}
   VERA_BOOTSTRAP__ADMIN_API_KEY: {{ .Values.bootstrap.adminApiKey | quote }}
 {{- end }}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ include "vera.fullname" . }}-objectstore-admin
+  labels: {{- include "vera.labels" . | nindent 4 }}
+type: Opaque
+stringData:
+  MINIO_ROOT_USER: {{ .Values.minio.rootUser | quote }}
+  MINIO_ROOT_PASSWORD: {{ .Values.minio.rootPassword | quote }}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ include "vera.fullname" . }}-database-runtime
+  labels: {{- include "vera.labels" . | nindent 4 }}
+type: Opaque
+stringData:
+  VERA_DB__DSN: {{ include "vera.runtimeDsn" . | quote }}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ include "vera.fullname" . }}-database-worker
+  labels: {{- include "vera.labels" . | nindent 4 }}
+type: Opaque
+stringData:
+  VERA_DB__DSN: {{ include "vera.workerDsn" . | quote }}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ include "vera.fullname" . }}-database-admin
+  labels: {{- include "vera.labels" . | nindent 4 }}
+type: Opaque
+stringData:
+  VERA_DB__DSN: {{ include "vera.adminDsn" . | quote }}
+  POSTGRES_PASSWORD: {{ .Values.postgres.password | quote }}
+  VERA_RUNTIME_PASSWORD: {{ .Values.postgres.runtimePassword | quote }}
+  VERA_WORKER_PASSWORD: {{ .Values.postgres.workerPassword | quote }}
 {{- end }}

@@ -83,6 +83,8 @@ For a release run, set a unique Compose project and scope, then use the release 
 ```bash
 export COMPOSE_PROJECT_NAME=vera-release-<unique-id>
 export VERA_EVAL_SCOPE_ID=release-<unique-id>
+# Copy the immutable reference emitted by the Build release candidate workflow.
+export VERA_RELEASE_APP_IMAGE=ghcr.io/kkloudtarus/vera@sha256:<candidate-digest>
 # Optional; defaults to the checkout's ignored .env file.
 export VERA_RELEASE_ENV_FILE=/absolute/path/to/release.env
 ./evals/release_stack.sh build
@@ -93,15 +95,20 @@ export VERA_RELEASE_ENV_FILE=/absolute/path/to/release.env
   /output/release-configs/${VERA_EVAL_SCOPE_ID}.json
 ```
 
-`release_stack.sh` refuses a dirty Git worktree and builds every project image from a Git archive
-of the exact clean `HEAD`. Every application process uses the same tagged image. Later Compose
-commands also read their definitions from a fresh archive and cannot rebuild from the checkout.
+`release_stack.sh` refuses a dirty Git worktree, verifies that the candidate image was built from
+the exact clean `HEAD`, and runs every application process from that digest. It builds only the
+evaluation support images from a Git archive. Later Compose commands read their definitions from
+a fresh archive and cannot rebuild from the checkout.
 The wrapper passes the external runtime env file into the archived Compose project, force-recreates
 the complete stack, and records the verified image IDs for every release service.
 `prepare_release` reads the immutable evaluator image metadata, rejects dirty metadata, and writes
-a new run config with the matching revision and configured scope. Run `evals.runner` with the
-generated config path. Generated configs are local artifacts under `evals/runs/` and cannot
-overwrite an existing file.
+a new run config with the matching revision, application image digest, and configured scope. Run
+`evals.runner` with the generated config path. Generated configs are local artifacts under
+`evals/runs/` and cannot overwrite an existing file.
+
+The release env file must provide distinct `VERA_EVAL_DB_RUNTIME_PASSWORD`,
+`VERA_EVAL_DB_WORKER_PASSWORD`, and `VERA_EVAL_DB_LEGACY_PASSWORD` values. Provide the matching
+`*_URLENCODED` value when a password contains characters that must be escaped inside a DSN.
 
 ## Safety And Cleanup
 
@@ -109,7 +116,7 @@ Every mutating run requires:
 
 - A dedicated synthetic scope or run-owned ephemeral stack.
 - `production_writable=false`.
-- Positive duration and cost budgets.
+- Positive duration, total-cost, and per-action cost-reservation budgets.
 - Adapter support for `safety.preflight` and `cleanup.run_scope`.
 - A complete resource ledger for every created and removed object.
 
@@ -185,6 +192,20 @@ Panel scores cannot override security, cleanup, temporal, lineage, performance, 
 failures. `report.json` retains `PENDING_JUDGMENT` to preserve the execution artifact. The final
 quality decision is stored in `quality-gate.json`, which is SHA-256-bound to the report and every
 panel result.
+
+## Image Publication Gate
+
+Release image publication requires the complete finalized run directory in a separate evidence
+commit tagged `release-evidence-<source-git-sha>`. Keep the generated paths beneath
+`evals/runs/<run-id>/` in that commit. Protect `release-evidence-*` tags from updates and deletion.
+
+The `release-evidence` GitHub environment must require independent reviewers and expose a protected
+`VERA_TRUSTED_PANEL_RESULT_SHA256` secret containing the comma-separated approved panel-result
+digests. The image workflow fetches the evidence tag before registry login. It validates the full
+execution report, every transitive panel input, deterministic panel regeneration, the protected
+digest set, and the clean source commit targeted by the version tag. It then promotes the exact
+evaluated registry digest to the version and `latest` aliases without rebuilding it. The workflow
+summary records the evidence commit and promoted digest.
 
 ## Current Coverage
 

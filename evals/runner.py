@@ -28,6 +28,7 @@ try:
         AdapterProtocolError,
         SubprocessActionDriver,
         UnavailableActionDriver,
+        finish_finalizer,
     )
     from evals.assertions import assertion_passes
     from evals.validate import (
@@ -51,6 +52,7 @@ except ModuleNotFoundError:  # Direct execution: python evals/runner.py
         AdapterProtocolError,
         SubprocessActionDriver,
         UnavailableActionDriver,
+        finish_finalizer,
     )
     from assertions import assertion_passes  # type: ignore[no-redef]
     from validate import (  # type: ignore[no-redef]
@@ -70,6 +72,7 @@ except ModuleNotFoundError:  # Direct execution: python evals/runner.py
 _MISSING = object()
 _PATH_PART = re.compile(r"([^\[\]]+)(?:\[(\d+)\])?")
 _SAFE_RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+_IMAGE_DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 _PRIORITY_ORDER = {"P0": 0, "P1": 1, "P2": 2}
 _SEVERITY_ORDER = {"BLOCKER": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3}
 _SECRET_KEYS = frozenset(
@@ -205,6 +208,7 @@ class RunConfig:
     service_version: str
     git_sha: str
     git_dirty: bool
+    app_image_digest: str | None
     graph_backend: str
     hardware_profile: str
     cache_state: str
@@ -232,6 +236,7 @@ class RunConfig:
             "service_version",
             "git_sha",
             "git_dirty",
+            "app_image_digest",
             "graph_backend",
             "hardware_profile",
             "cache_state",
@@ -289,6 +294,14 @@ class RunConfig:
             raise ValueError("git_dirty must be a boolean")
         if len(str(value["git_sha"])) < 7:
             raise ValueError("git_sha must contain at least seven characters")
+        app_image_digest = value.get("app_image_digest")
+        if app_image_digest is not None and (
+            not isinstance(app_image_digest, str)
+            or _IMAGE_DIGEST.fullmatch(app_image_digest) is None
+        ):
+            raise ValueError("app_image_digest must be an immutable sha256 digest")
+        if profile == "release" and app_image_digest is None:
+            raise ValueError("release config must bind the evaluated application image digest")
         output_value = value.get("output_root", "runs")
         output_root = Path(str(output_value))
         if not output_root.is_absolute():
@@ -347,6 +360,7 @@ class RunConfig:
             service_version=str(value["service_version"]),
             git_sha=str(value["git_sha"]),
             git_dirty=value["git_dirty"],
+            app_image_digest=app_image_digest,
             graph_backend=str(value["graph_backend"]),
             hardware_profile=str(value["hardware_profile"]),
             cache_state=cache_state,
@@ -1553,9 +1567,115 @@ class EvaluationRunner:
         self._metric_counter = 0
         self._mutation_attempted = False
         self._judge_packets: list[dict[str, Any]] = []
+        self._budget_started = 0.0
+        self._duration_limit_s: float | None = None
+        self._run_deadline: float | None = None
+        self._cost_limit_usd: float | None = None
+        self._action_cost_limit_usd: float | None = None
+        self._cost_usd = 0.0
+        self._cost_complete = True
+        self._budget_reason: str | None = None
+
+    def _start_budget(self) -> None:
+        self._budget_started = time.monotonic()
+        budget = self._config.run_context.get("cost_budget")
+        if not isinstance(budget, dict):
+            return
+        duration = budget.get("max_duration_s")
+        cost = budget.get("max_cost_usd")
+        action_cost = budget.get("max_action_cost_usd")
+        if (
+            not isinstance(duration, bool)
+            and isinstance(duration, (int, float))
+            and math.isfinite(duration)
+            and duration > 0
+        ):
+            self._duration_limit_s = float(duration)
+            self._run_deadline = self._budget_started + self._duration_limit_s
+        if (
+            not isinstance(cost, bool)
+            and isinstance(cost, (int, float))
+            and math.isfinite(cost)
+            and cost > 0
+        ):
+            self._cost_limit_usd = float(cost)
+        if (
+            not isinstance(action_cost, bool)
+            and isinstance(action_cost, (int, float))
+            and math.isfinite(action_cost)
+            and action_cost > 0
+        ):
+            self._action_cost_limit_usd = float(action_cost)
+
+    def _cost_admission_reason(self, action_name: str) -> str | None:
+        if self._cost_limit_usd is None or self._action_cost_limit_usd is None:
+            return None
+        remaining = self._cost_limit_usd - self._cost_usd
+        if remaining + 1e-12 >= self._action_cost_limit_usd:
+            return None
+        self._budget_reason = (
+            f"insufficient cost budget to reserve {self._action_cost_limit_usd:.6f} USD "
+            f"for {action_name}: {max(0.0, remaining):.6f} USD remains"
+        )
+        return self._budget_reason
+
+    def _budgeted_run_context(self, context: dict[str, Any]) -> dict[str, Any]:
+        result = copy.deepcopy(context)
+        budget = result.get("cost_budget")
+        if not isinstance(budget, dict):
+            return result
+        if self._cost_limit_usd is not None:
+            budget["remaining_cost_usd"] = max(0.0, self._cost_limit_usd - self._cost_usd)
+        if self._action_cost_limit_usd is not None:
+            budget["reserved_action_cost_usd"] = self._action_cost_limit_usd
+        return result
+
+    def _bounded_timeout(self, requested_s: float) -> float:
+        if self._run_deadline is None:
+            return requested_s
+        remaining = self._run_deadline - time.monotonic()
+        if remaining <= 0:
+            self._budget_reason = "run duration budget was exhausted"
+            raise TimeoutError(self._budget_reason)
+        return min(requested_s, remaining)
+
+    def _duration_exhausted(self) -> bool:
+        return self._run_deadline is not None and time.monotonic() >= self._run_deadline
+
+    def _record_action_cost(
+        self, action_name: str, response: ActionResponse, *, required: bool
+    ) -> str | None:
+        if not required:
+            return None
+        cost = response.cost_usd
+        if cost is None:
+            self._cost_complete = False
+            if self._budget_reason is None:
+                self._budget_reason = f"{action_name} omitted complete provider cost reporting"
+            return self._budget_reason
+        if not math.isfinite(cost) or cost < 0:
+            self._cost_complete = False
+            if self._budget_reason is None:
+                self._budget_reason = f"{action_name} reported invalid provider cost"
+            return self._budget_reason
+        self._cost_usd += cost
+        if self._cost_limit_usd is not None and self._cost_usd > self._cost_limit_usd:
+            self._budget_reason = (
+                f"run cost budget exceeded: {self._cost_usd:.6f} USD used, "
+                f"{self._cost_limit_usd:.6f} USD allowed"
+            )
+            return self._budget_reason
+        if self._action_cost_limit_usd is not None and cost > self._action_cost_limit_usd:
+            self._budget_reason = (
+                f"{action_name} exceeded its reserved action cost: {cost:.6f} USD used, "
+                f"{self._action_cost_limit_usd:.6f} USD reserved"
+            )
+            return self._budget_reason
+        return None
 
     async def run(self) -> RunOutcome:
         started = datetime.now(UTC)
+        self._start_budget()
         run_id = self._config.run_id or (
             f"{started.strftime('%Y%m%dT%H%M%SZ')}-{self._config.git_sha[:8]}-"
             f"{self._config.profile}"
@@ -1599,14 +1719,17 @@ class EvaluationRunner:
         mutation_attempted = False
         self._mutation_attempted = False
         self._judge_packets = []
-        preflight = await self._preflight(run_id, selected_cases, evidence, manifest)
         cleanup: dict[str, Any]
         cleanup_evidence: list[str]
         try:
+            preflight = await self._preflight(run_id, selected_cases, evidence, manifest)
             stop_reason: str | None = None
             if preflight["status"] != "PASS":
                 stop_reason = preflight["reason"]
             for case in selected_cases:
+                if stop_reason is None and self._duration_exhausted():
+                    self._budget_reason = "run duration budget was exhausted"
+                    stop_reason = self._budget_reason
                 if stop_reason is not None:
                     case_results.append(
                         _blocked_case_result(
@@ -1627,6 +1750,8 @@ class EvaluationRunner:
                 metrics.extend(case_metrics)
                 created_resources.extend(case_resources)
                 mutation_attempted = mutation_attempted or case_mutated
+                if self._budget_reason is not None:
+                    stop_reason = self._budget_reason
                 assertions = {item["id"]: item for item in case["assertions"]}
                 blocker = next(
                     (
@@ -1652,11 +1777,7 @@ class EvaluationRunner:
                     mutation_attempted=mutation_attempted or self._mutation_attempted,
                 )
             )
-            try:
-                cleanup, cleanup_evidence = await asyncio.shield(cleanup_task)
-            except asyncio.CancelledError:
-                await cleanup_task
-                raise
+            cleanup, cleanup_evidence = await finish_finalizer(cleanup_task)
         redaction_issues = evidence.audit()
         redaction_evidence_id = evidence.write(
             "artifact-safety-scan",
@@ -1711,6 +1832,7 @@ class EvaluationRunner:
                 for result in check_results
             )
             or cleanup["status"] == "BLOCKED"
+            or self._budget_reason is not None
         )
         case_by_id = {case["case_id"]: case for case in selected_cases}
         result_by_id = {result["case_id"]: result for result in case_results}
@@ -1734,11 +1856,21 @@ class EvaluationRunner:
                     *(result.get("blocked_reason") for result in case_results),
                     *(result.get("blocked_reason") for result in check_results),
                     cleanup.get("notes") if cleanup["status"] == "BLOCKED" else None,
+                    self._budget_reason,
                 ]
                 if reason
             }
         )
         manifest["ended_at"] = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+        elapsed_s = time.monotonic() - self._budget_started
+        if (
+            self._duration_limit_s is not None
+            and elapsed_s > self._duration_limit_s
+            and self._budget_reason is None
+        ):
+            self._budget_reason = "run duration budget was exhausted"
+            status = "BLOCKED" if status == "PASS" else status
+            blocked_prerequisites = sorted({*blocked_prerequisites, self._budget_reason})
         report = {
             "schema_version": "1.1",
             "run_id": run_id,
@@ -1761,6 +1893,15 @@ class EvaluationRunner:
                 "reason": self._gate_reason(status, check_results, case_results, cleanup),
                 "check_status_counts": _status_counts(check_results),
                 "case_status_counts": _status_counts(case_results),
+            },
+            "budget": {
+                "status": "PASS" if self._budget_reason is None else "BLOCKED",
+                "max_duration_s": self._duration_limit_s,
+                "elapsed_s": round(elapsed_s, 6),
+                "max_cost_usd": self._cost_limit_usd,
+                "cost_usd": round(self._cost_usd, 9),
+                "cost_complete": self._cost_complete,
+                "reason": self._budget_reason,
             },
             "metrics": metrics,
             "check_results": check_results,
@@ -1829,10 +1970,25 @@ class EvaluationRunner:
         if not isinstance(budget, dict):
             static_failures.append("run_context.cost_budget is required")
         else:
-            for field_name in ("max_duration_s", "max_cost_usd"):
+            for field_name in ("max_duration_s", "max_cost_usd", "max_action_cost_usd"):
                 value = budget.get(field_name)
-                if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+                if (
+                    isinstance(value, bool)
+                    or not isinstance(value, (int, float))
+                    or not math.isfinite(value)
+                    or value <= 0
+                ):
                     static_failures.append(f"cost budget {field_name} must be positive")
+            maximum = budget.get("max_cost_usd")
+            per_action = budget.get("max_action_cost_usd")
+            if (
+                isinstance(maximum, (int, float))
+                and not isinstance(maximum, bool)
+                and isinstance(per_action, (int, float))
+                and not isinstance(per_action, bool)
+                and per_action > maximum
+            ):
+                static_failures.append("cost budget max_action_cost_usd exceeds max_cost_usd")
         unsupported = [
             action_name
             for action_name in ("safety.preflight", "cleanup.run_scope")
@@ -1856,7 +2012,7 @@ class EvaluationRunner:
             step_id="preflight",
             action="safety.preflight",
             isolation=str(scope["kind"]),
-            effect="read",
+            effect=self._actions["safety.preflight"]["effect"],
             inputs={
                 "evaluation_scope": scope,
                 "cost_budget": budget,
@@ -1864,20 +2020,44 @@ class EvaluationRunner:
                 "cleanup_action": "cleanup.run_scope",
             },
             observe=("safety",),
-            run_context={
-                **self._config.run_context,
-                "quality_config": copy.deepcopy(self._config.quality_config),
-                "manifest": manifest,
-            },
+            run_context=self._budgeted_run_context(
+                {
+                    **self._config.run_context,
+                    "quality_config": copy.deepcopy(self._config.quality_config),
+                    "manifest": manifest,
+                }
+            ),
         )
+        self._mutation_attempted = True
         try:
+            timeout_s = self._bounded_timeout(self._config.step_timeout_s)
             response = await asyncio.wait_for(
-                self._driver.execute(request), timeout=self._config.step_timeout_s
+                self._driver.execute(request),
+                timeout=timeout_s,
             )
         except Exception as exc:
+            message = (
+                "run duration budget was exhausted during safety preflight"
+                if self._duration_exhausted()
+                else f"safety preflight adapter failed: {type(exc).__name__}"
+            )
+            if self._duration_exhausted():
+                self._budget_reason = message
             response = ActionResponse(
                 status="BLOCKED",
-                message=f"safety preflight adapter failed: {type(exc).__name__}",
+                message=message,
+            )
+        cost_reason = self._record_action_cost("safety.preflight", response, required=True)
+        if cost_reason is not None:
+            response = ActionResponse(
+                status="BLOCKED",
+                observations=response.observations,
+                message=cost_reason,
+                metrics=response.metrics,
+                evidence=response.evidence,
+                created_resources=response.created_resources,
+                removed_resources=response.removed_resources,
+                cost_usd=response.cost_usd,
             )
         safety = response.observations.get("safety", {})
         attested = (
@@ -1958,6 +2138,8 @@ class EvaluationRunner:
             "evaluator": self._config.evaluator,
             "adapter": self._adapter_manifest(),
         }
+        if self._config.app_image_digest is not None:
+            manifest["app_image_digest"] = self._config.app_image_digest
         if self._config.baseline_path is not None:
             baseline = load_json(self._config.baseline_path)
             validator = Draft202012Validator(
@@ -2298,6 +2480,7 @@ class EvaluationRunner:
                 continue
             action_name = step["action"]
             action = self._actions[action_name]
+            cost_required = False
             step_labels = sorted(
                 {
                     label
@@ -2327,7 +2510,7 @@ class EvaluationRunner:
                         step["input"],
                         fixture=fixture,
                         observations=observations,
-                        run_context=run_context,
+                        run_context=self._budgeted_run_context(run_context),
                     )
                     request_inputs = _strip_gold_labels(resolved_inputs)
                     response = _execute_runner_action(
@@ -2351,13 +2534,18 @@ class EvaluationRunner:
                     blocked_reason = f"no configured adapter supports action {action_name}"
                     response = ActionResponse(status="BLOCKED", message=blocked_reason)
                 request_inputs = {}
+            elif (admission_reason := self._cost_admission_reason(action_name)) is not None:
+                blocked_reason = admission_reason
+                request_inputs = {}
+                response = ActionResponse(status="BLOCKED", message=admission_reason)
             else:
+                budget_limited_timeout = False
                 try:
                     resolved_inputs = _resolve_inputs(
                         step["input"],
                         fixture=fixture,
                         observations=observations,
-                        run_context=run_context,
+                        run_context=self._budgeted_run_context(run_context),
                     )
                     request_inputs = _strip_gold_labels(resolved_inputs)
                     request = ActionRequest(
@@ -2369,7 +2557,7 @@ class EvaluationRunner:
                         effect=action["effect"],
                         inputs=request_inputs,
                         observe=tuple(step["observe"]),
-                        run_context=run_context,
+                        run_context=self._budgeted_run_context(run_context),
                         evidence_labels=tuple(step_labels),
                     )
                     mutation_attempted = mutation_attempted or action["effect"] in _MUTATING_EFFECTS
@@ -2378,15 +2566,22 @@ class EvaluationRunner:
                     action_wait = request_inputs.get("timeout_s")
                     if not isinstance(action_wait, bool) and isinstance(action_wait, (int, float)):
                         timeout_s = max(timeout_s, float(action_wait) + 5.0)
+                    bounded_timeout_s = self._bounded_timeout(timeout_s)
+                    budget_limited_timeout = bounded_timeout_s < timeout_s
+                    cost_required = True
                     response = await asyncio.wait_for(
-                        self._driver.execute(request), timeout=timeout_s
+                        self._driver.execute(request), timeout=bounded_timeout_s
                     )
                 except InputResolutionError as exc:
                     blocked_reason = str(exc)
                     request_inputs = {}
                     response = ActionResponse(status="BLOCKED", message=blocked_reason)
                 except TimeoutError:
-                    blocked_reason = f"action {action_name} exceeded its runner timeout"
+                    if budget_limited_timeout or self._duration_exhausted():
+                        self._budget_reason = "run duration budget was exhausted"
+                        blocked_reason = self._budget_reason
+                    else:
+                        blocked_reason = f"action {action_name} exceeded its runner timeout"
                     response = ActionResponse(status="BLOCKED", message=blocked_reason)
                 except AdapterProtocolError as exc:
                     blocked_reason = f"adapter protocol error for {action_name}: {exc}"
@@ -2408,7 +2603,21 @@ class EvaluationRunner:
                         evidence=response.evidence,
                         created_resources=response.created_resources,
                         removed_resources=response.removed_resources,
+                        cost_usd=response.cost_usd,
                     )
+            cost_reason = self._record_action_cost(action_name, response, required=cost_required)
+            if cost_reason is not None:
+                blocked_reason = cost_reason
+                response = ActionResponse(
+                    status="BLOCKED",
+                    observations=response.observations,
+                    message=cost_reason,
+                    metrics=response.metrics,
+                    evidence=response.evidence,
+                    created_resources=response.created_resources,
+                    removed_resources=response.removed_resources,
+                    cost_usd=response.cost_usd,
+                )
             _deep_merge(observations, response.observations)
             if action_name == "result.score":
                 unsupported_count = _lookup(response.observations, "score.unsupported_claim_count")
@@ -2842,7 +3051,9 @@ class EvaluationRunner:
             effect=action["effect"],
             inputs={"run_id": run_id, "created_resource_ids": created},
             observe=(),
-            run_context={**self._config.run_context, "manifest": manifest},
+            run_context=self._budgeted_run_context(
+                {**self._config.run_context, "manifest": manifest}
+            ),
         )
         try:
             response = await asyncio.wait_for(
@@ -2852,6 +3063,7 @@ class EvaluationRunner:
             response = ActionResponse(
                 status="BLOCKED", message=f"cleanup adapter failed: {type(exc).__name__}"
             )
+        self._record_action_cost("cleanup.run_scope", response, required=True)
         inventory = response.observations.get("cleanup")
         required_inventory_fields = {
             "inventory_complete",
@@ -3012,6 +3224,16 @@ class EvaluationRunner:
                 else:
                     status = "PASS"
                 notes = f"derived from scenarios: {', '.join(item['case_id'] for item in mapped)}"
+            elif self._budget_reason is not None:
+                status = "BLOCKED"
+                blocked_reason = self._budget_reason
+                notes = blocked_reason
+                evidence_ids = []
+            elif (admission_reason := self._cost_admission_reason("__check__")) is not None:
+                status = "BLOCKED"
+                blocked_reason = admission_reason
+                notes = admission_reason
+                evidence_ids = []
             elif self._driver.supports("__check__"):
                 request = ActionRequest(
                     run_id=run_id,
@@ -3022,13 +3244,20 @@ class EvaluationRunner:
                     effect="read",
                     inputs={"check": check},
                     observe=(),
-                    run_context={**self._config.run_context, "manifest": manifest},
+                    run_context=self._budgeted_run_context(
+                        {**self._config.run_context, "manifest": manifest}
+                    ),
                     evidence_labels=tuple(check["evidence"]),
                 )
+                check_executed = False
                 try:
+                    timeout_s = self._bounded_timeout(self._config.step_timeout_s)
+                    check_executed = True
                     response = await asyncio.wait_for(
-                        self._driver.execute(request), timeout=self._config.step_timeout_s
+                        self._driver.execute(request),
+                        timeout=timeout_s,
                     )
+                    cost_reason = self._record_action_cost("__check__", response, required=True)
                     check_observation = response.observations.get("check")
                     if response.status == "PASS" and (
                         not isinstance(check_observation, dict)
@@ -3073,9 +3302,21 @@ class EvaluationRunner:
                                 labels=[label],
                             )
                         )
+                    if cost_reason is not None:
+                        status = "BLOCKED"
+                        blocked_reason = cost_reason
+                        notes = cost_reason
                 except Exception as exc:
+                    if check_executed:
+                        self._record_action_cost(
+                            "__check__", ActionResponse(status="BLOCKED"), required=True
+                        )
                     status = "BLOCKED"
-                    blocked_reason = f"check adapter failed: {type(exc).__name__}"
+                    blocked_reason = (
+                        self._budget_reason
+                        if isinstance(exc, TimeoutError) and self._budget_reason is not None
+                        else f"check adapter failed: {type(exc).__name__}"
+                    )
                     notes = blocked_reason
                     evidence_ids = []
             else:

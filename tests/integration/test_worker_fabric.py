@@ -426,19 +426,22 @@ async def test_fact_embedding_failure_cannot_roll_back_authoritative_ingestion(
             )
 
         embedding_job = await container.queue.claim(batch_size=10)
-        assert {queued.payload["job_kind"] for queued in embedding_job} == {
-            "embed_facts",
-            "ingest_graph",
-        }
-        for queued in embedding_job:
-            await pool.submit(queued)
+        assert len(embedding_job) == 1
+        assert embedding_job[0].payload["job_kind"] == "embed_facts"
+        await pool.submit(embedding_job[0])
         await pool.join()
 
         assert await _fact_state(container, group, "eks") == "active"
         flaky.fail = False
         retry = await container.queue.claim(batch_size=10)
         assert len(retry) == 1
+        assert retry[0].payload["job_kind"] == "embed_facts"
         await pool.submit(retry[0])
+        await pool.join()
+        graph_job = await container.queue.claim(batch_size=10)
+        assert len(graph_job) == 1
+        assert graph_job[0].payload["job_kind"] == "ingest_graph"
+        await pool.submit(graph_job[0])
         await pool.join()
     finally:
         await pool.stop()
@@ -486,13 +489,15 @@ async def test_graph_failure_happens_after_authoritative_commit(
         await pool.join()
         assert await _fact_state(container, group, "eks") == "active"
 
-        derived = await container.queue.claim(batch_size=10)
-        assert {queued.payload["job_kind"] for queued in derived} == {
-            "embed_facts",
-            "ingest_graph",
-        }
-        for queued in derived:
-            await pool.submit(queued)
+        embedding_job = await container.queue.claim(batch_size=10)
+        assert len(embedding_job) == 1
+        assert embedding_job[0].payload["job_kind"] == "embed_facts"
+        await pool.submit(embedding_job[0])
+        await pool.join()
+        graph_job = await container.queue.claim(batch_size=10)
+        assert len(graph_job) == 1
+        assert graph_job[0].payload["job_kind"] == "ingest_graph"
+        await pool.submit(graph_job[0])
         await pool.join()
     finally:
         await pool.stop()

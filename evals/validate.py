@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import sys
 from collections import Counter
@@ -123,7 +124,7 @@ def source_tree_sha256(root: Path | None = None) -> str:
         paths.update(
             path
             for path in directory.rglob("*")
-            if path.is_file() and not excluded_parts.intersection(path.parts)
+            if (path.is_file() or path.is_symlink()) and not excluded_parts.intersection(path.parts)
         )
     paths.update(
         path
@@ -139,14 +140,20 @@ def source_tree_sha256(root: Path | None = None) -> str:
             workspace / "pyproject.toml",
             workspace / "README.md",
         )
-        if path.is_file()
+        if path.is_file() or path.is_symlink()
     )
     digest = hashlib.sha256()
     for path in sorted(paths, key=lambda item: item.relative_to(workspace).as_posix()):
         relative = path.relative_to(workspace).as_posix().encode()
         digest.update(len(relative).to_bytes(8, "big"))
         digest.update(relative)
-        content = path.read_bytes()
+        if path.is_symlink():
+            mode = b"120000"
+            content = os.readlink(path).encode()
+        else:
+            mode = b"100755" if path.stat().st_mode & 0o111 else b"100644"
+            content = path.read_bytes()
+        digest.update(mode)
         digest.update(len(content).to_bytes(8, "big"))
         digest.update(content)
     return digest.hexdigest()
@@ -1333,7 +1340,51 @@ def validate_report(
 
     cleanup_failed = cleanup_status == "FAIL"
     cleanup_blocked = cleanup_status == "BLOCKED"
-    expected_gate = not (gating_fail or gating_blocked or cleanup_failed or cleanup_blocked)
+    budget_blocked = False
+    if report.get("schema_version") == "1.1" or "budget" in report:
+        budget = report.get("budget", {})
+        max_duration_s = budget.get("max_duration_s")
+        elapsed_s = budget.get("elapsed_s")
+        max_cost_usd = budget.get("max_cost_usd")
+        observed_cost_usd = budget.get("cost_usd")
+        duration_exceeded = (
+            isinstance(max_duration_s, (int, float))
+            and not isinstance(max_duration_s, bool)
+            and isinstance(elapsed_s, (int, float))
+            and not isinstance(elapsed_s, bool)
+            and elapsed_s > max_duration_s
+        )
+        cost_exceeded = (
+            isinstance(max_cost_usd, (int, float))
+            and not isinstance(max_cost_usd, bool)
+            and isinstance(observed_cost_usd, (int, float))
+            and not isinstance(observed_cost_usd, bool)
+            and observed_cost_usd > max_cost_usd
+        )
+        budget_reason = budget.get("reason")
+        budget_blocked = (
+            budget.get("cost_complete") is not True
+            or duration_exceeded
+            or cost_exceeded
+            or isinstance(budget_reason, str)
+        )
+        expected_budget_status = "BLOCKED" if budget_blocked else "PASS"
+        require(
+            budget.get("status") == expected_budget_status,
+            f"{path}: budget.status contradicts measured budget",
+            errors,
+        )
+        if budget_blocked:
+            require(
+                isinstance(budget_reason, str) and bool(budget_reason),
+                f"{path}: blocked budget lacks a reason",
+                errors,
+            )
+        else:
+            require(budget_reason is None, f"{path}: passing budget has a reason", errors)
+    expected_gate = not (
+        gating_fail or gating_blocked or cleanup_failed or cleanup_blocked or budget_blocked
+    )
     require(
         gate.get("passed") is expected_gate,
         f"{path}: gate.passed contradicts results",
@@ -1342,7 +1393,7 @@ def validate_report(
 
     if gating_fail or cleanup_failed:
         expected_run_status = "FAIL"
-    elif gating_blocked or cleanup_blocked:
+    elif gating_blocked or cleanup_blocked or budget_blocked:
         expected_run_status = "BLOCKED"
     else:
         expected_run_status = "PASS"

@@ -21,7 +21,7 @@
     "time_to_searchable_p95_ms": 960000,
     "queue_lag_p95_ms": 600000,
     "availability_percent": 99.0,
-    "rpo_seconds": 0,
+    "rpo_seconds": 300,
     "rto_seconds": 120,
     "retention_days": 30,
     "legal_hold_release_sla_seconds": 60
@@ -66,7 +66,7 @@
   },
   "backup_restore_matrix": {
     "stores": ["postgres", "object_store", "graph", "valkey"],
-    "restore_targets": ["empty_stack", "point_in_time"],
+    "restore_targets": ["empty_stack", "logical_snapshot"],
     "faults": ["authoritative_store_loss", "derived_store_loss", "partial_restore"]
   },
   "observability_matrix": {

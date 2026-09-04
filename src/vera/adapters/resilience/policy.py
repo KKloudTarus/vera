@@ -17,7 +17,7 @@ from typing import TypeVar
 
 from tenacity import (
     AsyncRetrying,
-    retry_if_exception_type,
+    retry_if_not_exception_type,
     stop_after_attempt,
     wait_random_exponential,
 )
@@ -25,6 +25,7 @@ from tenacity import (
 from vera.adapters.resilience.breaker import CircuitBreaker, CircuitOpenError
 from vera.config.settings import ResilienceSettings
 from vera.domain.ports.resilience import RateLimiter
+from vera.observability.cost import UsageAccountingError
 
 _T = TypeVar("_T")
 
@@ -65,7 +66,7 @@ class ResiliencePolicy:
             wait=wait_random_exponential(
                 multiplier=self._initial_backoff_s, max=self._max_backoff_s
             ),
-            retry=retry_if_exception_type(Exception),
+            retry=retry_if_not_exception_type((UsageAccountingError, TimeoutError)),
             reraise=True,
         )
         async for attempt in retrying:

@@ -20,7 +20,7 @@ spec:
         runAsNonRoot: true
       containers:
         - name: mcp
-          image: ghcr.io/kkloudtarus/vera:latest
+          image: ghcr.io/kkloudtarus/vera@sha256:0000000000000000000000000000000000000000000000000000000000000000
           command: ["python", "-m", "vera.entrypoints.mcp.main"]
           ports:
             - { containerPort: 8080, name: http }
@@ -28,6 +28,12 @@ spec:
           envFrom:
             - configMapRef: { name: vera-config }
             - secretRef: { name: vera-secrets }
+          env:
+            - name: VERA_MCP__JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: vera-mcp-secret
+                  key: VERA_MCP__JWT_SECRET
           resources:
             requests: { cpu: "250m", memory: "512Mi" }
             limits: { cpu: "1", memory: "1Gi" }

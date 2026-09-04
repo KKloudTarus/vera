@@ -39,6 +39,7 @@ from vera.domain.ports.memory_engine import (
 )
 from vera.domain.ports.projection import FactProjection
 from vera.observability import span
+from vera.observability.cost import UsageAccountingError
 from vera.shared.ids import deterministic_id
 from vera.shared.time import utc_now
 from vera.shared.types import GroupId
@@ -421,6 +422,8 @@ class GraphitiMemoryEngine:
             return None
         try:
             return await embedder.create(text)
+        except UsageAccountingError:
+            raise
         except Exception:  # the vector half is optional; degrade to fulltext-only on failure
             return None
 

@@ -1,3 +1,5 @@
+{{- $objectAdminSecret := lookup "v1" "Secret" .Release.Namespace (printf "%s-objectstore-admin" (include "vera.fullname" .)) -}}
+{{- $legacyUpgrade := and .Release.IsUpgrade .Values.secrets.create .Values.secrets.allowLegacyUpgrade (not $objectAdminSecret) -}}
 apiVersion: v1
 kind: Service
 metadata:
@@ -32,6 +34,9 @@ spec:
       labels:
         app.kubernetes.io/instance: {{ .Release.Name }}
         vera.component: minio
+      annotations:
+        checksum/admin-secret: {{ printf "%s:%s" .Values.minio.rootUser .Values.minio.rootPassword | sha256sum }}
+        checksum/external-secrets: {{ .Values.secrets.externalRevision | quote }}
     spec:
       containers:
         - name: minio
@@ -41,12 +46,12 @@ spec:
             - name: MINIO_ROOT_USER
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "vera.fullname" . }}-secrets
+                  name: {{ include "vera.fullname" . }}-objectstore-admin
                   key: MINIO_ROOT_USER
             - name: MINIO_ROOT_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "vera.fullname" . }}-secrets
+                  name: {{ include "vera.fullname" . }}-objectstore-admin
                   key: MINIO_ROOT_PASSWORD
           ports:
             - containerPort: 9000
@@ -76,10 +81,11 @@ metadata:
   name: {{ include "vera.fullname" . }}-minio-bucket
   labels: {{- include "vera.labels" . | nindent 4 }}
   annotations:
-    "helm.sh/hook": post-install,post-upgrade
-    "helm.sh/hook-weight": "5"
+    "helm.sh/hook": post-install,pre-upgrade
+    "helm.sh/hook-weight": "3"
     "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
 spec:
+  activeDeadlineSeconds: 600
   backoffLimit: 10
   template:
     metadata:
@@ -93,17 +99,65 @@ spec:
             - name: MC_USER
               valueFrom:
                 secretKeyRef:
+{{- if $legacyUpgrade }}
                   name: {{ include "vera.fullname" . }}-secrets
+{{- else }}
+                  name: {{ include "vera.fullname" . }}-objectstore-admin
+{{- end }}
                   key: MINIO_ROOT_USER
             - name: MC_PASS
               valueFrom:
                 secretKeyRef:
+{{- if $legacyUpgrade }}
                   name: {{ include "vera.fullname" . }}-secrets
+{{- else }}
+                  name: {{ include "vera.fullname" . }}-objectstore-admin
+{{- end }}
                   key: MINIO_ROOT_PASSWORD
+            - name: APP_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "vera.fullname" . }}-secrets
+                  key: VERA_OBJECTSTORE__ACCESS_KEY
+            - name: APP_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "vera.fullname" . }}-secrets
+                  key: VERA_OBJECTSTORE__SECRET_KEY
           command:
             - /bin/sh
             - -c
-            - >-
+            - |
+              set -eu
+              attempt=0
               until mc alias set local http://{{ include "vera.minioHost" . }}:9000
-              "$MC_USER" "$MC_PASS"; do echo "waiting for minio"; sleep 3; done;
-              mc mb --ignore-existing local/{{ .Values.minio.bucket }}
+              "$MC_USER" "$MC_PASS"; do
+                attempt=$((attempt + 1))
+                if [ "$attempt" -ge 100 ]; then
+                  echo "MinIO did not accept its administrative credentials before the deadline" >&2
+                  exit 1
+                fi
+                echo "waiting for minio"; sleep 3
+              done;
+              mc mb --ignore-existing local/{{ .Values.minio.bucket }};
+              cat > /tmp/vera-bucket-policy.json <<'POLICY'
+              {
+                "Version": "2012-10-17",
+                "Statement": [{
+                  "Effect": "Allow",
+                  "Action": [
+                    "s3:GetBucketLocation", "s3:ListBucket",
+                    "s3:GetObject", "s3:PutObject", "s3:DeleteObject"
+                  ],
+                  "Resource": [
+                    "arn:aws:s3:::{{ .Values.minio.bucket }}",
+                    "arn:aws:s3:::{{ .Values.minio.bucket }}/*"
+                  ]
+                }]
+              }
+              POLICY
+              mc admin policy create local vera-bucket /tmp/vera-bucket-policy.json;
+              if ! mc admin user info local "$APP_ACCESS_KEY" >/dev/null 2>&1; then
+                mc admin user add local "$APP_ACCESS_KEY" "$APP_SECRET_KEY";
+              fi
+              mc admin policy attach local vera-bucket --user "$APP_ACCESS_KEY"

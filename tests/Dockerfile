@@ -21,6 +21,7 @@ COPY pyproject.toml constraints.lock README.md LICENSE NOTICE ./
 COPY src ./src
 COPY tests ./tests
 COPY evals ./evals
+COPY .github/workflows ./.github/workflows
 COPY deploy ./deploy
 COPY docs ./docs
 COPY examples ./examples

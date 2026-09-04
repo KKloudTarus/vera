@@ -1,6 +1,5 @@
 # Keep the build context tiny and secrets out of the image.
 .git
-.github
 .claude
 .data
 .env

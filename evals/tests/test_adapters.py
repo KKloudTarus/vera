@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from evals import adapters
 from evals.adapters import (
     ActionRequest,
     ActionResponse,
@@ -42,6 +43,18 @@ def test_action_response_requires_one_evidence_label() -> None:
                 "status": "PASS",
                 "evidence": [{"kind": "file"}],
             }
+        )
+
+
+def test_action_response_validates_reported_cost() -> None:
+    response = ActionResponse.from_dict(
+        {"schema_version": "1.0", "status": "PASS", "cost_usd": 0.125}
+    )
+
+    assert response.cost_usd == 0.125
+    with pytest.raises(AdapterProtocolError, match="cost_usd"):
+        ActionResponse.from_dict(
+            {"schema_version": "1.0", "status": "PASS", "cost_usd": float("nan")}
         )
 
 
@@ -180,3 +193,31 @@ def test_subprocess_cancellation_terminates_descendants(tmp_path: Path) -> None:
     asyncio.run(cancel_after_start())
 
     assert not child_marker.exists()
+
+
+def test_repeated_cancellation_waits_for_finalizer() -> None:
+    started = asyncio.Event()
+    release = asyncio.Event()
+    finalized = False
+
+    async def finalizer() -> None:
+        nonlocal finalized
+        started.set()
+        await release.wait()
+        finalized = True
+
+    async def cancel_twice() -> None:
+        finalizer_task = asyncio.create_task(finalizer())
+        task = asyncio.create_task(adapters.finish_finalizer(finalizer_task))
+        await started.wait()
+        task.cancel()
+        await asyncio.sleep(0)
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(cancel_twice())
+    assert finalized is True

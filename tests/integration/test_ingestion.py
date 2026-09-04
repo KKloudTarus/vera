@@ -15,11 +15,19 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from vera.adapters.persistence.models.knowledge import PublishedEpisodeRow
+from vera.adapters.persistence.repositories.usage import SqlAlchemyUsageSink
+from vera.adapters.queue import postgres_queue as postgres_queue_module
+from vera.adapters.queue.postgres_queue import PostgresJobQueue
 from vera.bootstrap import Container
 from vera.domain.ports.memory_engine import EpisodeSpec, GraphHit, IngestReceipt
 from vera.entrypoints.reprocess import rebuild_group
 from vera.entrypoints.worker.lane_pool import LanePool
 from vera.entrypoints.worker.main import run_until_empty
+from vera.observability.cost import (
+    ProviderBudgetContext,
+    reset_provider_budget_context,
+    set_provider_budget_context,
+)
 from vera.shared.ids import deterministic_id, uuid7
 from vera.shared.types import GroupId, SourceId
 
@@ -166,6 +174,112 @@ async def test_claim_carries_trace_context(
     assert mine[0].attempts == 1
 
 
+async def test_enqueue_propagates_provider_budget_to_worker_trace(
+    make_container: Callable[[object], Container],
+) -> None:
+    container = make_container(RecordingMemoryEngine())
+    suffix = uuid7().hex[:12]
+    token = set_provider_budget_context(ProviderBudgetContext(f"budget:{suffix}"))
+    try:
+        await _enqueue(
+            container,
+            group=f"p:budget:{suffix}",
+            source=f"budget:{suffix}",
+        )
+    finally:
+        reset_provider_budget_context(token)
+
+    job = (await container.queue.claim(batch_size=1))[0]
+    assert job.trace_context["_provider_budget_key"] == f"budget:{suffix}"
+
+
+async def test_claim_returns_only_oldest_pending_job_per_group(
+    make_container: Callable[[object], Container],
+) -> None:
+    container = make_container(RecordingMemoryEngine())
+    suffix = uuid7().hex[:12]
+    group = f"p:ordered:{suffix}"
+    sources = [f"ordered:{suffix}:{index}" for index in range(3)]
+    for source in sources:
+        await _enqueue(container, group=group, source=source)
+    other_source = f"other:{suffix}"
+    await _enqueue(container, group=f"p:other:{suffix}", source=other_source)
+
+    claimed = await container.queue.claim(batch_size=10)
+
+    assert {str(job.source_id) for job in claimed} == {sources[0], other_source}
+    first = next(job for job in claimed if str(job.source_id) == sources[0])
+    await container.queue.complete(first.id, claim_token=first.claim_token)
+    next_claim = await container.queue.claim(batch_size=10)
+    assert [str(job.source_id) for job in next_claim] == [sources[1]]
+
+
+async def test_concurrent_claimer_cannot_skip_locked_group_head(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    make_container: Callable[[object], Container],
+) -> None:
+    container = make_container(RecordingMemoryEngine())
+    suffix = uuid7().hex[:12]
+    group = f"p:concurrent:{suffix}"
+    sources = [f"concurrent:{suffix}:{index}" for index in range(2)]
+    for source in sources:
+        await _enqueue(container, group=group, source=source)
+
+    async with sessionmaker() as first_session, first_session.begin():
+        first_rows = (
+            (
+                await first_session.execute(
+                    postgres_queue_module._CLAIM,  # pyright: ignore[reportPrivateUsage]
+                    {"batch": 1, "visibility": 300},
+                )
+            )
+            .mappings()
+            .all()
+        )
+        second_rows = await container.queue.claim(batch_size=10)
+        assert [str(row["source_id"]) for row in first_rows] == [sources[0]]
+        assert second_rows == []
+
+
+async def test_legacy_worker_claim_and_release_survive_expansion_migration(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    make_container: Callable[[object], Container],
+) -> None:
+    container = make_container(RecordingMemoryEngine())
+    suffix = uuid7().hex[:12]
+    source = f"legacy-rollout:{suffix}"
+    await _enqueue(container, group=f"p:{suffix}", source=source)
+    legacy_claim = text(
+        """
+        WITH ready AS (
+            SELECT id FROM ingestion_jobs
+            WHERE status='pending' AND next_visible_at <= now()
+            ORDER BY next_visible_at, created_at
+            FOR UPDATE SKIP LOCKED LIMIT 1
+        )
+        UPDATE ingestion_jobs job
+        SET status='inflight', attempts=job.attempts + 1,
+            locked_until=now() + interval '5 minutes'
+        FROM ready WHERE job.id=ready.id
+        RETURNING job.id, job.claim_token
+        """
+    )
+    async with sessionmaker() as session, session.begin():
+        claimed = (await session.execute(legacy_claim)).one()
+        assert claimed.claim_token is None
+        await session.execute(
+            text(
+                "UPDATE ingestion_jobs SET status='pending', locked_until=NULL, "
+                "next_visible_at=now() WHERE id=:id"
+            ),
+            {"id": claimed.id},
+        )
+
+    current = (await container.queue.claim(batch_size=1))[0]
+    assert current.id == claimed.id
+    assert current.claim_token is not None
+
+
 async def test_complete_records_completion_time(
     sessionmaker: async_sessionmaker[AsyncSession],
     make_container: Callable[[object], Container],
@@ -177,7 +291,7 @@ async def test_complete_records_completion_time(
     jobs = await container.queue.claim(batch_size=10)
     job = next(value for value in jobs if str(value.source_id) == source)
 
-    await container.queue.complete(job.id)
+    await container.queue.complete(job.id, claim_token=job.claim_token)
 
     async with sessionmaker() as session:
         row = (
@@ -201,7 +315,9 @@ async def test_fail_reschedules_then_dead_letters(
     jobs = await container.queue.claim(batch_size=10)
     job = next(j for j in jobs if str(j.source_id) == source)
 
-    await container.queue.fail(job.id, error="transient", retry_in_s=30)
+    await container.queue.fail(
+        job.id, claim_token=job.claim_token, error="transient", retry_in_s=30
+    )
     async with sessionmaker() as s:
         status = await s.scalar(
             text("SELECT status FROM ingestion_jobs WHERE id = :id"), {"id": job.id}
@@ -211,15 +327,86 @@ async def test_fail_reschedules_then_dead_letters(
     # Exhaust attempts, then a failure dead-letters the job.
     async with sessionmaker() as s, s.begin():
         await s.execute(
-            text("UPDATE ingestion_jobs SET attempts = max_attempts WHERE id = :id"),
+            text(
+                "UPDATE ingestion_jobs SET attempts = max_attempts - 1, "
+                "next_visible_at = now() WHERE id = :id"
+            ),
             {"id": job.id},
         )
-    await container.queue.fail(job.id, error="permanent", retry_in_s=1)
+    retried = next(
+        value for value in await container.queue.claim(batch_size=10) if value.id == job.id
+    )
+    await container.queue.fail(
+        retried.id,
+        claim_token=retried.claim_token,
+        error="permanent",
+        retry_in_s=1,
+    )
     async with sessionmaker() as s:
         status = await s.scalar(
             text("SELECT status FROM ingestion_jobs WHERE id = :id"), {"id": job.id}
         )
     assert status == "dead"
+
+
+async def test_provider_fence_makes_failure_and_reclaim_terminal(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    make_container: Callable[[object], Container],
+) -> None:
+    container = make_container(RecordingMemoryEngine())
+    suffix = uuid7().hex[:12]
+    await _enqueue(container, group=f"p:fence:{suffix}", source=f"fence:{suffix}:1")
+    first = (await container.queue.claim(batch_size=1))[0]
+    await container.queue.fence_provider_attempt(first.id, claim_token=first.claim_token)
+    await container.queue.fail(
+        first.id,
+        claim_token=first.claim_token,
+        error="ambiguous provider result",
+        retry_in_s=1,
+    )
+
+    await _enqueue(container, group=f"p:fence:{suffix}", source=f"fence:{suffix}:2")
+    second = (await container.queue.claim(batch_size=1))[0]
+    await container.queue.fence_provider_attempt(second.id, claim_token=second.claim_token)
+    async with sessionmaker() as session, session.begin():
+        await session.execute(
+            text("UPDATE ingestion_jobs SET locked_until=now() - interval '1 second' WHERE id=:id"),
+            {"id": second.id},
+        )
+    assert await container.queue.reclaim_stuck() >= 1
+
+    async with sessionmaker() as session:
+        rows = (
+            await session.execute(
+                text("SELECT id, status FROM ingestion_jobs WHERE id IN (:first, :second)"),
+                {"first": first.id, "second": second.id},
+            )
+        ).all()
+    assert {row.id: row.status for row in rows} == {first.id: "dead", second.id: "dead"}
+
+
+async def test_provider_fence_is_bound_to_one_claim_generation(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    make_container: Callable[[object], Container],
+) -> None:
+    container = make_container(RecordingMemoryEngine())
+    suffix = uuid7().hex[:12]
+    await _enqueue(container, group=f"p:lease:{suffix}", source=f"lease:{suffix}")
+    first = (await container.queue.claim(batch_size=1))[0]
+    async with sessionmaker() as session, session.begin():
+        await session.execute(
+            text("UPDATE ingestion_jobs SET locked_until=now() - interval '1 second' WHERE id=:id"),
+            {"id": first.id},
+        )
+    assert await container.queue.reclaim_stuck() >= 1
+    second = (await container.queue.claim(batch_size=1))[0]
+    assert second.id == first.id
+    assert second.claim_token != first.claim_token
+
+    sink = SqlAlchemyUsageSink(sessionmaker)
+    with pytest.raises(RuntimeError, match="no inflight ingestion job"):
+        await sink.fence_provider_attempt(str(first.id), str(first.claim_token))
+    await sink.fence_provider_attempt(str(second.id), str(second.claim_token))
 
 
 async def test_reclaim_stuck_returns_inflight_to_pending(
@@ -251,6 +438,43 @@ async def test_reclaim_stuck_returns_inflight_to_pending(
     assert status == "pending"
 
 
+async def test_active_job_renews_lease_before_reclamation(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    make_container: Callable[[object], Container],
+) -> None:
+    memory = RecordingMemoryEngine(delay_s=1.4)
+    container = _legacy_container(make_container, memory)
+    container = dataclasses.replace(
+        container,
+        queue=PostgresJobQueue(sessionmaker, visibility_timeout_s=1),
+    )
+    suffix = uuid7().hex[:12]
+    group = f"p:heartbeat:{suffix}"
+    source = f"heartbeat:{suffix}"
+    await _enqueue(container, group=group, source=source)
+    job = (await container.queue.claim(batch_size=1))[0]
+    pool = LanePool(
+        container,
+        lanes=1,
+        queue_maxsize=1,
+        lease_renew_interval_s=0.1,
+    )
+    pool.start()
+    try:
+        await pool.submit(job)
+        await asyncio.sleep(1.1)
+        assert await container.queue.reclaim_stuck() == 0
+        await asyncio.wait_for(pool.join(), timeout=3)
+    finally:
+        await pool.stop()
+
+    async with sessionmaker() as session:
+        status = await session.scalar(
+            text("SELECT status FROM ingestion_jobs WHERE id=:id"), {"id": job.id}
+        )
+    assert status == "done"
+
+
 async def test_release_returns_claim_without_consuming_attempt(
     sessionmaker: async_sessionmaker[AsyncSession],
     make_container: Callable[[object], Container],
@@ -262,7 +486,7 @@ async def test_release_returns_claim_without_consuming_attempt(
     jobs = await container.queue.claim(batch_size=10)
     job = next(value for value in jobs if str(value.source_id) == source)
 
-    await container.queue.release(job.id, reason="worker shutdown")
+    await container.queue.release(job.id, claim_token=job.claim_token, reason="worker shutdown")
 
     async with sessionmaker() as session:
         row = (

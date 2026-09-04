@@ -5,26 +5,31 @@ metadata:
   name: {{ include "vera.fullname" . }}-bootstrap
   labels: {{- include "vera.labels" . | nindent 4 }}
   annotations:
-    # Runs after the migrate hook (weight 1) so the schema exists. The seed is idempotent,
-    # so re-running on every upgrade is safe.
+    # Runtime-role provisioning completes before this hook. The seed is idempotent, so
+    # retrying at install and re-running on every upgrade are safe.
     "helm.sh/hook": post-install,post-upgrade
-    "helm.sh/hook-weight": "2"
+    "helm.sh/hook-weight": "4"
     "helm.sh/hook-delete-policy": before-hook-creation
 spec:
-  backoffLimit: 3
+  activeDeadlineSeconds: 600
+  backoffLimit: 10
   template:
     metadata:
       labels: {{- include "vera.labels" . | nindent 8 }}
     spec:
       restartPolicy: Never
       securityContext: {{- include "vera.podSecurityContext" . | nindent 8 }}
-      initContainers: {{- include "vera.waitForPostgres" . | nindent 8 }}
+      initContainers: {{- include "vera.waitForRuntimeDatabase" (dict "root" . "database" "runtime" "role" "vera_app") | nindent 8 }}
       containers:
         - name: bootstrap
           image: {{ include "vera.image" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           command: ["python", "-m", "vera.entrypoints.bootstrap_admin"]
           envFrom: {{- include "vera.envFrom" . | nindent 12 }}
+          env:
+{{- include "vera.applicationSecretEnv" . | nindent 12 }}
+{{- include "vera.bootstrapSecretEnv" . | nindent 12 }}
+{{- include "vera.runtimeDatabaseEnv" . | nindent 12 }}
           resources:
             requests: { cpu: "100m", memory: "256Mi" }
             limits: { cpu: "500m", memory: "512Mi" }

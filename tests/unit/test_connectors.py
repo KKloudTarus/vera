@@ -281,6 +281,127 @@ async def test_scheduler_isolates_a_failed_connector() -> None:
 
 
 @pytest.mark.asyncio
+async def test_scheduler_cancels_sync_when_lease_renewal_hangs() -> None:
+    source_id = uuid7()
+    sync_cancelled = asyncio.Event()
+
+    class _State:
+        async def last_synced_at(self, _source_id):
+            return None
+
+    class _Runner:
+        async def sync(self, **_kwargs):
+            try:
+                await asyncio.Event().wait()
+            finally:
+                sync_cancelled.set()
+
+    class _Sources:
+        def __init__(self) -> None:
+            self.renewals = 0
+
+        async def claim_sync_lease(self, **_kwargs):
+            return True
+
+        async def renew_sync_lease(self, **_kwargs):
+            self.renewals += 1
+            if self.renewals == 1:
+                return True
+            await asyncio.Event().wait()
+            return True
+
+        async def release_sync_lease(self, **_kwargs):
+            return True
+
+    class _Uow:
+        sources = _Sources()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def commit(self):
+            return None
+
+    scheduler = SyncScheduler(
+        runner=_Runner(),  # type: ignore[arg-type]
+        state=_State(),  # type: ignore[arg-type]
+        uow_factory=lambda: _Uow(),  # type: ignore[arg-type,return-value]
+        registrations=[
+            SyncRegistration(
+                source_id=source_id,
+                group_id="p:test",
+                connector=FilesystemConnector("."),
+                interval_s=0,
+            )
+        ],
+        lease_duration_s=0.03,
+    )
+
+    outcomes = await asyncio.wait_for(scheduler.run_due(), timeout=0.2)
+
+    assert outcomes == []
+    assert sync_cancelled.is_set()
+
+
+@pytest.mark.asyncio
+async def test_scheduler_revalidates_lease_after_the_post_claim_due_check() -> None:
+    source_id = uuid7()
+
+    class _State:
+        async def last_synced_at(self, _source_id):
+            return None
+
+    class _Runner:
+        async def sync(self, **_kwargs):
+            raise AssertionError("sync must not start after lease ownership is lost")
+
+    class _Sources:
+        renewals = 0
+
+        async def claim_sync_lease(self, **_kwargs):
+            return True
+
+        async def renew_sync_lease(self, **_kwargs):
+            self.renewals += 1
+            return False
+
+        async def release_sync_lease(self, **_kwargs):
+            return False
+
+    class _Uow:
+        sources = _Sources()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def commit(self):
+            return None
+
+    scheduler = SyncScheduler(
+        runner=_Runner(),  # type: ignore[arg-type]
+        state=_State(),  # type: ignore[arg-type]
+        uow_factory=lambda: _Uow(),  # type: ignore[arg-type,return-value]
+        registrations=[
+            SyncRegistration(
+                source_id=source_id,
+                group_id="p:test",
+                connector=FilesystemConnector("."),
+                interval_s=0,
+            )
+        ],
+    )
+
+    assert await scheduler.run_due() == []
+    assert _Uow.sources.renewals == 1
+
+
+@pytest.mark.asyncio
 async def test_sync_rejection_rolls_back_and_keeps_the_page_cursor_retryable() -> None:
     source_id = uuid7()
     uows: list[object] = []

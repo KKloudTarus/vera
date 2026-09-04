@@ -100,6 +100,8 @@ services:
     environment:
       PGPASSWORD: vera
       VERA_RUNTIME_PASSWORD: ${VERA_DB_RUNTIME_PASSWORD:-vera-runtime}
+      VERA_WORKER_PASSWORD: ${VERA_DB_WORKER_PASSWORD:-vera-worker}
+      VERA_SCALER_PASSWORD: ${VERA_DB_SCALER_PASSWORD:-}
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -125,7 +127,9 @@ services:
     env_file:
       - path: ${VERA_RUNTIME_ENV_FILE:-.env}
         required: false
-    environment: *app-env
+    environment:
+      <<: *app-env
+      VERA_DB__DSN: postgresql+asyncpg://vera_worker_runtime:${VERA_DB_WORKER_PASSWORD_URLENCODED:-${VERA_DB_WORKER_PASSWORD:-vera-worker}}@postgres:5432/vera
     depends_on:
       database-provision:
         condition: service_completed_successfully

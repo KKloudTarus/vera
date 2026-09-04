@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import contextlib
 import functools
+import os
 from collections.abc import AsyncGenerator
 from datetime import datetime
 from typing import Any, Literal
@@ -50,6 +51,7 @@ from vera.bootstrap import (
 )
 from vera.config.settings import Settings, get_settings
 from vera.domain.identity.models import PrincipalKind
+from vera.entrypoints.evaluation_budget import EvaluationBudgetMiddleware
 from vera.entrypoints.knowledge import InputError, KnowledgeService
 from vera.entrypoints.mcp import errors
 from vera.entrypoints.mcp.guard import Guard
@@ -706,6 +708,9 @@ def create_app() -> Any:
     )
     if settings.mcp.jwt_secret is not None or _uses_external_oauth(settings):
         _replace_protected_resource_metadata(app, settings)
+    evaluation_scope = os.environ.get("VERA_EVAL_SCOPE_ID")
+    if evaluation_scope and settings.environment != "prod":
+        return EvaluationBudgetMiddleware(app, scope_id=evaluation_scope)
     return app
 
 

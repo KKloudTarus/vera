@@ -329,6 +329,13 @@ def aggregate(
     }
     for failure in critical_failures:
         failure["confirmed"] = failure["rule_id"] in confirmed_rules
+    critical_failures.sort(
+        key=lambda item: (
+            item["actor_id"].casefold(),
+            item["rule_id"],
+            json.dumps(item, ensure_ascii=True, separators=(",", ":"), sort_keys=True),
+        )
+    )
     critical_failure_disputed = bool(failures_by_rule) and not bool(confirmed_rules)
     score_disputed = (
         max_score_spread is not None and max_score_spread > policy["max_panel_score_spread"]

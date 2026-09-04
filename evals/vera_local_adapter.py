@@ -17,6 +17,7 @@ import time
 from collections import Counter
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, redirect_stdout
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from functools import cache
@@ -44,6 +45,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
+from evals.adapters import finish_finalizer
 from evals.generate_load_fixture import (
     GENERATOR_VERSION,
     canonical_line,
@@ -53,11 +55,13 @@ from evals.generate_load_fixture import (
 from evals.generate_load_fixture import fact as load_fact
 from evals.validate import fixture_data, load_cases
 from vera import __version__
+from vera.adapters.persistence.base import create_sessionmaker
 from vera.adapters.persistence.repositories import (
     SqlAlchemyFactExpiryRepository,
     SqlAlchemyKnowledgeEventLog,
 )
 from vera.adapters.persistence.repositories.projection import SqlAlchemyProjectionSource
+from vera.adapters.persistence.repositories.retrieval import SqlAlchemyRetrievalReadModel
 from vera.adapters.persistence.unit_of_work import SqlAlchemyUnitOfWork
 from vera.application.connectors import SyncRunner
 from vera.application.curation.reconciliation import FactExpiryService
@@ -87,6 +91,18 @@ from vera.entrypoints.rollout_control import (
     normalize_control_environment,
 )
 from vera.observability import configure_tracing, span
+from vera.observability.cost import (
+    ProviderBudgetContext,
+    UsageSink,
+    current_provider_budget_context,
+    maximum_prompt_tokens,
+    model_price_known,
+    provider_budget_trace_context,
+    reserve_provider_call,
+    reset_provider_budget_context,
+    set_provider_budget_context,
+    settle_provider_call,
+)
 from vera.observability.metrics import start_metrics_server
 from vera.shared.errors import Ok
 from vera.shared.types import JsonDict
@@ -95,7 +111,14 @@ _STATE_ROOT = Path(
     os.environ.get("VERA_EVAL_STATE_ROOT", Path(tempfile.gettempdir()) / "vera-eval-state")
 )
 _CASES = {case["case_id"]: case for case in load_cases()}
-_SAFE_DATABASE_TABLES = frozenset({"alembic_version", "ontology_versions"})
+_SAFE_DATABASE_TABLES = frozenset(
+    {
+        "alembic_version",
+        "ontology_versions",
+        "provider_budget_reservations",
+        "provider_run_budget_reservations",
+    }
+)
 _DEFAULT_TIMEOUT_S = 60.0
 _EVALUATOR_BUILD_METADATA_PATH = Path("/workspace/build-metadata.json")
 _STACK_ATTESTATION_PATH = Path("/output/stack-attestation.json")
@@ -203,6 +226,30 @@ def _is_mcp_project_out_of_scope(exc: BaseException) -> bool:
     )
 
 
+def _mcp_denial_category(exc: BaseException) -> str | None:
+    category = _mcp_failure_category(exc)
+    if category in {"authentication", "quota"}:
+        return category
+    leaves = _causal_exception_leaves(exc)
+    denial_codes = {
+        "ambiguous_project",
+        "expired_context_pack",
+        "invalid_input",
+        "project_out_of_scope",
+        "unauthenticated",
+        "unauthorized",
+        "unsupported_version",
+    }
+    if leaves and all(
+        isinstance(value, MCPError)
+        and isinstance(value.error.data, dict)
+        and value.error.data.get("code") in denial_codes
+        for value in leaves
+    ):
+        return "policy"
+    return None
+
+
 def _closed_failure_summary(exc: BaseException) -> str:
     summary = _exception_type_summary(exc)
     category = _mcp_failure_category(exc)
@@ -261,6 +308,9 @@ class _Outcome:
     removed: list[str] = field(default_factory=list)
     message: str = ""
     boundaries: tuple[str, ...] = ("database",)
+    cost_usd: float | None = None
+    durable_cost_usd: float | None = None
+    durable_cost_complete: bool | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -276,6 +326,80 @@ class _ModelResult:
     latency_ms: float
     usage: dict[str, int]
     cost_usd: float | None
+
+
+@dataclass(slots=True)
+class _ActionCostMeter:
+    cost_usd: float = 0.0
+    complete: bool = True
+
+    def record(self, cost: float | None) -> None:
+        if cost is None or not math.isfinite(cost) or cost < 0:
+            self.complete = False
+            return
+        self.cost_usd += cost
+
+
+_ACTION_COST_METER: ContextVar[_ActionCostMeter | None] = ContextVar(
+    "vera_eval_action_cost_meter", default=None
+)
+
+
+def _record_direct_provider_cost(cost: float | None) -> None:
+    meter = _ACTION_COST_METER.get()
+    if meter is not None:
+        meter.record(cost)
+
+
+def _action_provider_budget(
+    request: dict[str, Any],
+) -> tuple[ProviderBudgetContext, float, str, float] | None:
+    run_context = request.get("run_context")
+    budget = run_context.get("cost_budget") if isinstance(run_context, dict) else None
+    if not isinstance(budget, dict):
+        return None
+    remaining = budget.get("remaining_cost_usd")
+    reserved = budget.get("reserved_action_cost_usd")
+    run_maximum = budget.get("max_cost_usd")
+    if any(
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(value)
+        or value < 0
+        for value in (remaining,)
+    ) or any(
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(value)
+        or value <= 0
+        for value in (reserved, run_maximum)
+    ):
+        raise AdapterBlocked("provider action budget is missing or invalid")
+    run_key = str(request.get("run_id", ""))
+    if not run_key or len(run_key) > 256:
+        raise AdapterBlocked("provider run budget key exceeds its durable limit")
+    action_key = ":".join(
+        str(request.get(name, "")) for name in ("run_id", "case_id", "step_id", "request_nonce")
+    )
+    if len(action_key) > 512:
+        raise AdapterBlocked("provider action budget key exceeds its durable limit")
+    action_maximum = min(float(remaining), float(reserved))
+    if action_maximum > float(run_maximum):
+        raise AdapterBlocked("provider action budget exceeds its run budget")
+    return ProviderBudgetContext(action_key), action_maximum, run_key, float(run_maximum)
+
+
+def _provider_budget_headers() -> dict[str, str]:
+    budget = current_provider_budget_context()
+    if budget is None:
+        return {}
+    scope_id = os.environ.get("VERA_EVAL_SCOPE_ID")
+    if not scope_id:
+        raise AdapterBlocked("provider action budget cannot cross process without its scope")
+    return {
+        "X-Vera-Eval-Scope": scope_id,
+        "X-Vera-Provider-Budget": budget.action_key,
+    }
 
 
 class _FixtureConnector:
@@ -641,15 +765,19 @@ async def _api_json(
     body: dict[str, Any] | None = None,
     expected: set[int],
 ) -> tuple[httpx.Response, dict[str, Any]]:
-    headers = {"Authorization": f"Bearer {api_key}"} if api_key else None
+    headers = _provider_budget_headers()
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
     async with _http_client(headers=headers) as client:
         try:
             response = await client.request(
                 method, f"{_required_url('VERA_EVAL_API_URL')}{path}", json=body
             )
         except httpx.TimeoutException as exc:
+            _record_direct_provider_cost(None)
             raise AdapterBlocked(f"API request to {path} reached its bounded timeout") from exc
         except httpx.HTTPError as exc:
+            _record_direct_provider_cost(None)
             raise AdapterBlocked(f"API transport for {path} is unavailable") from exc
     if response.status_code not in expected:
         raise AdapterFailed(f"API {path} returned HTTP {response.status_code}")
@@ -870,6 +998,7 @@ async def _wait_for_group_jobs(
         if latest.get("pending", 0) == 0 and latest.get("inflight", 0) == 0:
             return latest
         if time.monotonic() >= deadline:
+            _record_direct_provider_cost(None)
             raise AdapterBlocked(
                 f"worker queue did not settle within {timeout_s:g}s; state={latest}"
             )
@@ -916,6 +1045,7 @@ async def _wait_for_graph_failure(
                 "dead_job_count": sum(row["status"] == "dead" for row in rows),
             }
         if time.monotonic() >= deadline:
+            _record_direct_provider_cost(None)
             raise AdapterFailed("graph outage produced no observable projection failure")
         await asyncio.sleep(0.2)
 
@@ -1511,7 +1641,7 @@ async def _search_http(
     if known_as_of is not None:
         body["known_as_of"] = _format_time(known_as_of)
     url, host = _resolved_http_url(f"{_required_url('VERA_EVAL_API_URL')}/v2/knowledge/search")
-    headers = {"Authorization": f"Bearer {api_key}"}
+    headers = {"Authorization": f"Bearer {api_key}", **_provider_budget_headers()}
     if host is not None:
         headers["Host"] = host
     started = time.perf_counter()
@@ -1526,6 +1656,7 @@ async def _search_http(
         else:
             response = await send(client)
     except httpx.TimeoutException:
+        _record_direct_provider_cost(None)
         elapsed = round((time.perf_counter() - started) * 1000, 3)
         return 504, {
             "status": 504,
@@ -1538,6 +1669,7 @@ async def _search_http(
             "timeout_s": timeout_s,
         }
     except httpx.HTTPError:
+        _record_direct_provider_cost(None)
         elapsed = round((time.perf_counter() - started) * 1000, 3)
         return 503, {
             "status": 503,
@@ -1607,7 +1739,8 @@ def _mcp_headers(
     settings: Settings, principal_id: str, *, extra_scopes: tuple[str, ...] = ()
 ) -> dict[str, str]:
     headers = {
-        "Authorization": f"Bearer {_mcp_token(settings, principal_id, extra_scopes=extra_scopes)}"
+        "Authorization": f"Bearer {_mcp_token(settings, principal_id, extra_scopes=extra_scopes)}",
+        **_provider_budget_headers(),
     }
     host = os.environ.get("VERA_EVAL_MCP_HOST_HEADER")
     if host:
@@ -1661,6 +1794,8 @@ async def _call_mcp_tool(
         if _is_mcp_project_out_of_scope(exc):
             raise _McpProjectOutOfScope("MCP rejected an out-of-scope project") from None
         category = _mcp_failure_category(exc)
+        if category in {"timeout", "transport"}:
+            _record_direct_provider_cost(None)
         raise AdapterBlocked(f"MCP {name} {category} boundary is unavailable") from exc
     return _mcp_payload(result), round((time.perf_counter() - started) * 1000, 3)
 
@@ -1734,7 +1869,7 @@ def _model_response_payload(response: httpx.Response) -> dict[str, Any]:
             raise AdapterFailed("the configured model returned a non-object response")
         return cast(dict[str, Any], payload)
 
-    model_id: str | None = None
+    model_ids: set[str] = set()
     content: list[str] = []
     usage: dict[str, Any] | None = None
     cost: float | None = None
@@ -1754,15 +1889,20 @@ def _model_response_payload(response: httpx.Response) -> dict[str, Any]:
         event_count += 1
         event_model = event.get("model")
         if isinstance(event_model, str):
-            model_id = event_model
+            model_ids.add(event_model)
         event_usage = event.get("usage")
         if isinstance(event_usage, dict):
             usage = cast(dict[str, Any], event_usage)
         for source in (event_usage, event):
             if not isinstance(source, dict):
                 continue
-            value = source.get("cost_usd", source.get("cost"))
-            if isinstance(value, (int, float)) and not isinstance(value, bool):
+            value = source.get("cost_usd")
+            if (
+                isinstance(value, (int, float))
+                and not isinstance(value, bool)
+                and math.isfinite(value)
+                and value >= 0
+            ):
                 cost = float(value)
         choices = event.get("choices")
         if not isinstance(choices, list):
@@ -1776,8 +1916,11 @@ def _model_response_payload(response: httpx.Response) -> dict[str, Any]:
             message = choice.get("message")
             if isinstance(message, dict) and isinstance(message.get("content"), str):
                 content.append(str(message["content"]))
-    if event_count == 0 or model_id is None:
+    if event_count == 0 or not model_ids:
         raise AdapterFailed("the configured model SSE response omitted events or the model ID")
+    if len(model_ids) != 1:
+        raise AdapterFailed("the configured model SSE response reported inconsistent model IDs")
+    model_id = next(iter(model_ids))
     payload: dict[str, Any] = {
         "model": model_id,
         "choices": [{"message": {"content": "".join(content)}}],
@@ -1794,11 +1937,19 @@ async def _call_model(
     *,
     model: str,
     messages: list[dict[str, str]],
+    usage_sink: UsageSink | None = None,
 ) -> _ModelResult:
     secret = settings.memory.openai_api_key
     if secret is None or not secret.get_secret_value():
         raise AdapterBlocked("the configured OpenAI-compatible model has no API key")
     timeout_s = _timeout("VERA_EVAL_MODEL_TIMEOUT_S", settings.resilience.per_call_timeout_s)
+    max_tokens = 4096
+    reserved_cost_usd = await reserve_provider_call(
+        usage_sink,
+        model=model,
+        prompt_tokens=maximum_prompt_tokens(message["content"] for message in messages),
+        completion_tokens=max_tokens,
+    )
     started = time.perf_counter()
     async with _http_client(
         headers={
@@ -1814,21 +1965,58 @@ async def _call_model(
                     "model": model,
                     "messages": messages,
                     "response_format": {"type": "json_object"},
+                    "max_tokens": max_tokens,
                     "stream": False,
                     "temperature": 0,
                 },
             )
         except httpx.TimeoutException as exc:
+            _record_direct_provider_cost(None)
             raise AdapterBlocked("the configured model reached its bounded timeout") from exc
         except httpx.HTTPError as exc:
+            _record_direct_provider_cost(None)
             raise AdapterBlocked("the configured model transport is unavailable") from exc
     if not 200 <= response.status_code < 300:
+        _record_direct_provider_cost(None)
         raise AdapterBlocked(f"the configured model returned HTTP {response.status_code}")
-    raw = _model_response_payload(response)
-    choices = raw.get("choices")
+    try:
+        raw = _model_response_payload(response)
+    except AdapterFailed:
+        _record_direct_provider_cost(None)
+        raise
+    usage_value = raw.get("usage")
     actual_model = raw.get("model")
-    if not isinstance(choices, list) or not choices or not isinstance(actual_model, str):
-        raise AdapterFailed("the model response omitted choices or the actual model ID")
+    if not isinstance(actual_model, str):
+        _record_direct_provider_cost(None)
+        raise AdapterFailed("the model response omitted the actual model ID")
+    if actual_model != model:
+        _record_direct_provider_cost(None)
+        raise AdapterBlocked(
+            f"the provider substituted model {actual_model!r} for reserved model {model!r}"
+        )
+    cost: float | None = None
+    for source in (usage_value, raw):
+        if not isinstance(source, dict):
+            continue
+        value = source.get("cost_usd")
+        if (
+            isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            and math.isfinite(value)
+            and value >= 0
+        ):
+            cost = float(value)
+            break
+    _record_direct_provider_cost(cost)
+    if cost is not None:
+        await settle_provider_call(
+            usage_sink,
+            reserved_cost_usd=reserved_cost_usd,
+            actual_cost_usd=cost,
+        )
+    choices = raw.get("choices")
+    if not isinstance(choices, list) or not choices:
+        raise AdapterFailed("the model response omitted choices")
     first = choices[0]
     content = first.get("message", {}).get("content") if isinstance(first, dict) else None
     if not isinstance(content, str):
@@ -1839,21 +2027,12 @@ async def _call_model(
         raise AdapterFailed("the consuming agent model did not return its JSON contract") from exc
     if not isinstance(payload, dict):
         raise AdapterFailed("the consuming agent model returned a non-object contract")
-    usage_value = raw.get("usage")
     usage: dict[str, int] = {}
     if isinstance(usage_value, dict):
         for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
             value = usage_value.get(key)
             if isinstance(value, int) and not isinstance(value, bool):
                 usage[key] = value
-    cost: float | None = None
-    for source in (usage_value, raw):
-        if not isinstance(source, dict):
-            continue
-        value = source.get("cost_usd", source.get("cost"))
-        if isinstance(value, (int, float)) and not isinstance(value, bool):
-            cost = float(value)
-            break
     return _ModelResult(
         payload=cast(dict[str, Any], payload),
         model_id=actual_model,
@@ -1925,6 +2104,7 @@ class _ContextQuotaPacer:
 async def _agent_answer(
     settings: Settings,
     *,
+    usage_sink: UsageSink | None = None,
     principal: dict[str, Any],
     question: str,
     retrieval_limit: int = 10,
@@ -1988,6 +2168,7 @@ async def _agent_answer(
     plan = await _call_model(
         settings,
         model=settings.memory.llm_model,
+        usage_sink=usage_sink,
         messages=[
             {
                 "role": "system",
@@ -2038,6 +2219,7 @@ async def _agent_answer(
     model = await _call_model(
         settings,
         model=settings.memory.llm_model,
+        usage_sink=usage_sink,
         messages=[
             {"role": "system", "content": prompt},
             {"role": "user", "content": question},
@@ -2118,6 +2300,28 @@ def _question_positive_int(value: Any, key: str, default: int, maximum: int) -> 
     ):
         raise AdapterBlocked(f"agent.run {key} must be between 1 and {maximum}")
     return selected
+
+
+def _agent_reported_cost(observations: dict[str, Any]) -> float | None:
+    runs = observations.get("runs")
+    if isinstance(runs, list):
+        values = [item.get("cost_usd") for item in runs if isinstance(item, dict)]
+        if len(values) != len(runs) or not values:
+            return None
+    else:
+        agent = observations.get("agent")
+        if not isinstance(agent, dict):
+            return None
+        values = [agent.get("cost_usd")]
+    if any(
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(float(value))
+        or value < 0
+        for value in values
+    ):
+        return None
+    return sum(float(value) for value in values)
 
 
 def _question_instant(value: Any, key: str) -> str | None:
@@ -2201,8 +2405,11 @@ async def _agent(
         ) -> dict[str, Any]:
             run = await _agent_answer(
                 settings,
+                usage_sink=container.usage_sink,
                 principal=principal,
                 question=_question_text(question),
+                retrieval_limit=_question_positive_int(question, "retrieval_limit", 10, 50),
+                token_budget=_question_positive_int(question, "token_budget", 4000, 16000),
                 context_call_pacer=context_call_pacer,
                 as_of=_question_instant(question, "as_of"),
                 evaluation_time=_question_instant(question, "evaluation_time")
@@ -2285,6 +2492,7 @@ async def _agent(
     return {
         "agent": await _agent_answer(
             settings,
+            usage_sink=container.usage_sink,
             principal=principal,
             question=_question_text(question_value),
             retrieval_limit=_question_positive_int(question_value, "retrieval_limit", 10, 50),
@@ -2422,7 +2630,7 @@ async def _clear_valkey(settings: Settings) -> int:
 
 
 async def _mutable_database_tables(container: Container) -> list[str]:
-    async with container.sessionmaker() as session:
+    async with container.workers() as session:
         values = await session.scalars(
             text(
                 "SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace "
@@ -2435,7 +2643,7 @@ async def _mutable_database_tables(container: Container) -> list[str]:
 
 async def _database_counts(container: Container) -> dict[str, int]:
     counts: dict[str, int] = {}
-    async with container.sessionmaker() as session:
+    async with container.workers() as session:
         for table in await _mutable_database_tables(container):
             quoted = table.replace('"', '""')
             counts[table] = int(
@@ -2444,9 +2652,72 @@ async def _database_counts(container: Container) -> dict[str, int]:
     return counts
 
 
+async def _durable_provider_meter(container: Container) -> tuple[float, bool]:
+    async with container.workers() as session:
+        row = (
+            await session.execute(
+                text(
+                    "SELECT COALESCE(sum(cost_usd), 0), "
+                    "COALESCE(bool_and(cost_complete), true) FROM llm_usage"
+                )
+            )
+        ).one()
+    return float(row[0] or 0.0), bool(row[1])
+
+
+async def _wait_for_worker_quiescence(
+    container: Container, *, timeout_s: float = _DEFAULT_TIMEOUT_S
+) -> None:
+    deadline = time.monotonic() + timeout_s
+    quiet_polls = 0
+    while True:
+        async with container.workers() as session:
+            active = int(
+                await session.scalar(
+                    text(
+                        "SELECT count(*) FROM ingestion_jobs "
+                        "WHERE status IN ('pending', 'inflight')"
+                    )
+                )
+                or 0
+            )
+        quiet_polls = quiet_polls + 1 if active == 0 else 0
+        if quiet_polls >= 3:
+            return
+        if time.monotonic() >= deadline:
+            _record_direct_provider_cost(None)
+            raise AdapterBlocked("worker queue did not quiesce before cleanup")
+        await asyncio.sleep(0.2)
+
+
+async def _clear_database_with_provider_cost(
+    container: Container,
+) -> tuple[dict[str, int], float, bool]:
+    result = await _production_recovery_command("cleanup", uuid4().hex)
+    try:
+        payload = json.loads(result)
+        tables = payload["tables"]
+        cost = float(payload["cost_usd"])
+        complete = payload["cost_complete"]
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise AdapterBlocked("PostgreSQL cleanup harness returned invalid evidence") from exc
+    if (
+        not isinstance(tables, list)
+        or not tables
+        or not all(isinstance(table, str) and table for table in tables)
+        or not math.isfinite(cost)
+        or cost < 0
+        or not isinstance(complete, bool)
+    ):
+        raise AdapterBlocked("PostgreSQL cleanup harness returned invalid evidence")
+    counts = await _database_counts(container)
+    trailing_cost, trailing_complete = await _durable_provider_meter(container)
+    return counts, cost + trailing_cost, complete and trailing_complete
+
+
 async def _database_inventory(container: Container) -> list[str]:
     inventory: list[str] = []
-    async with container.sessionmaker() as session:
+    async with container.workers() as session:
         for table, prefix, column in (
             ("projects", "group", "group_id"),
             ("knowledge_sources", "source", "id"),
@@ -2459,13 +2730,8 @@ async def _database_inventory(container: Container) -> list[str]:
 
 
 async def _clear_database(container: Container) -> dict[str, int]:
-    tables = await _mutable_database_tables(container)
-    if not tables:
-        raise AdapterBlocked("no mutable PostgreSQL tables were discovered")
-    quoted = ", ".join(f'"{table.replace(chr(34), chr(34) * 2)}"' for table in tables)
-    async with container.sessionmaker() as session, session.begin():
-        await session.execute(text(f"TRUNCATE TABLE {quoted} RESTART IDENTITY CASCADE"))
-    return await _database_counts(container)
+    counts, _cost, _complete = await _clear_database_with_provider_cost(container)
+    return counts
 
 
 async def _api_readiness() -> dict[str, Any]:
@@ -2540,6 +2806,11 @@ def _stack_image_attestation(manifest: dict[str, Any]) -> dict[str, Any]:
     if (
         payload.get("schema_version") != "1.0"
         or payload.get("git_sha") != manifest.get("git_sha")
+        or payload.get("app_image_digest") != manifest.get("app_image_digest")
+        or not isinstance(payload.get("app_image_ref"), str)
+        or not cast(str, payload.get("app_image_ref")).endswith(
+            "@" + str(manifest.get("app_image_digest"))
+        )
         or not isinstance(services, list)
         or not all(isinstance(service, str) for service in services)
         or set(services) != required_services
@@ -2580,6 +2851,7 @@ async def _mcp_readiness(settings: Settings, principal_id: str) -> int:
             async with Client(transport, read_timeout_seconds=timeout_s) as client:
                 result = await client.list_tools()
     except Exception as exc:
+        _record_direct_provider_cost(None)
         raise AdapterBlocked("VERA MCP readiness is unavailable") from exc
     names = {str(tool.name) for tool in result.tools}
     required = {"knowledge_search", "knowledge_get_context"}
@@ -2649,6 +2921,13 @@ def _runtime_manifest_errors(
     if settings.memory.effective_fabric_write_mode not in {"dual", "fabric"}:
         errors.append("evaluation runtime must write the authoritative Fabric")
     if profile == "release":
+        app_image_digest = manifest.get("app_image_digest")
+        if (
+            not isinstance(app_image_digest, str)
+            or re.fullmatch(r"sha256:[0-9a-f]{64}", app_image_digest) is None
+            or app_image_digest == "sha256:" + "0" * 64
+        ):
+            errors.append("release manifest must bind an immutable application image digest")
         try:
             evaluator_build = load_build_metadata(_EVALUATOR_BUILD_METADATA_PATH)
         except BuildMetadataError:
@@ -2656,6 +2935,40 @@ def _runtime_manifest_errors(
         else:
             errors.extend(_build_metadata_errors(manifest, evaluator_build, "evaluator image"))
     return errors, actual_models
+
+
+def _cost_metering_errors(settings: Settings, active_models: dict[str, str | None]) -> list[str]:
+    if not settings.observability.cost_tracking_enabled:
+        return ["durable provider cost tracking is disabled"]
+    errors: list[str] = []
+    if settings.memory.embedder == "openai":
+        errors.append("the OpenAI embedder does not expose exact provider token usage")
+    if (
+        settings.memory.embedder == "voyage"
+        or (
+            settings.rerank.cross_encoder_enabled
+            and settings.rerank.cross_encoder_provider == "voyage"
+        )
+    ) and settings.voyage.base_url.rstrip("/") != "https://api.voyageai.com/v1":
+        errors.append("custom Voyage endpoints do not have an authoritative local tariff")
+    priced_roles = {
+        "candidate",
+        "extractor",
+        "contradiction_judge",
+        "entity_judge",
+        "embedding",
+        "reranker",
+    }
+    unpriced = sorted(
+        {
+            model
+            for role, model in active_models.items()
+            if role in priced_roles and model is not None and not model_price_known(model)
+        }
+    )
+    if unpriced:
+        errors.append("active provider models have no configured price: " + ", ".join(unpriced))
+    return errors
 
 
 async def _provider_preflight(container: Container) -> dict[str, str]:
@@ -2682,6 +2995,7 @@ async def _provider_preflight(container: Container) -> dict[str, str]:
         result = await _call_model(
             settings,
             model=model,
+            usage_sink=container.usage_sink,
             messages=[
                 {
                     "role": "user",
@@ -2694,6 +3008,10 @@ async def _provider_preflight(container: Container) -> dict[str, str]:
         )
         if result.payload.get("ok") is not True:
             raise AdapterBlocked(f"provider preflight failed for configured model {model!r}")
+        if result.cost_usd is None:
+            raise AdapterBlocked(
+                f"configured model {model!r} did not report complete exact provider cost"
+            )
         resolved[model] = result.model_id
     vector = await container.embedder.embed("VERA evaluation provider preflight")
     if len(vector) != active_embedding(settings)[1]:
@@ -2818,6 +3136,11 @@ async def _preflight(
     if state.get("preflight") is not None or state.get("cases"):
         raise AdapterBlocked("evaluation state is not pristine before preflight")
     manifest_errors, actual_models = _runtime_manifest_errors(container, request)
+    manifest_errors.extend(_cost_metering_errors(container.settings, actual_models))
+    if not os.environ.get("VERA_EVAL_ROLLOUT_CONTROLLER_URL") or not os.environ.get(
+        "VERA_EVAL_ROLLOUT_CONTROLLER_TOKEN"
+    ):
+        manifest_errors.append("request-producer restart control is unavailable")
     if manifest_errors:
         raise AdapterBlocked("; ".join(manifest_errors))
     database = await _database_counts(container)
@@ -2850,17 +3173,29 @@ async def _preflight(
             raise AdapterBlocked("; ".join(build_errors))
         stack_attestation = _stack_image_attestation(manifest)
     agent_runtime = _agent_runtime_config(container.settings, request)
-    mcp_principal_id = await _register_mcp_readiness_principal()
-    state["preflight"] = {
-        "run_id": request["run_id"],
-        "scope_id": configured_scope,
-        "settings_fingerprint": _settings_fingerprint(container.settings, agent_runtime),
-        "disposable_full_store": True,
-        "mcp_principal_id": mcp_principal_id,
-    }
-    _save_state(str(request["run_id"]), state)
-    tool_count = await _mcp_readiness(container.settings, mcp_principal_id)
-    provider_models = await _provider_preflight(container)
+    try:
+        provider_models = await _provider_preflight(container)
+        mcp_principal_id = await _register_mcp_readiness_principal()
+        state["preflight"] = {
+            "run_id": request["run_id"],
+            "scope_id": configured_scope,
+            "settings_fingerprint": _settings_fingerprint(container.settings, agent_runtime),
+            "disposable_full_store": True,
+            "mcp_principal_id": mcp_principal_id,
+        }
+        _save_state(str(request["run_id"]), state)
+        tool_count = await _mcp_readiness(container.settings, mcp_principal_id)
+    except BaseException:
+        try:
+            durable_cost, durable_complete = await _durable_provider_meter(container)
+            _record_direct_provider_cost(durable_cost if durable_complete else None)
+        except Exception:
+            _record_direct_provider_cost(None)
+        await _clear_database(container)
+        await _clear_valkey(container.settings)
+        state.pop("preflight", None)
+        _save_state(str(request["run_id"]), state)
+        raise
     return {
         "schema_version": "1.0",
         "request_nonce": request["request_nonce"],
@@ -2930,13 +3265,25 @@ async def _cleanup(
     if os.environ.get("VERA_EVAL_DEPENDENCY_CONTROL_URL"):
         for dependency in ("postgres", "object_store", "graph", "valkey"):
             await _configure_dependency(dependency, "available")
+    producer_reset = await _rollout_controller_post(
+        "/v1/reset", {"group_id": "p:evaluation-cleanup"}
+    )
+    if (
+        producer_reset.get("release_baseline_restored") is not True
+        or producer_reset.get("process_restarted") is not True
+        or producer_reset.get("invariants_preserved") is not True
+    ):
+        raise AdapterBlocked("API, MCP, and worker processes did not restart before cleanup")
     tools = await _mcp_readiness(container.settings, mcp_principal_id)
+    await _wait_for_worker_quiescence(container)
     discovered = await _database_inventory(container)
     requested = request["inputs"].get("created_resource_ids", [])
     inventory = sorted(
         set(discovered) | {value for value in requested if isinstance(value, str) and value}
     )
-    database = await _clear_database(container)
+    database, durable_cost, durable_cost_complete = await _clear_database_with_provider_cost(
+        container
+    )
     graph = await _clear_graph(container.settings)
     objects = await _clear_objects(container.settings)
     valkey = await _clear_valkey(container.settings)
@@ -2963,6 +3310,7 @@ async def _cleanup(
             "valkey_keys": valkey,
             "api_ready": api.get("status") == "ok",
             "mcp_tool_count": tools,
+            "request_producers_restarted": True,
         },
     }
     return _Outcome(
@@ -2975,6 +3323,8 @@ async def _cleanup(
             else "store cleanup verification failed"
         ),
         boundaries=("database", "graph", "api", "mcp"),
+        durable_cost_usd=durable_cost,
+        durable_cost_complete=durable_cost_complete,
     )
 
 
@@ -4685,6 +5035,55 @@ def _weighted_profile_value(
     )
 
 
+def _monotonic() -> float:
+    return time.monotonic()
+
+
+async def _production_search_soak(
+    principal: dict[str, Any], *, duration_s: float
+) -> dict[str, Any]:
+    started = _monotonic()
+    samples: list[dict[str, Any]] = []
+    while True:
+        index = len(samples)
+        generated = load_fact(0, index % 200, 20260828, 200)
+        status, result = await _search_http(
+            api_key=str(principal["api_key"]),
+            query=query_for(generated),
+            limit=10,
+            project=str(principal["group_id"]),
+        )
+        facts = result.get("facts")
+        samples.append(
+            {
+                "latency_ms": float(result.get("latency_ms", 0.0)),
+                "error": not 200 <= status < 300,
+                "hit": isinstance(facts, list)
+                and _text_hit(facts, cast(dict[str, Any], generated["triple"])),
+            }
+        )
+        elapsed_s = _monotonic() - started
+        if elapsed_s >= duration_s:
+            break
+        await asyncio.sleep(min(0.05, duration_s - elapsed_s))
+    latencies = [float(value["latency_ms"]) for value in samples]
+    return {
+        "profile_id": "http-warm-s1-l10-soak",
+        "entrypoint": "http",
+        "cache_state": "warm",
+        "scope_count": 1,
+        "result_limit": 10,
+        "virtual_users": 1,
+        "p95_ms": round(_nearest_rank(latencies, 0.95), 3),
+        "p99_ms": round(_nearest_rank(latencies, 0.99), 3),
+        "error_rate": sum(bool(value["error"]) for value in samples) / len(samples),
+        "hit_at_5": sum(bool(value["hit"]) for value in samples) / len(samples),
+        "throughput_rps": len(samples) / max(elapsed_s, 1e-9),
+        "sample_count": len(samples),
+        "duration_seconds": elapsed_s,
+    }
+
+
 async def _production_load_soak(
     container: Container,
     request: dict[str, Any],
@@ -4736,6 +5135,15 @@ async def _production_load_soak(
     ]
     if not search_profiles or not ingestion_profiles:
         raise AdapterBlocked("prior performance profile matrices are empty")
+
+    duration_value = matrix.get("duration_seconds")
+    if (
+        isinstance(duration_value, bool)
+        or not isinstance(duration_value, int | float)
+        or not 0 < duration_value <= 120
+    ):
+        raise AdapterBlocked("production soak duration must be in (0, 120] seconds")
+    duration_seconds = float(duration_value)
 
     configured_scopes = {int(value) for value in cast(list[int], matrix.get("scope_counts", []))}
     observed_scopes = {int(profile["scope_count"]) for profile in search_profiles}
@@ -4826,8 +5234,13 @@ async def _production_load_soak(
     if not isinstance(context.get("pack_id"), str):
         raise AdapterFailed("production context operation did not persist a context pack")
 
+    soak_profile = await _production_search_soak(first_principal, duration_s=duration_seconds)
+    if float(soak_profile["duration_seconds"]) < duration_seconds:
+        raise AdapterFailed("production soak ended before its declared duration")
+    search_profiles.append(soak_profile)
+
     reference = _production_object(search.get("http_reference"), "PERF-001 HTTP reference")
-    search_p95 = float(reference["p95_ms"])
+    search_p95 = max(float(reference["p95_ms"]), float(soak_profile["p95_ms"]))
     search_p99 = _weighted_profile_value(search_profiles, "p99_ms", "sample_count")
     error_rate = _weighted_profile_value(search_profiles, "error_rate", "sample_count")
     ingestion_rps = sum(int(profile["record_count"]) for profile in ingestion_profiles) / sum(
@@ -4886,7 +5299,7 @@ async def _production_load_soak(
         and configured_concurrency <= observed_concurrency
         and operations == required_operations
         and sorted(cast(list[int], matrix.get("data_volumes", []))) == [1200, 4000]
-        and float(matrix.get("duration_seconds", 0)) <= 120
+        and duration_seconds <= 120
     )
     if not coverage_complete:
         raise AdapterBlocked("production load matrix is not fully covered by measured profiles")
@@ -4902,6 +5315,7 @@ async def _production_load_soak(
                 "search_profile_count": len(search_profiles),
                 "ingestion_profile_count": len(ingestion_profiles),
                 "concurrency_32": extra_profile,
+                "soak": soak_profile,
                 "operations_exercised": sorted(required_operations),
             },
             "resources": {
@@ -5024,6 +5438,15 @@ async def _production_database_roles(
     )
     if matrix.get("roles") != ["api", "worker", "mcp", "trusted_read"]:
         raise AdapterBlocked("database role matrix differs from the approved contract")
+    required_operations = {
+        "tenant_read",
+        "cross_scope_read",
+        "fabric_write",
+        "projection_write",
+        "erase",
+    }
+    if set(cast(list[str], matrix.get("operations", []))) != required_operations:
+        raise AdapterBlocked("database operation matrix differs from the approved contract")
     if matrix.get("tenant_count") != 2:
         raise AdapterBlocked("database role matrix requires two tenants")
     first = await _production_fact(container, request, current, alias="role-a", index=1)
@@ -5044,29 +5467,82 @@ async def _production_database_roles(
     runtime_dsn = os.environ.get("VERA_EVAL_RUNTIME_DSN")
     if not runtime_dsn:
         raise AdapterBlocked("database role drill requires VERA_EVAL_RUNTIME_DSN")
+    worker_dsn = os.environ.get("VERA_EVAL_WORKER_DSN")
+    if not worker_dsn:
+        raise AdapterBlocked("database role drill requires VERA_EVAL_WORKER_DSN")
     runtime_engine = create_async_engine(runtime_dsn, poolclass=NullPool)
     runtime_sessions = async_sessionmaker(
         runtime_engine, expire_on_commit=False, class_=AsyncSession
     )
-    expected_login = os.environ.get("VERA_EVAL_RUNTIME_DB_USER", "vera_runtime")
-    async with runtime_sessions() as session, session.begin():
-        login = (
-            (
-                await session.execute(
-                    text(
-                        "SELECT session_user AS name, r.rolsuper, r.rolbypassrls "
-                        "FROM pg_roles r WHERE r.rolname=session_user"
+    worker_engine = create_async_engine(worker_dsn, poolclass=NullPool)
+    worker_sessions = async_sessionmaker(worker_engine, expire_on_commit=False, class_=AsyncSession)
+    deployed_logins: dict[str, dict[str, Any]] = {}
+    for label, sessions, expected, expected_memberships in (
+        ("server", runtime_sessions, "vera_runtime", ["vera_app", "vera_trusted"]),
+        (
+            "worker",
+            worker_sessions,
+            "vera_worker_runtime",
+            ["vera_app", "vera_trusted", "vera_worker"],
+        ),
+    ):
+        async with sessions() as session, session.begin():
+            login = (
+                (
+                    await session.execute(
+                        text(
+                            "SELECT session_user AS name, r.rolsuper, r.rolinherit, "
+                            "r.rolcreaterole, r.rolcreatedb, r.rolcanlogin, r.rolreplication, "
+                            "r.rolbypassrls, ARRAY(SELECT granted.rolname "
+                            "FROM pg_auth_members membership "
+                            "JOIN pg_roles granted ON granted.oid=membership.roleid "
+                            "WHERE membership.member=r.oid ORDER BY granted.rolname) memberships "
+                            "FROM pg_roles r WHERE r.rolname=session_user"
+                        )
                     )
                 )
+                .mappings()
+                .one()
             )
-            .mappings()
-            .one()
-        )
-    if login["name"] != expected_login or bool(login["rolsuper"]) or bool(login["rolbypassrls"]):
-        raise AdapterFailed("deployed database login is not the approved non-superuser role")
+        memberships = [str(value) for value in login["memberships"]]
+        if (
+            login["name"] != expected
+            or bool(login["rolsuper"])
+            or bool(login["rolinherit"])
+            or bool(login["rolcreaterole"])
+            or bool(login["rolcreatedb"])
+            or not bool(login["rolcanlogin"])
+            or bool(login["rolreplication"])
+            or bool(login["rolbypassrls"])
+            or memberships != expected_memberships
+        ):
+            raise AdapterFailed(f"deployed {label} login is not an approved non-superuser role")
+        deployed_logins[label] = {
+            "name": str(login["name"]),
+            "superuser": bool(login["rolsuper"]),
+            "bypass_rls": bool(login["rolbypassrls"]),
+            "memberships": memberships,
+        }
+
+    worker_escalation_denied = False
+    try:
+        async with runtime_sessions() as session, session.begin():
+            await session.execute(text("SET LOCAL ROLE vera_worker"))
+    except SQLAlchemyError:
+        worker_escalation_denied = True
+    if not worker_escalation_denied:
+        raise AdapterFailed("deployed server login can assume the worker database role")
+    denials.append(
+        {
+            "role": "server_login",
+            "operation": "assume_worker_role",
+            "denied": True,
+        }
+    )
 
     for label, database_role in role_names.items():
-        async with runtime_sessions() as session, session.begin():
+        sessions = worker_sessions if label == "worker" else runtime_sessions
+        async with sessions() as session, session.begin():
             await session.execute(text(f"SET LOCAL ROLE {database_role}"))
             await session.execute(
                 text("SELECT set_config('vera.group_id', :group_id, true)"),
@@ -5100,18 +5576,6 @@ async def _production_database_roles(
                         "denied": cross_rows == 0,
                     }
                 )
-            else:
-                explicitly_scoped = list(
-                    await session.scalars(
-                        text(
-                            "SELECT group_id FROM facts WHERE group_id=:allowed_group "
-                            "ORDER BY group_id"
-                        ),
-                        {"allowed_group": group_a},
-                    )
-                )
-                leaked = [value for value in explicitly_scoped if str(value) != group_a]
-                cross_scope_successes += len(leaked)
             results.append(
                 {
                     "role": label,
@@ -5120,6 +5584,88 @@ async def _production_database_roles(
                     "scope_filter": group_a,
                 }
             )
+
+    first_principal = cast(dict[str, Any], first["principal"])
+    second_triple = cast(dict[str, Any], second["triple"])
+    cross_query = " ".join(str(second_triple[key]) for key in ("subject", "predicate", "object"))
+    api_status, _api_result = await _search_http(
+        api_key=str(first_principal["api_key"]),
+        query=cross_query,
+        limit=5,
+        project=group_b,
+    )
+    if api_status not in {403, 404} and not 200 <= api_status < 300:
+        raise AdapterBlocked(f"cross-scope API probe returned HTTP {api_status}")
+    api_denied = api_status in {403, 404}
+    cross_scope_successes += int(not api_denied)
+    denials.append({"role": "api", "operation": "api_cross_scope_read", "denied": api_denied})
+
+    mcp_denied = False
+    try:
+        await _call_mcp_tool(
+            container.settings,
+            principal_id=str(first_principal["principal_id"]),
+            name="knowledge_search",
+            arguments={"query": cross_query, "project": group_b, "limit": 5},
+        )
+    except _McpProjectOutOfScope:
+        mcp_denied = True
+    cross_scope_successes += int(not mcp_denied)
+    denials.append({"role": "mcp", "operation": "mcp_cross_scope_read", "denied": mcp_denied})
+
+    source_b = second.get("episode_source_id")
+    if not isinstance(source_b, str):
+        raise AdapterFailed("trusted-read scope probe has no tenant-B source")
+    trusted_leak = await SqlAlchemyRetrievalReadModel(container.reads).get_source(
+        group_ids=[group_a], source_id=source_b
+    )
+    cross_scope_successes += int(trusted_leak is not None)
+    denials.append(
+        {
+            "role": "trusted_read",
+            "operation": "repository_cross_scope_read",
+            "denied": trusted_leak is None,
+        }
+    )
+
+    second_fact = second.get("fact")
+    second_fact_key = second_fact.get("fact_key") if isinstance(second_fact, dict) else None
+    if not isinstance(second_fact_key, str):
+        raise AdapterFailed("worker scope probe has no tenant-B fact")
+    projected_keys = await SqlAlchemyProjectionSource(container.workers).active_fact_keys(
+        group_id=group_a
+    )
+    worker_leak = second_fact_key in projected_keys
+    cross_scope_successes += int(worker_leak)
+    denials.append(
+        {
+            "role": "worker",
+            "operation": "projection_cross_scope_read",
+            "denied": not worker_leak,
+        }
+    )
+
+    async with worker_sessions() as session, session.begin():
+        await session.execute(text("SET LOCAL ROLE vera_worker"))
+        projected = list(
+            await session.scalars(
+                text(
+                    "UPDATE facts SET normalized_object=normalized_object "
+                    "WHERE group_id=:group_id RETURNING id"
+                ),
+                {"group_id": group_a},
+            )
+        )
+    if not projected:
+        raise AdapterFailed("worker projection role cannot update its explicitly scoped tenant")
+    results.append(
+        {
+            "role": "worker",
+            "operation": "projection_write",
+            "tenant_write_count": len(projected),
+            "scope_filter": group_a,
+        }
+    )
 
     async with runtime_sessions() as session, session.begin():
         await session.execute(text("SET LOCAL ROLE vera_app"))
@@ -5155,19 +5701,26 @@ async def _production_database_roles(
         unauthorized_writes += int(not denied)
         denials.append({"role": label, "operation": "fabric_write", "denied": denied})
 
+    for label, sessions in (("server_login", runtime_sessions), ("worker_login", worker_sessions)):
+        denied = False
+        try:
+            async with sessions() as session, session.begin():
+                await session.execute(text("SET LOCAL ROLE vera_erasure"))
+        except SQLAlchemyError:
+            denied = True
+        unauthorized_writes += int(not denied)
+        denials.append({"role": label, "operation": "erase", "denied": denied})
+
     covered = sum(bool(value["denied"]) for value in denials)
     coverage = covered / len(denials) if denials else 0.0
     outcome = _Outcome(
         observations={
             "role_matrix": {
-                "login": {
-                    "name": str(login["name"]),
-                    "superuser": bool(login["rolsuper"]),
-                    "bypass_rls": bool(login["rolbypassrls"]),
-                },
+                "logins": deployed_logins,
                 "cross_scope_success_count": cross_scope_successes,
                 "unauthorized_write_count": unauthorized_writes,
                 "results": results,
+                "operations_exercised": sorted(required_operations),
             },
             "audit": {"denial_coverage": coverage, "events": denials},
         },
@@ -5195,6 +5748,7 @@ async def _production_database_roles(
         boundaries=("database", "api"),
     )
     await runtime_engine.dispose()
+    await worker_engine.dispose()
     return outcome
 
 
@@ -5226,7 +5780,7 @@ def _production_mcp_token(
 async def _production_mcp_probes(
     *, token: str | None, calls: list[tuple[str, dict[str, Any]]]
 ) -> list[dict[str, Any]]:
-    headers: dict[str, str] = {}
+    headers = _provider_budget_headers()
     if token is not None:
         headers["Authorization"] = f"Bearer {token}"
     host = os.environ.get("VERA_EVAL_MCP_HOST_HEADER")
@@ -5250,16 +5804,27 @@ async def _production_mcp_probes(
                             name, arguments, read_timeout_seconds=timeout_s
                         )
                     except Exception as exc:
+                        denial_category = _mcp_denial_category(exc)
+                        if denial_category is None:
+                            _record_direct_provider_cost(None)
+                            category = _mcp_failure_category(exc)
+                            raise AdapterBlocked(
+                                f"MCP authorization probe failed at the {category} boundary"
+                            ) from exc
                         records.append(
                             {
                                 "tool": name,
                                 "allowed": False,
-                                "error_type": _mcp_failure_category(exc),
+                                "error_type": denial_category,
                                 "latency_ms": round((time.perf_counter() - call_started) * 1000, 3),
                             }
                         )
                         continue
                     allowed = not bool(getattr(result, "is_error", False))
+                    if not allowed:
+                        raise AdapterBlocked(
+                            "MCP authorization probe returned an unclassified tool error"
+                        )
                     record: dict[str, Any] = {
                         "tool": name,
                         "allowed": allowed,
@@ -5273,12 +5838,21 @@ async def _production_mcp_probes(
                             record["payload"] = {}
                     records.append(record)
     except Exception as exc:
+        if isinstance(exc, AdapterBlocked):
+            raise
+        denial_category = _mcp_denial_category(exc)
+        if denial_category is None:
+            _record_direct_provider_cost(None)
+            category = _mcp_failure_category(exc)
+            raise AdapterBlocked(
+                f"MCP authorization probe failed at the {category} boundary"
+            ) from exc
         elapsed = round((time.perf_counter() - started) * 1000, 3)
         return [
             {
                 "tool": name,
                 "allowed": False,
-                "error_type": _mcp_failure_category(exc),
+                "error_type": denial_category,
                 "latency_ms": elapsed,
             }
             for name, _arguments in calls
@@ -5907,19 +6481,23 @@ def _production_object_manifest(objects: dict[str, _ObjectBackup]) -> dict[str, 
     }
 
 
-def _prepare_recovery_request(root: Path, command: str, token: str) -> None:
+def _prepare_recovery_request(root: Path, command: str, token: str) -> Path:
     root.mkdir(parents=True, exist_ok=True)
-    request = root / f"{command}.{token}.request"
-    for suffix in ("request", "done", "failed"):
-        (root / f"{command}.{token}.{suffix}").unlink(missing_ok=True)
-    temporary = request.with_suffix(".request.tmp")
+    exchange = root / f"{command}.{token}.{uuid4().hex}"
+    exchange.mkdir(mode=0o777)
+    exchange.chmod(0o777)
+    request = exchange / "request"
+    temporary = exchange / "request.tmp"
     temporary.write_text(f"{command}\n", encoding="utf-8")
     temporary.replace(request)
+    return exchange
 
 
-def _recovery_status(root: Path, command: str, token: str) -> tuple[str, str] | None:
-    done = root / f"{command}.{token}.done"
-    failed = root / f"{command}.{token}.failed"
+def _recovery_status(exchange: Path) -> tuple[str, str] | None:
+    if (exchange / "request").exists():
+        return None
+    done = exchange / "done"
+    failed = exchange / "failed"
     if done.exists():
         return "done", done.read_text(encoding="utf-8").strip()
     if failed.exists():
@@ -5928,32 +6506,49 @@ def _recovery_status(root: Path, command: str, token: str) -> tuple[str, str] | 
 
 
 async def _production_recovery_command(command: str, token: str) -> str:
-    if command not in {"backup", "restore"} or not re.fullmatch(r"[a-f0-9]+", token):
+    if command not in {"backup", "restore", "cleanup", "purge"} or not re.fullmatch(
+        r"[a-f0-9]+", token
+    ):
         raise AdapterBlocked("invalid recovery harness command")
-    root = Path(os.environ.get("VERA_EVAL_RECOVERY_ROOT", "/state/recovery"))
-    await asyncio.to_thread(_prepare_recovery_request, root, command, token)
-    deadline = time.monotonic() + _timeout("VERA_EVAL_RECOVERY_TIMEOUT_S", 300.0)
-    while time.monotonic() < deadline:
-        status = await asyncio.to_thread(_recovery_status, root, command, token)
-        if status is not None and status[0] == "done":
-            return status[1]
-        if status is not None:
-            detail = status[1]
-            raise AdapterFailed(f"PostgreSQL recovery harness failed: {detail[:500]}")
-        await asyncio.sleep(0.5)
-    raise AdapterBlocked(f"PostgreSQL recovery harness timed out during {command}")
+
+    async def run() -> str:
+        root = Path(os.environ.get("VERA_EVAL_RECOVERY_ROOT", "/state/recovery"))
+        exchange = await asyncio.to_thread(_prepare_recovery_request, root, command, token)
+        deadline = time.monotonic() + _timeout("VERA_EVAL_RECOVERY_TIMEOUT_S", 300.0)
+        while time.monotonic() < deadline:
+            status = await asyncio.to_thread(_recovery_status, exchange)
+            if status is not None and status[0] == "done":
+                result = status[1]
+                await asyncio.to_thread(_remove_recovery_exchange, exchange)
+                return result
+            if status is not None:
+                detail = status[1]
+                await asyncio.to_thread(_remove_recovery_exchange, exchange)
+                raise AdapterFailed(f"PostgreSQL recovery harness failed: {detail[:500]}")
+            await asyncio.sleep(0.5)
+        await asyncio.to_thread((exchange / "request").unlink, missing_ok=True)
+        _record_direct_provider_cost(None)
+        raise AdapterBlocked(f"PostgreSQL recovery harness timed out during {command}")
+
+    return await finish_finalizer(asyncio.create_task(run()))
+
+
+def _remove_recovery_exchange(exchange: Path) -> None:
+    for path in exchange.iterdir():
+        path.unlink(missing_ok=True)
+    exchange.rmdir()
 
 
 async def _production_restored_snapshot(
     container: Container, group_id: str, database: str
 ) -> dict[str, Any]:
-    admin_dsn = os.environ.get("VERA_EVAL_ADMIN_DSN")
-    if not admin_dsn:
-        raise AdapterBlocked("recovery verification requires VERA_EVAL_ADMIN_DSN")
-    parsed = urlsplit(admin_dsn)
+    worker_dsn = os.environ.get("VERA_EVAL_WORKER_DSN")
+    if not worker_dsn:
+        raise AdapterBlocked("recovery verification requires VERA_EVAL_WORKER_DSN")
+    parsed = urlsplit(worker_dsn)
     dsn = urlunsplit(parsed._replace(path=f"/{database}"))
     engine = create_async_engine(dsn, pool_pre_ping=True)
-    factory = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
+    factory = create_sessionmaker(engine, role="vera_app")
     restored = copy.copy(container)
     restored.engine = engine
     restored.sessionmaker = factory
@@ -5984,6 +6579,22 @@ def _production_snapshot_sha256(snapshot: dict[str, Any]) -> str:
             default=str,
         ).encode()
     ).hexdigest()
+
+
+async def _production_inject_postgres_loss(
+    container: Container, *, group_id: str, fact_id: str
+) -> None:
+    async with container.workers() as session, session.begin():
+        changed = await session.scalar(
+            text(
+                "UPDATE facts SET lifecycle_state='retracted' "
+                "WHERE group_id=:group_id AND id=:fact_id AND lifecycle_state='active' "
+                "RETURNING id"
+            ),
+            {"group_id": group_id, "fact_id": fact_id},
+        )
+    if changed is None:
+        raise AdapterFailed("PostgreSQL loss injection did not mutate the recovery fixture")
 
 
 async def _production_retention_drill(
@@ -6328,7 +6939,7 @@ async def _production_backup_restore(
     )
     if matrix.get("stores") != ["postgres", "object_store", "graph", "valkey"]:
         raise AdapterBlocked("backup store matrix differs from the approved contract")
-    if matrix.get("restore_targets") != ["empty_stack", "point_in_time"] or matrix.get(
+    if matrix.get("restore_targets") != ["empty_stack", "logical_snapshot"] or matrix.get(
         "faults"
     ) != ["authoritative_store_loss", "derived_store_loss", "partial_restore"]:
         raise AdapterBlocked("backup restore targets differ from the approved contract")
@@ -6355,13 +6966,18 @@ async def _production_backup_restore(
     valkey_payload = hashlib.sha256(valkey_key.encode()).hexdigest().encode()
     token = hashlib.sha256(f"{request['run_id']}:{request['case_id']}".encode()).hexdigest()[:16]
     backup_result = await _production_recovery_command("backup", token)
-    backup_parts = backup_result.splitlines()[-1].split()
-    if len(backup_parts) != 2 or backup_parts[0] != f"vera_restore_{token}":
-        raise AdapterFailed("PostgreSQL backup harness returned an invalid manifest")
-    clone_snapshot = await _production_restored_snapshot(container, group_id, backup_parts[0])
-    clone_mismatch = int(database_before != _production_snapshot_sha256(clone_snapshot))
-    if clone_mismatch:
-        raise AdapterFailed("empty-stack PostgreSQL restore differs from the recovery point")
+    snapshot_completed_at = time.monotonic()
+    try:
+        backup_parts = backup_result.splitlines()[-1].split()
+        if len(backup_parts) != 2 or backup_parts[0] != f"vera_restore_{token}":
+            raise AdapterFailed("PostgreSQL backup harness returned an invalid manifest")
+        clone_snapshot = await _production_restored_snapshot(container, group_id, backup_parts[0])
+        clone_mismatch = int(database_before != _production_snapshot_sha256(clone_snapshot))
+        if clone_mismatch:
+            raise AdapterFailed("empty-stack PostgreSQL restore differs from the recovery point")
+    except (asyncio.CancelledError, Exception):
+        await _production_recovery_command("purge", token)
+        raise
 
     valkey = Redis.from_url(str(container.settings.resilience.valkey_url))
     recovery_started = time.perf_counter()
@@ -6374,7 +6990,20 @@ async def _production_backup_restore(
     partial_restore_detected = False
     projection_rebuild_ms = 0.0
     restored_valkey: bytes | None = None
+    authoritative_loss_detected = False
     try:
+        database_restore_required = True
+        rpo_seconds = time.monotonic() - snapshot_completed_at
+        first_fact = first.get("fact")
+        first_fact_id = first_fact.get("id") if isinstance(first_fact, dict) else None
+        if not isinstance(first_fact_id, str):
+            raise AdapterFailed("backup drill has no deterministic PostgreSQL fault target")
+        await _production_inject_postgres_loss(container, group_id=group_id, fact_id=first_fact_id)
+        database_during = _production_snapshot_sha256(await _database_snapshot(container, group_id))
+        authoritative_loss_detected = database_during != database_before
+        if not authoritative_loss_detected:
+            raise AdapterFailed("PostgreSQL loss injection produced no observable mismatch")
+
         await valkey.set(valkey_key, valkey_payload)
         objects_restore_required = True
         try:
@@ -6395,7 +7024,6 @@ async def _production_backup_restore(
         if not partial_restore_detected:
             raise AdapterFailed("partial object restore produced no observable mismatch")
 
-        database_restore_required = True
         await _production_recovery_command("restore", token)
         database_restored = True
         await _production_restore_objects(container, objects_before)
@@ -6415,14 +7043,18 @@ async def _production_backup_restore(
         await valkey.set(valkey_key, valkey_payload)
         restored_valkey = await valkey.get(valkey_key)
     finally:
-        if database_restore_required and not database_restored:
-            await _production_recovery_command("restore", token)
-        if objects_restore_required and not objects_restored:
-            await _production_restore_objects(container, objects_before)
-        if graph_rebuild_required and not graph_restored:
-            await projection_service.rebuild_group(group_id)
-        await valkey.delete(valkey_key)
-        await valkey.aclose()
+        try:
+            if database_restore_required and not database_restored:
+                await _production_recovery_command("restore", token)
+            if objects_restore_required and not objects_restored:
+                await _production_restore_objects(container, objects_before)
+            if graph_rebuild_required and not graph_restored:
+                await projection_service.rebuild_group(group_id)
+        finally:
+            try:
+                await valkey.delete(valkey_key)
+            finally:
+                await valkey.aclose()
     recovery_seconds = time.perf_counter() - recovery_started
 
     after = await _database_snapshot(container, group_id)
@@ -6434,7 +7066,8 @@ async def _production_backup_restore(
     object_mismatch = int(object_manifest_before != object_manifest_after)
     valkey_mismatch = int(restored_valkey != valkey_payload)
     mismatch_count = database_mismatch + clone_mismatch + object_mismatch + valkey_mismatch
-    rpo_seconds = 0 if mismatch_count == 0 else recovery_seconds
+    if mismatch_count == 0 and not drift_after.missing_in_graph and not drift_after.extra_in_graph:
+        await _production_recovery_command("purge", token)
     rto_seconds = recovery_seconds
     return _Outcome(
         observations={
@@ -6451,7 +7084,8 @@ async def _production_backup_restore(
                 "targets": list(matrix["restore_targets"]),
                 "faults": list(matrix["faults"]),
                 "empty_stack_restore": clone_mismatch == 0,
-                "point_in_time_restore": database_mismatch == 0,
+                "logical_snapshot_restore": database_mismatch == 0,
+                "authoritative_loss_detected": authoritative_loss_detected,
                 "partial_restore_detected": partial_restore_detected,
                 "object_restore": object_mismatch == 0,
                 "graph_rebuild": not drift_after.missing_in_graph
@@ -6714,7 +7348,9 @@ async def _exercise_product_signals(
                         ),
                         {
                             "group_id": group_id,
-                            "trace_context": json.dumps({"trace_id": queue_trace_id}),
+                            "trace_context": json.dumps(
+                                provider_budget_trace_context({"trace_id": queue_trace_id})
+                            ),
                             "sample_count": freshness_samples,
                         },
                     )
@@ -7131,6 +7767,7 @@ async def _wait_for_postgres(container: Container, *, timeout_s: float = 30.0) -
         except SQLAlchemyError:
             pass
         if time.monotonic() >= deadline:
+            _record_direct_provider_cost(None)
             raise AdapterBlocked("PostgreSQL did not recover within the bounded incident window")
         await asyncio.sleep(0.2)
 
@@ -7395,6 +8032,7 @@ async def _rollout_controller_post(path: str, payload: dict[str, str]) -> dict[s
                 headers={"Authorization": f"Bearer {token}"},
             )
         except httpx.HTTPError as exc:
+            _record_direct_provider_cost(None)
             raise AdapterBlocked("rollout controller is unavailable") from exc
     if response.status_code != 200:
         raise AdapterFailed(f"rollout controller rejected {path} with HTTP {response.status_code}")
@@ -8157,9 +8795,11 @@ async def _handle_action(
         return _Outcome(observations=full)
     if action == "agent.run":
         await _ensure_scope(request, current)
+        agent_observations = await _agent(container, request, current)
         return _Outcome(
-            observations=await _agent(container, request, current),
+            observations=agent_observations,
             boundaries=("mcp", "api"),
+            cost_usd=_agent_reported_cost(agent_observations),
         )
     if action == "extractor.configure":
         extractor_state = str(inputs.get("state"))
@@ -9458,22 +10098,48 @@ async def _run(request: dict[str, Any]) -> dict[str, Any]:
     action = str(request["action"])
     if action == "__check__":
         try:
-            return _check_inspection(request)
+            response = _check_inspection(request)
+            response["cost_usd"] = 0.0
+            return response
         except AdapterBlocked as exc:
             return {
                 "schema_version": "1.0",
                 "request_nonce": request["request_nonce"],
                 "status": "BLOCKED",
                 "message": str(exc),
+                "cost_usd": 0.0,
             }
     settings = get_settings()
     container = build_container(settings)
+    cost_meter = _ActionCostMeter()
+    cost_token = _ACTION_COST_METER.set(cost_meter)
+    provider_budget_token: object | None = None
     try:
+        provider_budget = _action_provider_budget(request)
+        if provider_budget is not None:
+            budget_context, maximum_cost, run_key, run_maximum = provider_budget
+            if container.usage_sink is None:
+                raise AdapterBlocked("provider action budget has no durable sink")
+            if maximum_cost > 0:
+                await container.usage_sink.initialize_provider_budget(
+                    budget_context.action_key,
+                    maximum_cost,
+                    run_key=run_key,
+                    run_max_cost_usd=run_maximum,
+                )
+            provider_budget_token = set_provider_budget_context(budget_context)
+        previous_cost_value = state.get("metered_provider_cost_usd", 0.0)
+        previous_durable_cost = (
+            float(previous_cost_value)
+            if isinstance(previous_cost_value, (int, float))
+            and not isinstance(previous_cost_value, bool)
+            else 0.0
+        )
         if action == "safety.preflight":
             try:
-                return await _preflight(container, request, state)
+                response = await _preflight(container, request, state)
             except AdapterBlocked as exc:
-                return {
+                response = {
                     "schema_version": "1.0",
                     "request_nonce": request["request_nonce"],
                     "status": "BLOCKED",
@@ -9488,7 +10154,7 @@ async def _run(request: dict[str, Any]) -> dict[str, Any]:
                     "message": str(exc),
                 }
             except AdapterFailed as exc:
-                return {
+                response = {
                     "schema_version": "1.0",
                     "request_nonce": request["request_nonce"],
                     "status": "FAIL",
@@ -9502,51 +10168,83 @@ async def _run(request: dict[str, Any]) -> dict[str, Any]:
                     },
                     "message": str(exc),
                 }
-        current = _case_state(request, state)
-        try:
-            outcome = await _handle_action(container, request, state, current)
-        except AdapterBlocked as exc:
-            outcome = _Outcome(status="BLOCKED", message=str(exc))
-        except AdapterFailed as exc:
-            outcome = _Outcome(status="FAIL", message=str(exc))
-        history = cast(dict[str, Any], current.setdefault("observations", {}))
-        _deep_merge(history, outcome.observations)
-        outcome.metrics.extend(await _daily_metrics(container, request, current, outcome))
-        state["resources"] = sorted({*state.get("resources", []), *outcome.created})
-        _save_state(run_id, state)
-        observations = (
-            copy.deepcopy(outcome.observations)
-            if action == "cleanup.run_scope"
-            else _declared_observations(outcome.observations, request["observe"])
-        )
-        if outcome.status == "PASS":
-            missing = sorted(
-                {
-                    re.split(r"[.[]", path, maxsplit=1)[0]
-                    for path in request["observe"]
-                    if re.split(r"[.[]", path, maxsplit=1)[0] not in observations
-                }
+        else:
+            current = _case_state(request, state)
+            try:
+                outcome = await _handle_action(container, request, state, current)
+            except AdapterBlocked as exc:
+                outcome = _Outcome(status="BLOCKED", message=str(exc))
+            except AdapterFailed as exc:
+                outcome = _Outcome(status="FAIL", message=str(exc))
+            history = cast(dict[str, Any], current.setdefault("observations", {}))
+            _deep_merge(history, outcome.observations)
+            outcome.metrics.extend(await _daily_metrics(container, request, current, outcome))
+            state["resources"] = sorted({*state.get("resources", []), *outcome.created})
+            observations = (
+                copy.deepcopy(outcome.observations)
+                if action == "cleanup.run_scope"
+                else _declared_observations(outcome.observations, request["observe"])
             )
-            if missing:
-                outcome.status = "BLOCKED"
-                outcome.message = "truthful adapter could not observe: " + ", ".join(missing)
-        response = {
-            "schema_version": "1.0",
-            "request_nonce": request["request_nonce"],
-            "status": outcome.status,
-            "observations": observations,
-            "message": outcome.message,
-            "metrics": outcome.metrics,
-            "evidence": _evidence(request, outcome, observations),
-            "created_resources": outcome.created,
-            "removed_resources": outcome.removed,
-        }
+            if outcome.status == "PASS":
+                missing = sorted(
+                    {
+                        re.split(r"[.[]", path, maxsplit=1)[0]
+                        for path in request["observe"]
+                        if re.split(r"[.[]", path, maxsplit=1)[0] not in observations
+                    }
+                )
+                if missing:
+                    outcome.status = "BLOCKED"
+                    outcome.message = "truthful adapter could not observe: " + ", ".join(missing)
+            response = {
+                "schema_version": "1.0",
+                "request_nonce": request["request_nonce"],
+                "status": outcome.status,
+                "observations": observations,
+                "message": outcome.message,
+                "metrics": outcome.metrics,
+                "evidence": _evidence(request, outcome, observations),
+                "created_resources": outcome.created,
+                "removed_resources": outcome.removed,
+            }
+
+        if action == "cleanup.run_scope":
+            if outcome.durable_cost_usd is None or outcome.durable_cost_complete is not True:
+                cost_meter.record(None)
+                durable_cost = previous_durable_cost
+            else:
+                durable_cost = outcome.durable_cost_usd
+        else:
+            try:
+                durable_cost, durable_complete = await _durable_provider_meter(container)
+                if not durable_complete:
+                    cost_meter.record(None)
+            except SQLAlchemyError:
+                cost_meter.record(None)
+                durable_cost = previous_durable_cost
+        durable_delta = durable_cost - previous_durable_cost
+        if durable_delta < -1e-12:
+            cost_meter.record(None)
+            durable_delta = 0.0
+        response["cost_usd"] = (
+            cost_meter.cost_usd + max(0.0, durable_delta) if cost_meter.complete else None
+        )
+        state["metered_provider_cost_usd"] = durable_cost
+        _save_state(run_id, state)
         if action == "cleanup.run_scope" and outcome.status == "PASS":
+            async with container.workers() as session, session.begin():
+                await session.execute(
+                    text("DELETE FROM provider_run_budget_reservations WHERE run_key=:run_key"),
+                    {"run_key": run_id},
+                )
             path = _state_path(run_id)
             if path.exists():
                 path.unlink()
         return response
     finally:
+        if provider_budget_token is not None:
+            reset_provider_budget_context(provider_budget_token)
+        _ACTION_COST_METER.reset(cost_token)
         await dispose_container(container)
 
 

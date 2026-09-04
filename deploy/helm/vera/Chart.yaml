@@ -5,8 +5,8 @@ description: >-
   worker plus their datastores (PostgreSQL, a graph backend, Valkey, and an
   S3-compatible object store), for a single-cluster pilot deployment.
 type: application
-version: 0.2.1
-appVersion: "0.2.1"
+version: 0.2.2
+appVersion: "0.2.2"
 home: https://github.com/KKloudTarus/vera
 sources:
   - https://github.com/KKloudTarus/vera

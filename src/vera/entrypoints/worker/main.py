@@ -160,8 +160,7 @@ async def run_until_empty(container: Container, pool: LanePool, *, batch_size: i
     while True:
         jobs = await container.queue.claim(batch_size=batch_size)
         if jobs:
-            for job in jobs:
-                await pool.submit(job)
+            await asyncio.gather(*(pool.submit(job) for job in jobs))
             processed += len(jobs)
             continue
         # claim() skips groups with an in-flight job (per-group serialization), so a
@@ -181,25 +180,43 @@ async def _submit_claimed_jobs(
     jobs: Sequence[QueuedJob],
     stop: asyncio.Event,
 ) -> bool:
-    for index, job in enumerate(jobs):
-        submit_task = asyncio.create_task(pool.submit(job))
-        stop_task = asyncio.create_task(stop.wait())
-        done, _ = await asyncio.wait((submit_task, stop_task), return_when=asyncio.FIRST_COMPLETED)
-        if submit_task in done:
-            stop_task.cancel()
-            await asyncio.gather(stop_task, return_exceptions=True)
-            await submit_task
-            if not stop.is_set():
-                continue
-            unsubmitted = jobs[index + 1 :]
-        else:
-            submit_task.cancel()
-            await asyncio.gather(submit_task, return_exceptions=True)
-            unsubmitted = jobs[index:]
-        for pending in unsubmitted:
-            await container.queue.release(pending.id, reason="worker shutdown")
-        return False
-    return True
+    submitted: set[tuple[object, object]] = set()
+
+    async def submit(job: QueuedJob) -> None:
+        await pool.submit(job)
+        submitted.add((job.id, job.claim_token))
+
+    submit_tasks = [asyncio.create_task(submit(job)) for job in jobs]
+    stop_task = asyncio.create_task(stop.wait())
+    remaining = set(submit_tasks)
+    try:
+        while remaining:
+            done, _ = await asyncio.wait(
+                (*remaining, stop_task), return_when=asyncio.FIRST_COMPLETED
+            )
+            if stop_task in done:
+                for task in remaining:
+                    task.cancel()
+                await asyncio.gather(*remaining, return_exceptions=True)
+                for job in jobs:
+                    if (job.id, job.claim_token) not in submitted:
+                        await container.queue.release(
+                            job.id,
+                            claim_token=job.claim_token,
+                            reason="worker shutdown",
+                        )
+                return False
+            completed = done & remaining
+            for task in completed:
+                await task
+            remaining.difference_update(completed)
+        return not stop.is_set()
+    finally:
+        for task in remaining:
+            task.cancel()
+        await asyncio.gather(*remaining, return_exceptions=True)
+        stop_task.cancel()
+        await asyncio.gather(stop_task, return_exceptions=True)
 
 
 async def run() -> None:

@@ -10,6 +10,7 @@ x-eval-app-image: &eval-app-image "${VERA_APP_IMAGE:-vera-app:local}"
 
 x-eval-app-env: &eval-app-env
   VERA_ENVIRONMENT: dev
+  VERA_EVAL_SCOPE_ID: ${VERA_EVAL_SCOPE_ID:?set a run-specific evaluation scope ID}
   VERA_DB__DSN: postgresql+asyncpg://vera_runtime:${VERA_EVAL_DB_RUNTIME_PASSWORD_URLENCODED:-${VERA_EVAL_DB_RUNTIME_PASSWORD:?set a run-specific database runtime password}}@neo4j-proxy:5432/vera
   VERA_DB__POOL_SIZE: "30"
   VERA_DB__MAX_OVERFLOW: "15"
@@ -214,6 +215,7 @@ services:
     environment:
       PGPASSWORD: vera
       VERA_RUNTIME_PASSWORD: ${VERA_EVAL_DB_RUNTIME_PASSWORD:?set a run-specific database runtime password}
+      VERA_WORKER_PASSWORD: ${VERA_EVAL_DB_WORKER_PASSWORD:?set a run-specific database worker password}
       VERA_LEGACY_PASSWORD: ${VERA_EVAL_DB_LEGACY_PASSWORD:?set a run-specific legacy database password}
 
   api:
@@ -278,6 +280,7 @@ services:
       ]
     environment:
       <<: *eval-app-env
+      VERA_DB__DSN: postgresql+asyncpg://vera_worker_runtime:${VERA_EVAL_DB_WORKER_PASSWORD_URLENCODED:-${VERA_EVAL_DB_WORKER_PASSWORD:?set a run-specific database worker password}}@neo4j-proxy:5432/vera
       VERA_DB__APPLICATION_NAME: vera-worker
       VERA_DB__POOL_SIZE: "8"
       VERA_DB__MAX_OVERFLOW: "4"
@@ -374,6 +377,7 @@ services:
       PGUSER: vera
       PGPASSWORD: vera
       VERA_RECOVERY_ROOT: /state/recovery
+      VERA_RECOVERY_COMMAND_TIMEOUT_S: "240"
     volumes:
       - eval-state:/state
     depends_on:
@@ -466,8 +470,8 @@ services:
       <<: *eval-app-env
       OTEL_TRACES_SAMPLER: parentbased_always_on
       OTEL_TRACES_SAMPLER_ARG: "1"
-      VERA_DB__DSN: postgresql+asyncpg://vera:vera@neo4j-proxy:5432/vera
-      VERA_DB__ROLE_ENFORCEMENT: "false"
+      VERA_DB__DSN: postgresql+asyncpg://vera_worker_runtime:${VERA_EVAL_DB_WORKER_PASSWORD_URLENCODED:-${VERA_EVAL_DB_WORKER_PASSWORD:?set a run-specific database worker password}}@neo4j-proxy:5432/vera
+      VERA_DB__ROLE_ENFORCEMENT: "true"
       VERA_EVAL_API_URL: http://api:8000
       VERA_EVAL_MCP_URL: http://mcp:8080/mcp
       VERA_EVAL_MCP_HOST_HEADER: localhost:8080
@@ -476,14 +480,14 @@ services:
       VERA_EVAL_WORKER_METRICS_URL: http://worker:9100/metrics
       VERA_EVAL_PROMETHEUS_URL: http://prometheus:9090
       VERA_EVAL_SYNTHETIC_METRICS_PORT: "9200"
-      VERA_EVAL_ADMIN_DSN: postgresql+asyncpg://vera:vera@neo4j-proxy:5432/vera
       VERA_EVAL_RUNTIME_DSN: postgresql+asyncpg://vera_runtime:${VERA_EVAL_DB_RUNTIME_PASSWORD_URLENCODED:-${VERA_EVAL_DB_RUNTIME_PASSWORD:?set a run-specific database runtime password}}@neo4j-proxy:5432/vera
-      VERA_EVAL_RUNTIME_DB_USER: vera_runtime
+      VERA_EVAL_WORKER_DSN: postgresql+asyncpg://vera_worker_runtime:${VERA_EVAL_DB_WORKER_PASSWORD_URLENCODED:-${VERA_EVAL_DB_WORKER_PASSWORD:?set a run-specific database worker password}}@neo4j-proxy:5432/vera
       VERA_EVAL_RECOVERY_ROOT: /state/recovery
+      VERA_EVAL_RECOVERY_TIMEOUT_S: "270"
       VERA_EVAL_TRACE_QUERY_URL: http://jaeger:16686
       VERA_EVAL_ROLLOUT_CONTROLLER_URL: http://rollout-controller:8090
       VERA_EVAL_ROLLOUT_CONTROLLER_TOKEN: ${VERA_EVAL_ROLLOUT_CONTROLLER_TOKEN:?set a run-specific rollout controller token}
-      VERA_EVAL_SCOPE_ID: ${VERA_EVAL_SCOPE_ID:?set a run-specific evaluation scope ID}
+      VERA_RELEASE_APP_IMAGE_DIGEST: ${VERA_RELEASE_APP_IMAGE_DIGEST:-}
       VERA_EVAL_STATE_ROOT: /state
     extra_hosts: ["host.docker.internal:host-gateway"]
     volumes:

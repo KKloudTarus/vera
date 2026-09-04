@@ -49,6 +49,7 @@ def _embedder(settings: Settings, usage_sink: UsageSink | None = None) -> Embedd
             dim=settings.voyage.embedding_dim,
         )
     from graphiti_core.embedder.openai import OpenAIEmbedder, OpenAIEmbedderConfig
+    from openai import AsyncOpenAI
 
     key = memory.openai_api_key.get_secret_value() if memory.openai_api_key else None
     return OpenAIEmbedder(
@@ -57,7 +58,8 @@ def _embedder(settings: Settings, usage_sink: UsageSink | None = None) -> Embedd
             embedding_model=memory.embedding_model,
             embedding_dim=memory.embedding_dim,
             base_url=memory.openai_base_url,
-        )
+        ),
+        client=AsyncOpenAI(api_key=key, base_url=memory.openai_base_url, max_retries=0),
     )
 
 
@@ -95,6 +97,10 @@ def build_graphiti_client(settings: Settings, usage_sink: UsageSink | None = Non
     password = settings.neo4j.password.get_secret_value() if settings.neo4j.password else None
     model_name, dim = active_embedding(settings)
     real = _embedder(settings, usage_sink)
+    # Voyage meters at its HTTP boundary. OpenAI only exposes vectors here, so meter the
+    # raw attempt before adding retries to preserve failures that later succeed.
+    if settings.memory.embedder != "voyage":
+        real = MeteredEmbedder(real, model=model_name, sink=usage_sink)
     if settings.memory.embedder in ("openai", "voyage"):
         from vera.adapters.graph.resilient import ResilientEmbedder
         from vera.adapters.resilience.policy import build_resilience_policy
@@ -105,14 +111,6 @@ def build_graphiti_client(settings: Settings, usage_sink: UsageSink | None = Non
                 settings.resilience, name=f"{settings.memory.embedder}-embedder"
             ),
         )
-    # Meter inside the cache so only real (cache-miss) provider calls are counted.
-    # Voyage reports exact usage at its HTTP boundary. Other embedders expose only vectors,
-    # so retain estimated metering for those providers.
-    metered = (
-        real
-        if settings.memory.embedder == "voyage"
-        else MeteredEmbedder(real, model=model_name, sink=usage_sink)
-    )
     namespace = f"{model_name}:{dim}"
     l2 = None
     if settings.resilience.valkey_url:
@@ -122,7 +120,7 @@ def build_graphiti_client(settings: Settings, usage_sink: UsageSink | None = Non
 
         client = Redis.from_url(settings.resilience.valkey_url)  # pyright: ignore[reportUnknownMemberType]
         l2 = ValkeyEmbeddingCache(client)
-    embedder = CachingEmbedder(metered, namespace=namespace, l2=l2)
+    embedder = CachingEmbedder(real, namespace=namespace, l2=l2)
     common = {
         "embedder": embedder,
         "llm_client": _llm_client(settings, usage_sink),
@@ -156,12 +154,19 @@ def build_embedder(settings: Settings, usage_sink: UsageSink | None = None) -> o
     model_name, dim = active_embedding(settings)
     namespace = f"{model_name}:{dim}"
     real = _embedder(settings, usage_sink)
-    metered = (
-        real
-        if settings.memory.embedder == "voyage"
-        else MeteredEmbedder(real, model=model_name, sink=usage_sink)
-    )
-    cached = CachingEmbedder(metered, namespace=namespace)
+    if settings.memory.embedder != "voyage":
+        real = MeteredEmbedder(real, model=model_name, sink=usage_sink)
+    if settings.memory.embedder in ("openai", "voyage"):
+        from vera.adapters.graph.resilient import ResilientEmbedder
+        from vera.adapters.resilience.policy import build_resilience_policy
+
+        real = ResilientEmbedder(
+            real,
+            build_resilience_policy(
+                settings.resilience, name=f"{settings.memory.embedder}-embedder"
+            ),
+        )
+    cached = CachingEmbedder(real, namespace=namespace)
     return GraphitiEmbedderAdapter(cached)
 
 

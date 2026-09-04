@@ -6,6 +6,7 @@ RFC 9457 problem+json error handling, and the routers.
 
 from __future__ import annotations
 
+import os
 import uuid
 
 from fastapi import FastAPI, Request
@@ -18,6 +19,7 @@ from vera import __version__
 from vera.config.settings import get_settings
 from vera.entrypoints.api.lifespan import lifespan
 from vera.entrypoints.api.routers import health, identity, knowledge, memory
+from vera.entrypoints.evaluation_budget import EvaluationBudgetMiddleware
 from vera.observability import bind_log_context, clear_log_context, get_logger
 from vera.observability.metrics import record_write_failure
 from vera.shared.errors import VeraError
@@ -96,6 +98,9 @@ def create_app() -> FastAPI:
         )
     app.add_middleware(WriteFailureMiddleware)
     app.add_middleware(CorrelationIdMiddleware)
+    evaluation_scope = os.environ.get("VERA_EVAL_SCOPE_ID")
+    if evaluation_scope and settings.environment != "prod":
+        app.add_middleware(EvaluationBudgetMiddleware, scope_id=evaluation_scope)
     app.add_exception_handler(VeraError, _on_infra_error)
     app.add_exception_handler(Exception, _on_unhandled_error)
 

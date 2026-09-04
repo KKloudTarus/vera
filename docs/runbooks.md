@@ -53,9 +53,11 @@ at runtime (invariant 12). Three non-superuser roles, created by migration `c9e2
 - `vera_worker` (BYPASSRLS, read/write): the worker and projection paths, which write across
   groups and always filter `group_id` explicitly.
 
-Deployment: give each process a login role that is a member of the matching role, or set the
-role on connect. The RLS boundary remains the enforcing control for the tenant path; the
-BYPASSRLS roles are used only by trusted server-side paths that pass explicit group filters.
+Deployment uses `vera_runtime` for API, MCP, bootstrap, and calibration. It can assume
+`vera_app` and `vera_trusted`. The worker uses `vera_worker_runtime`, which can also assume
+`vera_worker`. Only migration and role-provisioning jobs receive the schema-owner credential.
+The RLS boundary remains the enforcing control for the tenant path; BYPASSRLS roles are used
+only by trusted server-side paths that pass explicit group filters.
 
 ## Benchmarking
 
@@ -177,8 +179,9 @@ the parity and fixed-query checks. Keep PostgreSQL facts and raw artifacts uncha
 
 **Owner:** operations
 
-**Rollout:** Grant each login role membership in only its required `vera_app`, `vera_trusted`, or
-`vera_worker` role. Test tenant isolation and cross-scope worker/read operations with the canary
+**Rollout:** Run `deploy/postgres/provision-runtime.sh` after migrations. Confirm that
+`vera_runtime` cannot assume `vera_worker` and that `vera_worker_runtime` can assume all three
+runtime roles. Test tenant isolation and cross-scope worker/read operations with the canary
 credentials, then set `VERA_DB__ROLE_ENFORCEMENT=true` one process class at a time.
 
 **Rollback:** Set `VERA_DB__ROLE_ENFORCEMENT=false` and restart the affected process class. Keep

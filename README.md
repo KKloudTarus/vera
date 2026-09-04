@@ -413,7 +413,9 @@ processes plus PostgreSQL, a graph backend, Valkey, and MinIO), the Helm chart i
 it pulls the published image `ghcr.io/kkloudtarus/vera`, so no local build is needed:
 
 ```bash
-helm install vera deploy/helm/vera -n vera --create-namespace --set graph.backend=falkordb
+helm install vera deploy/helm/vera -n vera --create-namespace \
+  --set image.digest=sha256:<approved-64-character-digest> \
+  --set graph.backend=falkordb
 ```
 
 ## Getting Started
@@ -432,12 +434,12 @@ make run-worker       # ingestion worker
 
 ### Container Images
 
-One image runs all three processes; they differ only by the command. Pull the published
-image, or build it locally.
+One image runs all three processes; they differ only by the command. Production deployments use
+the immutable digest recorded by the release workflow. Local development may build its own tag.
 
 ```bash
-docker pull ghcr.io/kkloudtarus/vera:latest  # published to GHCR by the release workflow
-docker build -t vera:local .                 # or build: multi-stage, non-root, runtime deps only
+docker pull ghcr.io/kkloudtarus/vera@sha256:<approved-64-character-digest>
+docker build -t vera:local .                 # local development only
 docker compose --profile app up --build      # migrate, then api (:8000), worker, mcp (:8080)
 ```
 

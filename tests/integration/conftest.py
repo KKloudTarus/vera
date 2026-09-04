@@ -69,7 +69,8 @@ _MUTABLE_TABLES = (
     "extraction_runs, chunks, "
     "reviews, candidate_claims, entity_aliases, canonical_entities, artifact_versions, artifacts, "
     "knowledge_sources, memberships, credentials, service_accounts, principals, sync_jobs, "
-    "sync_cursors, projects, workspaces, organizations, audit_events, llm_usage"
+    "sync_cursors, projects, workspaces, organizations, audit_events, llm_usage, "
+    "provider_budget_reservations, provider_run_budget_reservations"
 )
 
 
